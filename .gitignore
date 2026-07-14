@@ -1,0 +1,79 @@
+# Byte-compiled / optimized
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# Test / coverage / type caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Julia
+*.jl.cov
+*.jl.mem
+/Manifest.toml
+
+# Ray
+/tmp/ray/
+ray_results/
+
+# Data artifacts / large outputs
+*.parquet
+*.h5
+*.hdf5
+*.npy
+*.npz
+*.pkl
+*.db
+
+# App runtime state (streamlit) — keep config JSONs in src/data tracked
+streamlit_app/data/runs/
+streamlit_app/data/uploads/
+streamlit_app/data/state_*.json
+streamlit_app/data/cluster.json
+*.MDB
+*.mdb
+# …but keep the SRS/EPFD test fixtures under docs/ tracked
+!docs/test_data/*.MDB
+!docs/test_data/*.mdb
+# Large downloaded ITU filing fixtures — fetched from a GitHub release, not tracked
+docs/test_data/NGSO_CRC_filings/
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Métodos de Agregação EPFD↓ — Ilustração 3D (Resolution 76)</title>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+    background: #0a0e17; color: #e6eaf2; font-family: system-ui, -apple-system, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  /* ---- Header / tabs ---- */
+  #header { padding: 10px 18px; background: rgba(10,14,23,0.92);
+    border-bottom: 1px solid rgba(255,255,255,0.10); display: flex; align-items: center;
+    gap: 18px; flex-wrap: wrap; z-index: 20; }
+  #header h1 { font-size: 15px; margin: 0; font-weight: 700; color: #4fd1c5; white-space: nowrap; }
+  #header h1 small { color: #94a3b8; font-weight: 400; font-size: 11px; margin-left: 6px; }
+  #tabs { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; justify-content: flex-end; }
+  .tab { background: #141a26; border: 1px solid rgba(255,255,255,0.10); color: #cbd5e0;
+    padding: 6px 10px; border-radius: 7px; cursor: pointer; font-size: 11px; font-weight: 600;
+    transition: all .15s; }
+  .tab:hover { border-color: #4fd1c5; color: #fff; }
+  .tab.active { background: #4fd1c5; color: #06231f; border-color: #4fd1c5; }
+  .tab .num { opacity: .7; font-weight: 700; margin-right: 5px; }
+
+  /* ---- Main split ---- */
+  #main { flex: 1; display: flex; min-height: 0; overflow: hidden; --panel-width: 380px; }
+  #stage { position: relative; flex: 1; min-width: 0; overflow: hidden; }
+  #canvas-wrap { position: absolute; inset: 0; overflow: hidden; }
+  #canvas-wrap canvas { display: block; width: 100% !important; height: 100% !important; }
+  .gfx-fallback { padding: 24px; color: #94a3b8; font-size: 13px; line-height: 1.55; max-width: 420px; }
+
+  /* on-canvas overlays */
+  #scene-title { position: absolute; top: 14px; left: 18px; z-index: 5;
+    background: rgba(10,14,23,0.7); padding: 6px 12px; border-radius: 6px;
+    border-left: 3px solid #4fd1c5; font-size: 13px; font-weight: 600; pointer-events: none; }
+  #scene-title small { display:block; color:#94a3b8; font-weight: 400; font-size: 11px; margin-top: 2px;}
+  #controls-bar { position: absolute; bottom: 14px; left: 18px; z-index: 5; display: flex; gap: 8px; }
+  .ctl { background: rgba(20,26,38,0.9); border: 1px solid rgba(255,255,255,0.12); color: #e6eaf2;
+    padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .ctl:hover { border-color: #4fd1c5; }
+  #legend { position: absolute; bottom: 14px; right: 18px; z-index: 5;
+    background: rgba(10,14,23,0.82); border: 1px solid rgba(255,255,255,0.08);
+    padding: 9px 13px; border-radius: 6px; font-size: 11px; max-width: 240px; }
+  #legend .row { display:flex; align-items:center; gap:7px; margin: 3px 0; }
+  #legend .dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+  #legend .bar { width: 11px; height: 11px; flex-shrink: 0; }
+
+  /* ---- Side panel ---- */
+  #panel-resizer {
+    width: 7px; flex-shrink: 0; cursor: col-resize; touch-action: none;
+    position: relative; z-index: 6; background: rgba(255,255,255,0.06);
+    transition: background .15s;
+  }
+  #panel-resizer:hover, #panel-resizer.dragging { background: rgba(79,209,197,0.35); }
+  #panel-resizer::after {
+    content: ""; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: 3px; height: 36px; border-radius: 2px; background: rgba(255,255,255,0.18);
+  }
+  #panel-resizer:hover::after, #panel-resizer.dragging::after { background: rgba(79,209,197,0.85); }
+  body.panel-resizing { cursor: col-resize !important; user-select: none; }
+  body.panel-resizing #stage { pointer-events: none; }
+  #panel { width: var(--panel-width); min-width: 260px; flex-shrink: 0; background: #0d1320;
+    overflow-y: auto; padding: 18px 20px; position: relative; z-index: 5; }
+  #panel h2 { font-size: 16px; margin: 0 0 4px; color: #4fd1c5; }
+  #panel .qline { font-size: 12px; color: #fbbf24; font-style: italic; margin: 0 0 14px; }
+  #panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #7dd3c0;
+    margin: 18px 0 7px; border-bottom: 1px solid rgba(255,255,255,0.07); padding-bottom: 4px; }
+  #panel p { font-size: 13px; line-height: 1.55; color: #cbd5e0; margin: 7px 0; }
+  #panel ul { margin: 7px 0; padding-left: 18px; }
+  #panel li { font-size: 12.5px; line-height: 1.5; color: #cbd5e0; margin: 4px 0; }
+  #panel .formula { background: #060912; border: 1px solid rgba(79,209,197,0.25);
+    border-radius: 6px; padding: 11px 13px; font-family: ui-monospace, monospace; font-size: 13px;
+    color: #7dd3c0; margin: 10px 0; overflow-x: auto; white-space: nowrap; }
+  #panel .tag { display:inline-block; font-size:10px; font-weight:700; padding:2px 8px; border-radius:10px;
+    margin-bottom:8px; text-transform:uppercase; letter-spacing:.05em; }
+  .tag-cost-low { background:#14532d; color:#86efac; }
+  .tag-cost-mid { background:#713f12; color:#fde047; }
+  .tag-cost-high { background:#7f1d1d; color:#fca5a5; }
+  #ccdf-box { margin-top: 12px; }
+  #ccdf-canvas { width: 100%; height: 190px; background: #060912;
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; }
+  .ccdf-caption { font-size: 11px; color: #94a3b8; margin-top: 6px; line-height: 1.4; }
+  .hint { font-size: 11px; color: #64748b; margin-top: 16px; border-top: 1px dashed rgba(255,255,255,0.1);
+    padding-top: 10px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>🛰️ Métodos de Agregação EPFD↓ <small>Resolution 76 · Stage 1 · 5 métodos · ilustração conceitual (fora de escala)</small></h1>
+    <div id="tabs">
+      <button class="tab active" data-m="1"><span class="num">1</span>Convolução das CCDFs</button>
+      <button class="tab" data-m="2"><span class="num">2</span>Convolução no grid</button>
+      <button class="tab" data-m="3"><span class="num">3</span>Simulação conjunta</button>
+      <button class="tab" data-m="4"><span class="num">4</span>Por WCG</button>
+      <button class="tab" data-m="5"><span class="num">5</span>Stage 1 WP 4A</button>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="stage">
+      <div id="canvas-wrap"></div>
+      <div id="scene-title"></div>
+      <div id="controls-bar">
+        <button class="ctl" id="btn-play">⏸ Pausar</button>
+        <button class="ctl" id="btn-rotate">⟲ Auto-girar: on</button>
+        <button class="ctl" id="btn-reset">⤢ Reset câmera</button>
+      </div>
+      <div id="legend"></div>
+    </div>
+
+    <div id="panel-resizer" role="separator" aria-orientation="vertical"
+      aria-label="Redimensionar painel lateral" title="Arraste para ajustar a largura do painel"></div>
+    <div id="panel"><p style="color:#64748b;font-size:13px;margin:0">Carregando explicações…</p></div>
+  </div>
+</div>
+
+<script>
+// ============================================================================
+//  Geometria comum
+// ============================================================================
+const R_EARTH = 1.0;      // raio Terra (unidade)
+const R_LEO   = 1.55;     // órbitas NGSO (exagerado p/ visibilidade)
+const R_GSO   = 4.2;      // arco geoestacionário (exagerado)
+const DEG = Math.PI / 180;
+
+// lat/lon -> Vec3 (Y = polo norte)
+function latLon(latDeg, lonDeg, r = R_EARTH) {
+  const la = latDeg * DEG, lo = lonDeg * DEG;
+  return new THREE.Vector3(
+    r * Math.cos(la) * Math.cos(lo),
+    r * Math.sin(la),
+    r * Math.cos(la) * Math.sin(lo)
+  );
+}
+
+// viridis-ish ramp (t in 0..1) -> css
+function ramp(t) {
+  t = Math.max(0, Math.min(1, t));
+  const r = Math.round(255 * Math.pow(t, 1.25));
+  const g = Math.round(210 * (1 - Math.pow(Math.abs(t - 0.55) * 2, 2)));
+  const b = Math.round(235 * Math.pow(1 - t, 1.1));
+  return `rgb(${r},${g},${b})`;
+}
+
+// ============================================================================
+//  Painel didático + CCDF mini-plot (inicializa antes do WebGL)
+// ============================================================================
+const PANEL = {
+  1: {
+    title: "Método 1 — Convolução das CCDFs pós-WCG",
+    q: "“Qual a CCDF agregada assumindo independência estatística entre N sistemas, cada um no seu pior caso geométrico individual?”",
+    cost: ["tag-cost-low", "Baixo — N × T_S1503 (WCGA + temporal rigorosos)"],
+    formula: "CCDF_agg = CCDF₁ ⊛ CCDF₂ ⊛ … ⊛ CCDF_N",
+    body: `<p>Cada sistema NGSO é simulado <b>isoladamente</b> no seu próprio <i>Worst-Case Geometry</i> — a geometria (ES lat/lon, GSO lon) que maximiza o EPFD↓ single-entry daquele sistema. Resultado por sistema: uma CCDF, <code>P[EPFD↓ &gt; x]</code>.</p>
+      <p>A agregação assume <b>independência estatística</b>: soma de potências independentes ⇒ <b>convolução</b> das distribuições (em escala linear de potência).</p>
+      <p><b>Custo:</b> trilha <b>rigorosa</b> S.1503-4 por filing — WCGA §D.3.1 + temporal §D.5 (<code>T_S1503</code>). Sem fator geográfico extra.</p>`,
+    sections: [
+      ["Premissas", `<ul><li>Independência temporal entre sistemas.</li><li>Cada sistema no seu próprio WCG — geometria muda entre os termos.</li></ul>`],
+      ["Custo", `<ul><li><b>N × T_S1503</b> — WCGA + temporal normativos por filing.</li><li>Convolução S.1588 é desprezível vs. simulação.</li><li>Menor custo <b>total</b> entre os cinco métodos.</li></ul>`],
+      ["Limitações", `<ul><li>A ES não pode estar em N WCGs distintos ao mesmo tempo.</li><li>Ignora correlação temporal real.</li><li>Método estatisticamente mais conservador.</li></ul>`],
+      ["Quando usar", `<ul><li>Triagem rápida, baixo custo.</li><li>Conformidade conservadora de Stage 1.</li></ul>`],
+    ],
+    ccdf: "single",
+    ccdfCap: "Convolução desloca a agregada para a direita (pior) e a torna mais íngreme — efeito da soma de variáveis independentes.",
+  },
+  2: {
+    title: "Método 2 — Convolução no grid Stage 1",
+    q: "“Qual o pior caso agregado sobre todo o globo + todos os apontamentos da antena GSO?”",
+    cost: ["tag-cost-high", "Alto em volume — N_geom × N × T_EPFD (sem WCGA)"],
+    formula: "envelope(p%) = máx sobre o grid { CCDF_ponto(p%) }",
+    body: `<p>Em vez de buscar um WCG por sistema, <b>varre todo o globo</b> num grid regular <code>(ES_lat, ES_lon, GSO_lon)</code> (S.1503-4 §D.6). Para cada tripleta: geometria <b>fixa</b> (<b>sem WCGA</b>), simula-se cada sistema NGSO e convoluem-se as N CCDFs ⇒ CCDF agregada daquele ponto.</p>
+      <p>Após varrer todo o grid, calcula-se o <b>envelope global</b>: para cada nível <code>p%</code>, o pior EPFD↓ observado em qualquer geometria.</p>
+      <p><b>Custo:</b> muitas corridas <code>T_EPFD</code> (só temporal, geometria fixa, <code>num_time_steps</code> relaxável). Custo <b>total</b> alto; cada célula <b>menos exigente</b> que <code>T_S1503</code>.</p>`,
+    sections: [
+      ["Premissas", `<ul><li>Mesma independência estatística da convolução (M1).</li><li>CCDF do ponto = tempo “se a ES estivesse naquele local <b>com aquele apontamento GSO</b>”.</li><li>Envelope = pior cenário regulatório em qualquer lugar do globo e qualquer GSO_lon do grid.</li></ul>`],
+      ["Custo", `<ul><li><b>N_geom × N × T_EPFD</b> — sem WCGA por ponto.</li><li>Grid default <b>30°</b> (ES lat/lon e GSO_lon), elevação mín. 10° — configuráveis; filtro geográfico opcional por país.</li><li><code>num_time_steps</code> configurável (ref. Obs2 518 400; Stage 1 admite valor relaxado).</li><li>Ex.: grid 10° + Obs2 + 2 sist. ≈ 26 G <b>passos temporais</b>, não corridas WCGA+temporal.</li></ul>`],
+      ["Limitações", `<ul><li>Mesma limitação de correlação do M1.</li><li>Envelope não é CCDF “real” — é fronteira sobre o grid (máx. por percentil, escala linear).</li><li>Com truncamento S.1588 ativo, o envelope respeita o piso de probabilidade dos insumos (não estende curvas truncadas).</li></ul>`],
+      ["Quando usar", `<ul><li>Análise exaustiva: <b>onde</b> ocorre o pior caso.</li><li>Drill-down regulatório: regiões geográficas + apontamentos GSO críticos.</li><li>ES de localização variável ou desconhecida; recorte por país via filtro geográfico.</li></ul>`],
+    ],
+    ccdf: "envelope",
+    ccdfCap: "Cada ponto do grid gera uma CCDF (cinza). O envelope (vermelho) é a fronteira pior — máx por nível de probabilidade.",
+  },
+  3: {
+    title: "Método 3 — Simulação conjunta (Method 2B)",
+    q: "“Qual a CCDF agregada quando as N constelações são simuladas simultaneamente numa janela temporal comum, preservando coerência?”",
+    cost: ["tag-cost-mid", "Médio-alto — WCGA agregado + sim conjunta + N × T_S1503 (post_sum)"],
+    formula: "EPFD_total(t) = 10·log₁₀( Σᵢ 10^(EPFDᵢ(t)/10) )",
+    body: `<p>As N constelações são <b>fundidas numa megaconstelação</b> e propagadas no <b>mesmo t₀</b>, mesmo passo. A cada instante <code>t</code> soma-se a contribuição EPFD↓ de <b>todas</b>. A CCDF vem da série temporal somada — <b>distribuição real</b>, sem assumir independência.</p>
+      <p>Busca WCG sobre o agregado iterando as <b>órbitas únicas</b> da megaconstelação (chave: a, e, i, máscara) e ficando com o pior EPFD; alternativa: <b>geometria manual</b> (ES lat/lon, GSO_lon).</p>
+      <p><b>Custo:</b> trilha <b>rigorosa</b>: 1 WCGA agregado + 1 corrida conjunta, <b>mais</b> N corridas single-entry completas para o complemento <code>post_sum</code>.</p>`,
+    sections: [
+      ["Premissas", `<ul><li>Coerência temporal preservada — picos coincidentes capturados.</li><li>Geometria/tempo/t₀ comuns a todas as constelações.</li><li>Soma linear de potências = física real da interferência.</li></ul>`],
+      ["Custo", `<ul><li><b>1 × WCGA</b> na megaconstelação (órbitas únicas) + <b>1 × T_S1503</b> joint.</li><li><code>post_sum</code>: + <b>N × T_S1503</b> — corridas single-entry recalculadas dentro do método (não reutiliza M1).</li><li>CCDF joint sem truncamento; truncamento S.1588 (se ativo) aplica-se só ao <code>post_sum</code>.</li></ul>`],
+      ["vs. Método 1", `<ul><li>Sem suposição de independência (distribuição real).</li><li>Picos coincidentes: M1 subestima · M3 captura.</li><li>Geometria comum (não um WCG por sistema).</li></ul>`],
+      ["Análise complementar", `<ul><li><code>post_sum</code> = convolução (M1) calculada em paralelo, para comparar e medir o erro da independência.</li></ul>`],
+    ],
+    ccdf: "joint",
+    ccdfCap: "Joint (verde): distribuição real da soma temporal — captura picos coincidentes que a convolução (M1) pode distorcer.",
+  },
+  4: {
+    title: "Método 4 — Convolução por WCG single-entry",
+    q: "“Qual a CCDF agregada em cada um dos N WCGs single-entry? (uma curva por WCG)”",
+    cost: ["tag-cost-mid", "Médio — N × T_S1503 + N² × T_EPFD"],
+    formula: "CCDF_agg_i = CCDF_{1,i} ⊛ … ⊛ CCDF_{N,i}  @ WCG g_i",
+    body: `<p>Cada filing tem seu <b>WCG single-entry</b> (WCGA §D.3.1). Em cada ancoragem <code>g_i</code>, simulam-se <b>todos</b> os N filings na mesma geometria fixa (sem nova WCGA) e convoluem-se as CCDFs → <b>N curvas agregadas</b>.</p>
+      <p>Diferente do Método 1 (cada filing no seu WCG na convolução) e do Método 2 (grid uniforme sem WCGA).</p>
+      <p><b>Custo:</b> fase 1 <b>rigorosa</b> (WCGA por filing, só para localizar os WCGs); fase 2 <b>relaxada</b> — todos os <b>N×N</b> pares (ancoragem, filing) re-simulados em geometria fixa. Headline = <b>pior das N ancoragens</b> (maior EPFD máx.).</p>`,
+    sections: [
+      ["Premissas", `<ul><li>Independência estatística (convolução).</li><li>Geometria comum a todos os filings <b>dentro</b> de cada ancoragem.</li><li>WCGs não re-otimizados para o agregado.</li></ul>`],
+      ["Custo", `<ul><li>Fase 1: <b>N × T_S1503</b> (WCGA + temporal) — localiza os N WCGs.</li><li>Fase 2: <b>N² × T_EPFD</b> em geometria fixa — a CCDF da fase 1 <b>não</b> é reutilizada (diagonal re-simulada).</li><li>Ex.: N=5 → 5 rigorosas + 25 relaxadas.</li></ul>`],
+      ["Limitações", `<ul><li>Só N pontos WCG — não cobre o globo como M2/M5.</li><li>Não substitui joint (M3) para coerência temporal.</li></ul>`],
+      ["Quando usar", `<ul><li>Auditar <b>inhomogeneidade entre ancoragens</b>.</li><li>Comparar WCGs alegados por operadores distintos.</li></ul>`],
+    ],
+    ccdf: "perwcg",
+    ccdfCap: "Cada cor = CCDF agregada num WCG distinto. Mesma convolução, geometrias de ancoragem diferentes → curvas distintas.",
+  },
+  5: {
+    title: "Método 5 — Stage 1 Process (WP 4A doc R23-WP4A-C-1064 Anexo 21)",
+    q: "“O processo simplificado da Res. 76 indica potencial excedência dos limites agregados em alguma geometria GSO — gatilho para reunião de consulta / Stage 2?”",
+    cost: ["tag-cost-high", "Alto em volume — N_geom × N × T_EPFD (Steps 2–3); Step 4 é comparação leve"],
+    formula: "Step 3: CDF_agg(p,g) = convolução{ PDF_i(p,g) } · Step 4: CDF_agg vs. Tabelas 1A–1D Res. 76 (por geometria g)",
+    body: `<p>Implementação do <b>Stage 1 Process</b> (Anexo 21 ao doc 1064) — processo <b>simplificado</b> para estimar EPFD↓ agregado e <b>disparar Stage 2</b> / reunião de consulta (resolves 3 da Res. 76 Rev.WRC-23), <b>não</b> a metodologia definitiva de compliance.</p>
+      <p><b>Step 1</b> — Dados: identificar estações operacionais e características técnicas; organizar <b>Mask DB</b> (S.1503 §B4) e <b>SRS DB</b> (parâmetros orbitais, associação máscara↔satélite). No motor: upload SRS <code>.mdb</code> + seleção dos filings.</p>
+      <p><b>Step 2</b> — Para cada sistema NGSO e cada geometria GSO do grid: aplicar algoritmo S.1503 (§D.5.1 EPFD↓) com geometria fixa (<b>sem WCGA</b> no grid Stage 1) → PDF/CDF com bins de <b>0,1 dB</b> por <code>(lat_ES, lon_ES, Δlon_GSO)</code>. Grid WP 4A: lat −75°…75° e lon −180°…165° a <b>15°</b>; Δlon GSO 0°…75° a 15° (1 248 geometrias; <b>29 únicas</b> se simetria longitudinal/hemisférica).</p>
+      <p><b>Step 3</b> — Para cada geometria: <b>convoluir</b> os PDFs de todos os sistemas relevantes → PDF agregado → CDF agregada (uma curva por geometria × tamanho de antena ES). O motor executa a convolução por tripleta e persiste <b>N_geom CDFs</b> — <b>sem envelope global</b> (diferente do M2).</p>
+      <p><b>Step 4</b> — Comparar cada CDF agregada com os limites das Tabelas 1A–1D da Res. 76; se algum % de tempo excede, há <b>potencial</b> de excedência nessa geometria → atenção via Stage 2. No motor: comparação vs. Res. 76 fica no pós-processamento / Results (sem veredicto único automático).</p>
+      <p><b>Custo de simulação:</b> <code>N_geom × N × T_EPFD</code> (Step 2); convolução Step 3 desprezível vs. temporal.</p>`,
+    sections: [
+      ["Premissas", `<ul><li>Processo <b>simplificado</b> — não modela operações NGSO com fidelidade do Stage 2.</li><li>Independência estatística na convolução (Step 3), como M1/M2.</li><li>Geometria comum a todos os filings em cada ponto do grid.</li><li>Resultados <b>apenas informativos</b> (doc 1064): não constituem evidência de excedência nem base para adaptar operações.</li></ul>`],
+      ["Grid (doc 1064)", `<ul><li>WP 4A recomenda granularidade <b>15°</b> (lat ES, lon ES, Δlon GSO).</li><li>Com simetria longitudinal/hemisférica: 1 248 → <b>29 geometrias únicas</b> replicáveis.</li><li>Motor: grid configurável (default 30°); filtro por país opcional; <code>num_time_steps</code> relaxável para Stage 1.</li></ul>`],
+      ["Custo", `<ul><li><b>N_geom × N × T_EPFD</b> — Step 2 (sem WCGA por ponto).</li><li>Truncamento S.1588 opcional na convolução (Step 3).</li><li>Step 1 = ingestão de dados; Step 4 = comparação leve sobre N_geom curvas.</li></ul>`],
+      ["vs. Método 2", `<ul><li>M2 (Study 2): mesma simulação + convolução por ponto, mas colapsa em <b>1 envelope</b> global.</li><li>M5: Steps 2+3 do Stage 1 — mantém <b>todas</b> as CDFs agregadas por geometria para Step 4 individual.</li><li>Mesmo custo bruto de simulação.</li></ul>`],
+      ["Limitações", `<ul><li>Simetria do doc 1064 não reduzida automaticamente no motor.</li><li>Reuniões subsequentes: apenas novos satélites sobre o grid (doc) — não implementado como diff automático.</li><li>Em discussão no WP 4A (maio 2026); método Stage 1 ainda não acordado.</li></ul>`],
+      ["Quando usar", `<ul><li>Estimativa conservadora para <b>gatilho</b> de reunião de consulta (resolves 3 Res. 76).</li><li>Exportar CDF/PDF por geometria padronizada (XML estruturado no doc) para análise regulatória.</li></ul>`],
+    ],
+    ccdf: "gridconv",
+    ccdfCap: "Step 3: cada geometria do grid → CDF agregada (cinza) após convolução dos N sistemas. Step 4: cada curva comparada à Res. 76 — sem envelope global do M2.",
+  },
+};
+
+function legendInline(ctx, W, items) {
+  ctx.font = "10px ui-monospace, monospace"; ctx.textAlign = "left";
+  let y = 16;
+  items.forEach(([col, txt]) => {
+    ctx.fillStyle = col; ctx.fillRect(W - 122, y - 7, 14, 3);
+    ctx.fillStyle = "#cbd5e0"; ctx.fillText(txt, W - 104, y - 3);
+    y += 14;
+  });
+}
+
+function drawCCDF(kind) {
+  const c = document.getElementById("ccdf-canvas");
+  if (!c || !c.clientWidth || !c.clientHeight) return;
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr; c.height = H * dpr;
+  const ctx = c.getContext("2d");
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const m = { l: 42, r: 10, t: 14, b: 28 };
+  const EPFD_MIN = -220;
+  const EPFD_AXIS_MAX = -160;
+  const CCDF_MIN = 1e-5;
+  const epfdToX = db => (db - EPFD_MIN) / (EPFD_AXIS_MAX - EPFD_MIN);
+  const px = db => m.l + epfdToX(db) * (W - m.l - m.r);
+  const ccdfToY = p => {
+    const clamped = Math.max(CCDF_MIN, Math.min(1, p));
+    const lo = Math.log10(CCDF_MIN), hi = 0;
+    return m.t + (1 - (Math.log10(clamped) - lo) / (hi - lo)) * (H - m.t - m.b);
+  };
+
+  // grade log + eixos
+  ctx.strokeStyle = "rgba(255,255,255,0.06)"; ctx.lineWidth = 1;
+  [1, 0.1, 0.01, 0.001, 0.0001].forEach(p => {
+    const y = ccdfToY(p);
+    ctx.beginPath(); ctx.moveTo(px(EPFD_MIN), y); ctx.lineTo(px(EPFD_AXIS_MAX), y); ctx.stroke();
+  });
+  ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(px(EPFD_MIN), ccdfToY(CCDF_MIN)); ctx.lineTo(px(EPFD_AXIS_MAX), ccdfToY(CCDF_MIN));
+  ctx.moveTo(px(EPFD_MIN), ccdfToY(1)); ctx.lineTo(px(EPFD_MIN), ccdfToY(CCDF_MIN)); ctx.stroke();
+
+  ctx.fillStyle = "#64748b"; ctx.font = "9px ui-monospace, monospace"; ctx.textAlign = "left";
+  ctx.fillText("100%", 4, ccdfToY(1) + 3);
+  ctx.fillText("1%", 4, ccdfToY(0.01) + 3);
+  ctx.fillText("0.01%", 4, ccdfToY(0.0001) + 3);
+  ctx.fillText("0", 4, ccdfToY(CCDF_MIN) + 3);
+  ctx.textAlign = "center";
+  ctx.fillText(EPFD_MIN.toFixed(0), px(EPFD_MIN), H - 4);
+  ctx.fillText(EPFD_AXIS_MAX.toFixed(0), px(EPFD_AXIS_MAX), H - 4);
+  ctx.fillText("EPFD↓ (dBW/m²/40kHz)", px(-190), H - 4);
+
+  // CCDF empírica: patamar → descida → queda vertical a zero no EPFD máximo.
+  function ccdfCurve(color, dash, width, opts) {
+    opts = opts || {};
+    const epfdFlat = opts.epfdFlat != null ? opts.epfdFlat : -210;
+    const epfdKnee = opts.epfdKnee != null ? opts.epfdKnee : -200;
+    const epfdMax = opts.epfdMax;
+    const ccdfBeforeCliff = opts.ccdfBeforeCliff != null ? opts.ccdfBeforeCliff : 0.015;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width || 1.8;
+    ctx.setLineDash(dash || []);
+    ctx.beginPath();
+    ctx.moveTo(px(EPFD_MIN), ccdfToY(1));
+    ctx.lineTo(px(epfdFlat), ccdfToY(1));
+    const steps = 80;
+    for (let i = 0; i <= steps; i++) {
+      const epfd = epfdFlat + (i / steps) * (epfdMax - epfdFlat);
+      let p;
+      if (epfd <= epfdKnee) p = 1;
+      else {
+        const t = (epfd - epfdKnee) / (epfdMax - epfdKnee);
+        const logP = Math.log10(1) + t * (Math.log10(ccdfBeforeCliff) - Math.log10(1));
+        p = Math.pow(10, logP);
+      }
+      ctx.lineTo(px(epfd), ccdfToY(p));
+    }
+    ctx.lineTo(px(epfdMax), ccdfToY(CCDF_MIN));
+    ctx.stroke();
+    ctx.setLineDash([]);
+    return { epfdMax };
+  }
+
+  if (kind === "single") {
+    ccdfCurve("#38bdf8", [5, 4], 1.5, { epfdFlat: -205, epfdKnee: -195, epfdMax: -187, ccdfBeforeCliff: 0.02 });
+    ccdfCurve("#c084fc", [3, 3], 1.5, { epfdFlat: -205, epfdKnee: -196, epfdMax: -188, ccdfBeforeCliff: 0.018 });
+    ccdfCurve("#ff8c42", [], 2.2, { epfdFlat: -200, epfdKnee: -185, epfdMax: -171, ccdfBeforeCliff: 0.012 });
+    legendInline(ctx, W, [["#38bdf8", "single-entry 1"], ["#c084fc", "single-entry 2"], ["#ff8c42", "agregada (conv.)"]]);
+  } else if (kind === "envelope") {
+    [-195, -190, -185, -180, -175, -170].forEach((epfdMax, k) =>
+      ccdfCurve("rgba(148,163,184,0.45)", [], 1.0, { epfdFlat: -210, epfdKnee: -205 + k * 2, epfdMax, ccdfBeforeCliff: 0.02 - k * 0.002 })
+    );
+    ccdfCurve("#ff3b3b", [], 2.4, { epfdFlat: -198, epfdKnee: -178, epfdMax: -165, ccdfBeforeCliff: 0.01 });
+    legendInline(ctx, W, [["rgba(148,163,184,0.7)", "CCDF por ponto"], ["#ff3b3b", "envelope (pior)"]]);
+  } else if (kind === "joint") {
+    ccdfCurve("#38bdf8", [5, 4], 1.3, { epfdFlat: -205, epfdKnee: -195, epfdMax: -187, ccdfBeforeCliff: 0.02 });
+    ccdfCurve("#ff8c42", [4, 3], 1.5, { epfdFlat: -200, epfdKnee: -185, epfdMax: -171, ccdfBeforeCliff: 0.012 });
+    ccdfCurve("#34d399", [], 2.4, { epfdFlat: -202, epfdKnee: -190, epfdMax: -178, ccdfBeforeCliff: 0.014 });
+    legendInline(ctx, W, [["#38bdf8", "single"], ["#ff8c42", "post_sum (conv.)"], ["#34d399", "joint"]]);
+  } else if (kind === "perwcg") {
+    ccdfCurve("#ff8c42", [], 2.0, { epfdFlat: -203, epfdKnee: -188, epfdMax: -176, ccdfBeforeCliff: 0.013 });
+    ccdfCurve("#c084fc", [], 2.0, { epfdFlat: -204, epfdKnee: -192, epfdMax: -169, ccdfBeforeCliff: 0.011 });
+    ccdfCurve("#38bdf8", [], 2.0, { epfdFlat: -201, epfdKnee: -186, epfdMax: -173, ccdfBeforeCliff: 0.012 });
+    legendInline(ctx, W, [["#ff8c42", "agg @ WCG A"], ["#c084fc", "agg @ WCG B"], ["#38bdf8", "agg @ WCG C"]]);
+  } else if (kind === "gridconv") {
+    [-195, -190, -185, -180, -175, -170].forEach((epfdMax, k) =>
+      ccdfCurve("rgba(148,163,184,0.45)", [], 1.0, { epfdFlat: -210, epfdKnee: -205 + k * 2, epfdMax, ccdfBeforeCliff: 0.02 - k * 0.002 })
+    );
+    legendInline(ctx, W, [["rgba(148,163,184,0.7)", "CCDF agregada por ponto (conv.)"]]);
+  }
+}
+
+function renderPanel(m) {
+  const d = PANEL[m];
+  if (!d) return;
+  const sectionsHtml = d.sections.map(([h, html]) => `<h3>${h}</h3>${html}`).join("");
+  document.getElementById("panel").innerHTML = `
+    <span class="tag ${d.cost[0]}">${d.cost[1]}</span>
+    <h2>${d.title}</h2>
+    <p class="qline">${d.q}</p>
+    <div class="formula">${d.formula}</div>
+    ${d.body}
+    ${sectionsHtml}
+    <h3>CCDF — leitura conceitual</h3>
+    <div id="ccdf-box"><canvas id="ccdf-canvas"></canvas>
+      <div class="ccdf-caption">${d.ccdfCap}</div></div>
+    <div class="hint"><b>T_S1503</b> = WCGA + temporal rigorosos (S.1503-4). <b>T_EPFD</b> = só temporal, geometria fixa, sem WCGA — timesteps configuráveis (em Stage 1, em média menos exigente).<br><b>Truncamento S.1588</b> (Anexo 1 §1), opcional nos métodos com convolução (M1–M5): piso explícito ou automático = menor % positiva entre as CCDFs de entrada.<br>Arraste para girar · scroll para zoom · botões abaixo controlam tempo e auto-rotação. Geometria fora de escala (LEO/GSO exagerados).</div>`;
+  requestAnimationFrame(() => drawCCDF(d.ccdf));
+}
+
+renderPanel(1);
+
+// ============================================================================
+//  Renderer / câmera / controles (únicos, reaproveitados por método)
+// ============================================================================
+const wrap = document.getElementById("canvas-wrap");
+let renderer, scene, camera, controls, gfxReady = false;
+let CAM_HOME;
+try {
+  if (typeof THREE === "undefined") throw new Error("Three.js não carregou");
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  wrap.appendChild(renderer.domElement);
+
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x070a12);
+
+  camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  CAM_HOME = new THREE.Vector3(6.5, 3.2, 7.5);
+  camera.position.copy(CAM_HOME);
+
+  if (typeof THREE.OrbitControls !== "function") throw new Error("OrbitControls não carregou");
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.autoRotate = true;
+  controls.autoRotateSpeed = 0.6;
+  controls.minDistance = 3;
+  controls.maxDistance = 25;
+  gfxReady = true;
+} catch (err) {
+  console.error(err);
+  wrap.innerHTML = "<div class=\"gfx-fallback\">Visualização 3D indisponível neste ambiente (WebGL ou scripts CDN). O painel lateral com as explicações permanece ativo — troque de aba para ler cada método.</div>";
+}
+
+if (gfxReady) {
+  // luzes + estrelas (decoração)
+  scene.add(new THREE.AmbientLight(0x8090b0, 0.85));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.9);
+  sun.position.set(5, 4, 6);
+  scene.add(sun);
+  (function stars() {
+    const g = new THREE.BufferGeometry();
+    const n = 1200, pos = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) {
+      const u = Math.random() * 2 - 1, th = Math.random() * Math.PI * 2, s = Math.sqrt(1 - u*u);
+      const rr = 40 + Math.random() * 20;
+      pos[i*3] = rr*s*Math.cos(th); pos[i*3+1] = rr*u; pos[i*3+2] = rr*s*Math.sin(th);
+    }
+    g.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    scene.add(new THREE.Points(g, new THREE.PointsMaterial({ color: 0x4a5578, size: 0.06 })));
+  })();
+
+  // Terra (esfera azul + graticule) — adicionada uma vez, sempre presente
+  function buildEarth() {
+    const grp = new THREE.Group();
+    const earth = new THREE.Mesh(
+      new THREE.SphereGeometry(R_EARTH, 48, 48),
+      new THREE.MeshPhongMaterial({ color: 0x12325a, emissive: 0x07182f, shininess: 8 })
+    );
+    grp.add(earth);
+    const wire = new THREE.Mesh(
+      new THREE.SphereGeometry(R_EARTH * 1.002, 24, 16),
+      new THREE.MeshBasicMaterial({ color: 0x2d6ea8, wireframe: true, transparent: true, opacity: 0.25 })
+    );
+    grp.add(wire);
+    const eqPts = [];
+    for (let a = 0; a <= 360; a += 4) eqPts.push(latLon(0, a, R_EARTH * 1.004));
+    grp.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(eqPts),
+      new THREE.LineBasicMaterial({ color: 0x5fd0c0, transparent: true, opacity: 0.5 })
+    ));
+    return grp;
+  }
+  scene.add(buildEarth());
+}
+
+// Arco GSO (anel equatorial)
+function buildGsoArc() {
+  const pts = [];
+  for (let a = 0; a <= 360; a += 2) pts.push(latLon(0, a, R_GSO));
+  return new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(pts),
+    new THREE.LineBasicMaterial({ color: 0xb08d2e, transparent: true, opacity: 0.4 })
+  );
+}
+
+// ---- fábricas de objetos ----
+const NGSO_SAT_R = 0.028;
+const GSO_SAT_R = 0.058;
+
+function makeSat(color, size = NGSO_SAT_R) {
+  return new THREE.Mesh(
+    new THREE.SphereGeometry(size, 10, 10),
+    new THREE.MeshBasicMaterial({ color })
+  );
+}
+function makeGsoSat(lonDeg, color = 0xf2c14e) {
+  const m = new THREE.Mesh(
+    new THREE.OctahedronGeometry(GSO_SAT_R),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  m.position.copy(latLon(0, lonDeg, R_GSO));
+  return m;
+}
+function makeES(latDeg, lonDeg, color = 0x4fd1c5) {
+  const p = latLon(latDeg, lonDeg, R_EARTH);
+  const cone = new THREE.Mesh(
+    new THREE.ConeGeometry(0.05, 0.14, 12),
+    new THREE.MeshBasicMaterial({ color })
+  );
+  cone.position.copy(p.clone().multiplyScalar(1.07));
+  cone.lookAt(p.clone().multiplyScalar(2));
+  cone.rotateX(Math.PI / 2);
+  return cone;
+}
+function makeLabel(text, color = "#e6eaf2") {
+  const c = document.createElement("canvas");
+  c.width = 256; c.height = 64;
+  const ctx = c.getContext("2d");
+  ctx.font = "bold 30px ui-monospace, monospace";
+  ctx.fillStyle = color;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(text, 128, 32);
+  const tex = new THREE.CanvasTexture(c);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(0.9, 0.225, 1);
+  return spr;
+}
+// linha-feixe ES->alvo reaproveitável
+function makeBeam(color) {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(new Float32Array(6), 3));
+  const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.85 }));
+  line.frustumCulled = false;
+  return line;
+}
+function setBeam(line, from, to) {
+  const p = line.geometry.attributes.position.array;
+  p[0]=from.x; p[1]=from.y; p[2]=from.z; p[3]=to.x; p[4]=to.y; p[5]=to.z;
+  line.geometry.attributes.position.needsUpdate = true;
+}
+
+// Constelação NGSO. Plano orbital: tilt (inclinação) + RAAN; satélites girando.
+function makeConstellation({ color, nSats, r = R_LEO, inc = 53, raan = 0, speed = 0.5, phase0 = 0 }) {
+  const orbitGroup = new THREE.Group();
+  orbitGroup.rotation.z = inc * DEG;
+  orbitGroup.rotation.y = raan * DEG;
+  const spin = new THREE.Group();
+  orbitGroup.add(spin);
+  // anel da órbita
+  const ringPts = [];
+  for (let a = 0; a <= 360; a += 4)
+    ringPts.push(new THREE.Vector3(r * Math.cos(a*DEG), 0, r * Math.sin(a*DEG)));
+  orbitGroup.add(new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints(ringPts),
+    new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.28 })
+  ));
+  const sats = [];
+  for (let i = 0; i < nSats; i++) {
+    const s = makeSat(color);
+    const a = (i / nSats) * Math.PI * 2;
+    s.userData.a0 = a;
+    s.position.set(r * Math.cos(a), 0, r * Math.sin(a));
+    spin.add(s);
+    sats.push(s);
+  }
+  return {
+    group: orbitGroup, sats, color,
+    update(t) { spin.rotation.y = phase0 + speed * t; }
+  };
+}
+
+// ============================================================================
+//  Mundo por método (limpo e reconstruído ao trocar de aba)
+// ============================================================================
+let methodRoot;
+if (gfxReady) {
+  methodRoot = new THREE.Group();
+  scene.add(methodRoot);
+}
+let updaters = [];   // funções (t) chamadas por frame
+let simTime = 0, playing = true;
+
+function clearMethod() {
+  if (!gfxReady) return;
+  scene.remove(methodRoot);
+  methodRoot.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) { (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.dispose()); }
+  });
+  methodRoot = new THREE.Group();
+  scene.add(methodRoot);
+  updaters = [];
+}
+
+const SYS_COLORS = [0xff8c42, 0xc084fc, 0x38bdf8, 0xf472b6];
+
+// ---- MÉTODO 1: cada sistema no seu próprio WCG ----
+function buildMethod1() {
+  clearMethod();
+  methodRoot.add(buildGsoArc());
+
+  // 3 sistemas, cada um com SUA ES (WCG distinto) + GSO sat + constelação + feixe
+  const setups = [
+    { es:[ 38,  20], gsoLon:  10, inc: 53, raan:  10, color: SYS_COLORS[0], name:"A" },
+    { es:[-25, 140], gsoLon: 150, inc: 70, raan: 120, color: SYS_COLORS[1], name:"B" },
+    { es:[ 10, -80], gsoLon: -75, inc: 33, raan: 230, color: SYS_COLORS[2], name:"C" },
+  ];
+  setups.forEach((s, idx) => {
+    const esPos = latLon(s.es[0], s.es[1]);
+    const gso = makeGsoSat(s.gsoLon, s.color);
+    methodRoot.add(gso);
+    methodRoot.add(makeES(s.es[0], s.es[1], s.color));
+    const lab = makeLabel("WCG " + s.name, "#" + s.color.toString(16).padStart(6,"0"));
+    lab.position.copy(esPos.clone().multiplyScalar(1.28));
+    methodRoot.add(lab);
+    // feixe desejado ES->GSO (referência, fino)
+    const want = makeBeam(s.color);
+    want.material.opacity = 0.35;
+    setBeam(want, esPos.clone().multiplyScalar(1.05), gso.position);
+    methodRoot.add(want);
+    // constelação
+    const con = makeConstellation({ color: s.color, nSats: 9, inc: s.inc, raan: s.raan, speed: 0.5 + idx*0.12 });
+    methodRoot.add(con.group);
+    // feixe de interferência ES->sat mais próximo do eixo ES-GSO
+    const intf = makeBeam(0xffffff);
+    methodRoot.add(intf);
+    const axis = gso.position.clone().sub(esPos).normalize();
+    updaters.push((t) => {
+      con.update(t);
+      scene.updateMatrixWorld(true);
+      // escolhe sat com menor ângulo α em relação ao eixo ES->GSO
+      let best = null, bestDot = -2;
+      const w = new THREE.Vector3();
+      con.sats.forEach(sat => {
+        sat.getWorldPosition(w);
+        const d = w.clone().sub(esPos).normalize().dot(axis);
+        if (d > bestDot) { bestDot = d; best = w.clone(); }
+      });
+      if (best) {
+        setBeam(intf, esPos.clone().multiplyScalar(1.05), best);
+        const close = bestDot > 0.92;     // dentro do feixe -> interfere
+        intf.material.color.set(close ? 0xff3b3b : 0x59617a);
+        intf.material.opacity = close ? 0.95 : 0.3;
+      }
+    });
+  });
+
+  setSceneTitle("Método 1 — Convolução das CCDFs pós-WCG",
+    "Cada sistema simulado isolado no seu pior caso geométrico (WCG). 3 ES distintas — não há ponto físico comum.");
+  setLegend([
+    ["dot", "#ff8c42", "Sistema A · sua ES/WCG"],
+    ["dot", "#c084fc", "Sistema B · sua ES/WCG"],
+    ["dot", "#38bdf8", "Sistema C · sua ES/WCG"],
+    ["dot", "#f2c14e", "satélite GSO (vítima)"],
+    ["dot", "#ff3b3b", "NGSO dentro do feixe (interfere)"],
+  ]);
+}
+
+// ---- Grid Stage 1: ES (lat,lon) × GSO_lon visível (Métodos 2 e 5) ----
+const GRID_LATS = [-60, -30, 0, 30, 60];
+const GRID_LONS = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150];
+const GSO_LON_GRID = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150];
+const MIN_GSO_EL_DEG = 5;
+
+function gsoElevationDeg(esLat, esLon, gsoLon) {
+  const rho = 6378.137 / 42164.0;
+  const lat = esLat * DEG;
+  const dlon = (gsoLon - esLon) * DEG;
+  const cosGamma = Math.cos(lat) * Math.cos(dlon);
+  if (cosGamma <= rho) return -90;
+  const gamma = Math.acos(Math.max(-1, Math.min(1, cosGamma)));
+  return Math.atan2(cosGamma - rho, Math.sin(gamma)) / DEG;
+}
+
+function visibleGsoLons(esLat, esLon) {
+  return GSO_LON_GRID.filter(lon => gsoElevationDeg(esLat, esLon, lon) >= MIN_GSO_EL_DEG);
+}
+
+function buildGridStage1Scene(opts) {
+  clearMethod();
+  methodRoot.add(buildGsoArc());
+
+  // N sistemas NGSO distintos — mesma geometria ES/GSO, órbitas diferentes
+  const cons = [
+    makeConstellation({ color: SYS_COLORS[0], nSats: 10, inc: 53, raan: 20,  speed: 0.50, phase0: 0 }),
+    makeConstellation({ color: SYS_COLORS[1], nSats: 9,  inc: 70, raan: 120, speed: 0.55, phase0: 0.9 }),
+    makeConstellation({ color: SYS_COLORS[2], nSats: 10, inc: 33, raan: 230, speed: 0.48, phase0: 1.5 }),
+  ];
+  cons.forEach(c => {
+    methodRoot.add(c.group);
+    updaters.push(t => c.update(t));
+  });
+
+  const worstLat = opts.worstLat != null ? opts.worstLat : 30;
+  const worstLon = opts.worstLon != null ? opts.worstLon : -60;
+  const pts = [];
+  let worst = null, worstVal = -Infinity;
+  GRID_LATS.forEach(la => GRID_LONS.forEach(lo => {
+    const d = Math.hypot((la - worstLat) / 45, ((((lo - worstLon) + 540) % 360 - 180)) / 80);
+    const val = 0.25 + 0.75 * Math.exp(-d * d);
+    const dot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.032, 10, 10),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(ramp(val)), transparent: true, opacity: 0.5 })
+    );
+    dot.position.copy(latLon(la, lo, R_EARTH * 1.02));
+    dot.userData = { val, la, lo };
+    methodRoot.add(dot);
+    pts.push(dot);
+    if (val > worstVal) { worstVal = val; worst = dot; }
+  }));
+
+  const gsoMarkers = GSO_LON_GRID.map(lon => {
+    const sat = makeGsoSat(lon, 0x6b5424);
+    sat.material.transparent = true;
+    sat.material.opacity = 0.18;
+    sat.scale.set(0.38, 0.38, 0.38);
+    methodRoot.add(sat);
+    return { lon, sat };
+  });
+
+  if (opts.showEnvelope && worst) {
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.09, 0.014, 8, 24),
+      new THREE.MeshBasicMaterial({ color: 0xff3b3b })
+    );
+    ring.position.copy(worst.position.clone().multiplyScalar(1.008));
+    ring.lookAt(worst.position.clone().multiplyScalar(2));
+    methodRoot.add(ring);
+    const wlab = makeLabel("envelope (pior)", "#ff6b6b");
+    wlab.position.copy(worst.position.clone().multiplyScalar(1.35));
+    methodRoot.add(wlab);
+  }
+
+  if (opts.hotIndices) {
+    opts.hotIndices.forEach((idx, k) => {
+      if (!pts[idx]) return;
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.055, 0.012, 8, 24),
+        new THREE.MeshBasicMaterial({ color: [0xf472b6, 0xa78bfa, 0x34d399, 0xfbbf24, 0x60a5fa][k % 5], transparent: true, opacity: 0.85 })
+      );
+      ring.position.copy(pts[idx].position.clone().multiplyScalar(1.008));
+      ring.lookAt(pts[idx].position.clone().multiplyScalar(2));
+      methodRoot.add(ring);
+    });
+    const wlab = makeLabel(opts.hotLabel || "N_geom CCDFs agregadas", "#34d399");
+    wlab.position.copy(latLon(55, 0, R_EARTH * 1.45));
+    methodRoot.add(wlab);
+  }
+
+  const scanner = new THREE.Mesh(
+    new THREE.RingGeometry(0.05, 0.075, 24),
+    new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, transparent: true, opacity: 0.9 })
+  );
+  methodRoot.add(scanner);
+
+  const activeBeam = makeBeam(0xfde047);
+  activeBeam.material.opacity = 0.92;
+  methodRoot.add(activeBeam);
+
+  const visBeams = GSO_LON_GRID.map(() => {
+    const b = makeBeam(0x94a3b8);
+    b.material.opacity = 0;
+    methodRoot.add(b);
+    return b;
+  });
+
+  const geomHud = makeLabel("grid …", "#fde047");
+  geomHud.scale.set(1.45, 0.36, 1);
+  methodRoot.add(geomHud);
+
+  let esIdx = 0, gsoStep = 0, sweepT = 0;
+  const period = opts.sweepPeriod != null ? opts.sweepPeriod : 0.24;
+
+  function paintGeomHud(la, lo, gsoLon, nVis, step, total) {
+    const c = document.createElement("canvas");
+    c.width = 420; c.height = 76;
+    const ctx = c.getContext("2d");
+    ctx.font = "bold 19px ui-monospace, monospace";
+    ctx.fillStyle = "#fde047";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(`ES(${la.toFixed(0)}°, ${lo.toFixed(0)}°)  ·  GSO_lon ${gsoLon.toFixed(0)}°  [${step}/${total}]`, 210, 26);
+    ctx.font = "15px ui-monospace, monospace";
+    ctx.fillStyle = "#94a3b8";
+    ctx.fillText(`${nVis} longitudes GSO visíveis p/ esta ES`, 210, 52);
+    geomHud.material.map.image = c;
+    geomHud.material.map.needsUpdate = true;
+  }
+
+  updaters.push((t, dt) => {
+    sweepT += dt;
+    const cur = pts[esIdx];
+    let vis = visibleGsoLons(cur.userData.la, cur.userData.lo);
+    if (vis.length === 0) vis = [0];
+
+    if (sweepT >= period) {
+      sweepT = 0;
+      gsoStep++;
+      if (gsoStep >= vis.length) {
+        gsoStep = 0;
+        esIdx = (esIdx + 1) % pts.length;
+      }
+    }
+
+    const { la, lo } = pts[esIdx].userData;
+    vis = visibleGsoLons(la, lo);
+    if (vis.length === 0) vis = [0];
+    const activeGsoLon = vis[gsoStep % vis.length];
+
+    scanner.position.copy(pts[esIdx].position.clone().multiplyScalar(1.012));
+    scanner.lookAt(pts[esIdx].position.clone().multiplyScalar(2));
+    pts.forEach(p => { p.material.opacity = 0.28 + p.userData.val * 0.35; });
+    pts[esIdx].material.opacity = 1.0;
+
+    gsoMarkers.forEach(({ lon, sat }, i) => {
+      const isVis = vis.includes(lon);
+      const isActive = lon === activeGsoLon;
+      sat.material.opacity = isActive ? 1.0 : (isVis ? 0.5 : 0.12);
+      sat.material.color.setHex(isActive ? 0xf2c14e : (isVis ? 0xb08d2e : 0x6b5424));
+      const s = isActive ? 0.62 : 0.38;
+      sat.scale.set(s, s, s);
+      const b = visBeams[i];
+      if (isVis && !isActive) {
+        setBeam(b, pts[esIdx].position.clone(), sat.position);
+        b.material.opacity = 0.2;
+      } else {
+        b.material.opacity = 0;
+      }
+    });
+
+    setBeam(activeBeam, pts[esIdx].position.clone(), latLon(0, activeGsoLon, R_GSO));
+    geomHud.position.copy(pts[esIdx].position.clone().multiplyScalar(1.38));
+    paintGeomHud(la, lo, activeGsoLon, vis.length, gsoStep + 1, vis.length);
+  });
+
+  setSceneTitle(opts.title, opts.sub);
+  setLegend(opts.legend);
+}
+
+// ---- MÉTODO 2: grid ES×GSO + envelope (pior por probabilidade) ----
+function buildMethod2() {
+  buildGridStage1Scene({
+    showEnvelope: true,
+    sweepPeriod: 0.22,
+    title: "Método 2 — Convolução no grid Stage 1",
+    sub: "Produto cartesiano ES (lat,lon) × GSO_lon visível (S.1503-4 §D.6). Convolução por tripleta; envelope = pior caso por percentil.",
+    legend: [
+      ["bar", "linear-gradient(90deg,#16a,#cb3)", "EPFD↓ sintético (mapa ES)"],
+      ["dot", "#ffffff", "ES ativa no grid"],
+      ["dot", "#f2c14e", "GSO_lon em avaliação"],
+      ["dot", "#94a3b8", "feixes p/ demais GSO_lon visíveis"],
+      ["dot", "#ff3b3b", "★ envelope = pior geometria"],
+      ["dot", "#ff8c42", "sistema NGSO A"],
+      ["dot", "#c084fc", "sistema NGSO B"],
+      ["dot", "#38bdf8", "sistema NGSO C"],
+    ],
+  });
+}
+
+// ---- MÉTODO 3: joint — megaconstelação simultânea, soma instantânea ----
+function buildMethod3() {
+  clearMethod();
+  methodRoot.add(buildGsoArc());
+
+  // UMA ES comum + UM GSO sat
+  const esLL = [25, -10];
+  const esPos = latLon(esLL[0], esLL[1]);
+  const gsoLon = -10;
+  const gso = makeGsoSat(gsoLon);
+  methodRoot.add(gso);
+  methodRoot.add(makeES(esLL[0], esLL[1]));
+  const lab = makeLabel("ES comum", "#4fd1c5");
+  lab.position.copy(esPos.clone().multiplyScalar(1.30));
+  methodRoot.add(lab);
+  const axis = gso.position.clone().sub(esPos).normalize();
+
+  // feixe desejado ES->GSO
+  const want = makeBeam(0x4fd1c5);
+  want.material.opacity = 0.4;
+  setBeam(want, esPos.clone().multiplyScalar(1.05), gso.position);
+  methodRoot.add(want);
+
+  // 2 constelações fundidas (megaconstelação), tempos coerentes (mesmo t)
+  const cons = [
+    makeConstellation({ color: SYS_COLORS[0], nSats: 11, inc: 53,  raan: 20,  speed: 0.6 }),
+    makeConstellation({ color: SYS_COLORS[2], nSats: 11, inc: 75,  raan: 130, speed: 0.6, phase0: 1.2 }),
+  ];
+  cons.forEach(c => methodRoot.add(c.group));
+
+  // feixe por satélite (acende quando dentro do feixe da ES)
+  const beams = [];
+  cons.forEach(c => c.sats.forEach(() => { const b = makeBeam(0x59617a); methodRoot.add(b); beams.push(b); }));
+
+  // medidor de soma instantânea
+  const meter = makeLabel("Σ = … dBW", "#fde047");
+  meter.scale.set(1.4, 0.35, 1);
+  meter.position.copy(esPos.clone().multiplyScalar(1.55));
+  methodRoot.add(meter);
+  let meterAccum = 0;
+
+  updaters.push((t, dt) => {
+    cons.forEach(c => c.update(t));
+    scene.updateMatrixWorld(true);
+    let bi = 0, linSum = 0, nContrib = 0;
+    const w = new THREE.Vector3();
+    cons.forEach(c => c.sats.forEach(sat => {
+      sat.getWorldPosition(w);
+      const dirDot = w.clone().sub(esPos).normalize().dot(axis);   // proximidade do eixo
+      const inFront = w.clone().sub(esPos).dot(axis) > 0;
+      const close = dirDot > 0.93 && inFront;
+      const b = beams[bi++];
+      setBeam(b, esPos.clone().multiplyScalar(1.05), w.clone());
+      b.material.color.set(close ? 0xff3b3b : 0x39405a);
+      b.material.opacity = close ? 0.95 : 0.12;
+      if (close) {
+        // EPFD ilustrativo: cresce ao aproximar do eixo
+        const epfd = -180 + 60 * (dirDot - 0.93) / 0.07;
+        linSum += Math.pow(10, epfd / 10);
+        nContrib++;
+      }
+    }));
+    // atualiza medidor ~6x/s
+    meterAccum += dt;
+    if (meterAccum > 0.16) {
+      meterAccum = 0;
+      const total = linSum > 0 ? (10 * Math.log10(linSum)).toFixed(0) : "—";
+      const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+      const ctx = c.getContext("2d");
+      ctx.font = "bold 26px ui-monospace, monospace";
+      ctx.fillStyle = nContrib > 0 ? "#fde047" : "#64748b";
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(`Σ=${total} dBW (${nContrib})`, 128, 32);
+      meter.material.map.image = c; meter.material.map.needsUpdate = true;
+    }
+  });
+
+  setSceneTitle("Método 3 — Simulação conjunta (Method 2B)",
+    "N constelações fundidas numa megaconstelação, propagadas no MESMO t₀. Uma ES comum. Soma a contribuição instantânea de TODOS os satélites.");
+  setLegend([
+    ["dot", "#4fd1c5", "ES comum (geometria única)"],
+    ["dot", "#ff8c42", "constelação 1 (megaconst.)"],
+    ["dot", "#38bdf8", "constelação 2 (megaconst.)"],
+    ["dot", "#ff3b3b", "satélite contribuindo agora"],
+    ["dot", "#fde047", "Σ instantânea (dBW)"],
+  ]);
+}
+
+// ---- MÉTODO 4: convolução em cada WCG single-entry (N ancoragens) ----
+let m4anchorIdx = 0, m4anchorT = 0;
+function buildMethod4() {
+  clearMethod();
+  methodRoot.add(buildGsoArc());
+
+  const setups = [
+    { es:[ 38,  20], gsoLon:  10, inc: 53, raan:  10, color: SYS_COLORS[0], name:"A" },
+    { es:[-25, 140], gsoLon: 150, inc: 70, raan: 120, color: SYS_COLORS[1], name:"B" },
+    { es:[ 10, -80], gsoLon: -75, inc: 33, raan: 230, color: SYS_COLORS[2], name:"C" },
+  ];
+  const anchors = [];
+  setups.forEach((s, idx) => {
+    const esPos = latLon(s.es[0], s.es[1]);
+    const gso = makeGsoSat(s.gsoLon, s.color);
+    methodRoot.add(gso);
+    methodRoot.add(makeES(s.es[0], s.es[1], s.color));
+    const lab = makeLabel("WCG " + s.name, "#" + s.color.toString(16).padStart(6,"0"));
+    lab.position.copy(esPos.clone().multiplyScalar(1.28));
+    methodRoot.add(lab);
+    const ring = new THREE.Mesh(
+      new THREE.TorusGeometry(0.10, 0.016, 8, 28),
+      new THREE.MeshBasicMaterial({ color: s.color, transparent: true, opacity: 0.25 })
+    );
+    ring.position.copy(esPos.clone().multiplyScalar(1.03));
+    ring.lookAt(esPos.clone().multiplyScalar(2));
+    methodRoot.add(ring);
+    const want = makeBeam(s.color);
+    want.material.opacity = 0.35;
+    setBeam(want, esPos.clone().multiplyScalar(1.05), gso.position);
+    methodRoot.add(want);
+    const con = makeConstellation({ color: s.color, nSats: 8, inc: s.inc, raan: s.raan, speed: 0.45 + idx * 0.1 });
+    methodRoot.add(con.group);
+    anchors.push({ esPos, gso, ring, con, color: s.color, name: s.name });
+  });
+
+  const aggLab = makeLabel("ancoragem ativa", "#fde047");
+  aggLab.scale.set(1.1, 0.28, 1);
+  methodRoot.add(aggLab);
+  const aggBeams = anchors.map(() => makeBeam(0xffffff));
+  aggBeams.forEach(b => { b.material.opacity = 0.4; methodRoot.add(b); });
+
+  m4anchorIdx = 0; m4anchorT = 0;
+  updaters.push((t, dt) => {
+    anchors.forEach(a => a.con.update(t));
+    m4anchorT += dt;
+    if (m4anchorT > 1.4) { m4anchorT = 0; m4anchorIdx = (m4anchorIdx + 1) % anchors.length; }
+    const active = anchors[m4anchorIdx];
+    active.ring.material.opacity = 0.95;
+    active.ring.scale.set(1.15, 1.15, 1.15);
+    aggLab.position.copy(active.esPos.clone().multiplyScalar(1.42));
+    const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+    const ctx = c.getContext("2d");
+    ctx.font = "bold 24px ui-monospace, monospace";
+    ctx.fillStyle = "#fde047";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(`ancora WCG ${active.name}`, 128, 32);
+    aggLab.material.map.image = c; aggLab.material.map.needsUpdate = true;
+    const axis = active.gso.position.clone().sub(active.esPos).normalize();
+    const w = new THREE.Vector3();
+    anchors.forEach((a, ai) => {
+      const on = ai === m4anchorIdx;
+      a.ring.material.opacity = on ? 0.95 : 0.2;
+      a.ring.scale.set(on ? 1.15 : 1.0, on ? 1.15 : 1.0, on ? 1.15 : 1.0);
+      aggBeams[ai].material.color.set(on ? 0xff3b3b : 0x39405a);
+      aggBeams[ai].material.opacity = on ? 0.85 : 0.08;
+      if (!on) return;
+      let best = null, bestDot = -2;
+      a.con.sats.forEach(sat => {
+        sat.getWorldPosition(w);
+        const d = w.clone().sub(active.esPos).normalize().dot(axis);
+        if (d > bestDot) { bestDot = d; best = w.clone(); }
+      });
+      if (best) setBeam(aggBeams[ai], active.esPos.clone().multiplyScalar(1.05), best);
+    });
+  });
+
+  setSceneTitle("Método 4 — Convolução por WCG single-entry",
+    "Cada filing traz seu WCG (WCGA). Em cada ancoragem g_i, simulam-se os N sistemas na mesma geometria e convoluem-se as CCDFs → N curvas agregadas.");
+  setLegend([
+    ["dot", "#ff8c42", "WCG A · ancoragem"],
+    ["dot", "#c084fc", "WCG B · ancoragem"],
+    ["dot", "#38bdf8", "WCG C · ancoragem"],
+    ["dot", "#fde047", "ancoragem ativa (ciclo)"],
+    ["dot", "#ff3b3b", "todos os filings na mesma ES/GSO"],
+  ]);
+}
+
+// ---- MÉTODO 5: Stage 1 Process — Steps 2–3 no grid, Step 4 por geometria ----
+function buildMethod5() {
+  buildGridStage1Scene({
+    hotIndices: [12, 28, 35, 41, 52],
+    hotLabel: "Step 3: N_geom CDFs agregadas",
+    sweepPeriod: 0.26,
+    title: "Método 5 — Stage 1 Process (WP 4A doc R23-WP4A-C-1064 Anexo 21)",
+    sub: "Step 2: S.1503 §D.5.1 por sistema × geometria (grid 15°). Step 3: convolução por tripleta. Step 4: cada CDF vs. Res. 76 — sem envelope global.",
+    legend: [
+      ["bar", "linear-gradient(90deg,#16a,#cb3)", "EPFD↓ sintético (mapa ES)"],
+      ["dot", "#ffffff", "ES ativa no grid"],
+      ["dot", "#f2c14e", "GSO_lon em avaliação"],
+      ["dot", "#94a3b8", "feixes p/ demais GSO_lon visíveis"],
+      ["dot", "#34d399", "Step 3: CDF agregada / geometria"],
+      ["dot", "#ff8c42", "sistema NGSO A"],
+      ["dot", "#c084fc", "sistema NGSO B"],
+      ["dot", "#38bdf8", "sistema NGSO C"],
+    ],
+  });
+}
+
+// ============================================================================
+//  Overlays (título de cena + legenda)
+// ============================================================================
+function setSceneTitle(t, sub) {
+  document.getElementById("scene-title").innerHTML = `${t}<small>${sub}</small>`;
+}
+function setLegend(rows) {
+  document.getElementById("legend").innerHTML = rows.map(([type, col, txt]) => {
+    const sw = type === "bar"
+      ? `<span class="bar" style="background:${col};border-radius:2px;"></span>`
+      : `<span class="dot" style="background:${col};"></span>`;
+    return `<div class="row">${sw}<span>${txt}</span></div>`;
+  }).join("");
+}
+
+// ============================================================================
+//  Troca de método
+// ============================================================================
+function selectMethod(m) {
+  document.querySelectorAll(".tab").forEach(b => b.classList.toggle("active", b.dataset.m == m));
+  simTime = 0;
+  if (gfxReady) {
+    if (m == 1) buildMethod1();
+    else if (m == 2) buildMethod2();
+    else if (m == 3) buildMethod3();
+    else if (m == 4) buildMethod4();
+    else buildMethod5();
+  }
+  renderPanel(m);
+}
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => selectMethod(b.dataset.m)));
+
+// controles
+document.getElementById("btn-play").addEventListener("click", e => {
+  playing = !playing; e.target.textContent = playing ? "⏸ Pausar" : "▶ Retomar";
+});
+document.getElementById("btn-rotate").addEventListener("click", e => {
+  if (!gfxReady) return;
+  controls.autoRotate = !controls.autoRotate;
+  e.target.textContent = "⟲ Auto-girar: " + (controls.autoRotate ? "on" : "off");
+});
+document.getElementById("btn-reset").addEventListener("click", () => {
+  if (!gfxReady) return;
+  camera.position.copy(CAM_HOME); controls.target.set(0,0,0); controls.update();
+});
+
+// ============================================================================
+//  Loop de render
+// ============================================================================
+function resize() {
+  if (!gfxReady) return;
+  const w = wrap.clientWidth, h = wrap.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h; camera.updateProjectionMatrix();
+}
+window.addEventListener("resize", () => {
+  resize();
+  const tab = document.querySelector(".tab.active");
+  if (tab) drawCCDF(PANEL[tab.dataset.m].ccdf);
+});
+
+(function initPanelResize() {
+  const main = document.getElementById("main");
+  const resizer = document.getElementById("panel-resizer");
+  const MIN_W = 260, DEFAULT_W = 380;
+  const storageKey = "metodos_agregacao_3d_panel_width";
+  try {
+    const saved = parseInt(localStorage.getItem(storageKey), 10);
+    if (saved >= MIN_W) main.style.setProperty("--panel-width", saved + "px");
+  } catch (_) {}
+
+  function panelMaxW() {
+    return Math.max(MIN_W + 80, Math.min(720, Math.round(window.innerWidth * 0.62)));
+  }
+  function setPanelWidth(px) {
+    main.style.setProperty("--panel-width", Math.max(MIN_W, Math.min(panelMaxW(), px)) + "px");
+  }
+  function onResizeEnd() {
+    resize();
+    const tab = document.querySelector(".tab.active");
+    if (tab) drawCCDF(PANEL[tab.dataset.m].ccdf);
+    try {
+      localStorage.setItem(storageKey, parseInt(getComputedStyle(main).getPropertyValue("--panel-width"), 10));
+    } catch (_) {}
+  }
+
+  let dragging = false;
+  resizer.addEventListener("mousedown", e => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragging = true;
+    resizer.classList.add("dragging");
+    document.body.classList.add("panel-resizing");
+  });
+  window.addEventListener("mousemove", e => {
+    if (!dragging) return;
+    const rect = main.getBoundingClientRect();
+    setPanelWidth(rect.right - e.clientX - resizer.offsetWidth / 2);
+    resize();
+    const tab = document.querySelector(".tab.active");
+    if (tab) drawCCDF(PANEL[tab.dataset.m].ccdf);
+  });
+  window.addEventListener("mouseup", () => {
+    if (!dragging) return;
+    dragging = false;
+    resizer.classList.remove("dragging");
+    document.body.classList.remove("panel-resizing");
+    onResizeEnd();
+  });
+  resizer.addEventListener("dblclick", () => {
+    setPanelWidth(DEFAULT_W);
+    onResizeEnd();
+  });
+})();
+
+let last = performance.now();
+function loop(now) {
+  if (!gfxReady) return;
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (playing) simTime += dt;
+  updaters.forEach(u => u(simTime, playing ? dt : 0));
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+if (gfxReady) {
+  resize();
+  selectMethod(1);
+  requestAnimationFrame(loop);
+} else {
+  selectMethod(1);
+}
+</script>
+</body>
+</html>

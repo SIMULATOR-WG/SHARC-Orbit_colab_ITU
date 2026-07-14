@@ -1,0 +1,16 @@
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+runs/
+uploads/
+exports/
+*.parquet
+*.log

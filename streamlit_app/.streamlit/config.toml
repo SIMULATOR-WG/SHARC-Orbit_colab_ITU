@@ -1,0 +1,23 @@
+[server]
+headless = false
+runOnSave = true
+fileWatcherType = "auto"
+maxUploadSize = 1024
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "dark"
+primaryColor = "#4fd1c5"
+backgroundColor = "#0a0e17"
+secondaryBackgroundColor = "#0d1320"
+textColor = "#e6eaf2"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+showErrorDetails = "full"
+
+[logger]
+level = "info"

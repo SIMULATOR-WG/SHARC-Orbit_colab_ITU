@@ -1,0 +1,72 @@
+# SHARC-Orbit — manual/parametric entry example (R3/R4, plan WS2)
+# Run:  python -m src.main --config config.yaml  (copy this file to config.yaml)
+#
+# Units follow Rec. ITU-R S.1503-4 A2.1 Table 1: km, degrees, seconds, MHz/GHz
+# as labelled, kHz for reference bandwidth, dBW for power.
+#
+# The non_gso section mirrors S.1503-4 Part B:
+#   B3.1 constellation parameters · B3.2 per-satellite A/E/I/O/W/V ·
+#   B3.3 operating parameters · B4.1 pfd mask reference.
+
+non_gso:
+  # ── Constellation shape ───────────────────────────────────────────────
+  # EITHER give the orbit size as semi-major axis + eccentricity…
+  # semi_major_axis_km: 7578.145
+  # eccentricity: 0.0
+  # …OR as apogee/perigee ALTITUDES (converted per §D6.3.7):
+  apogee_km: 1200.0
+  perigee_km: 1200.0
+
+  inclination_deg: 87.9
+  num_planes: 18
+  sats_per_plane: 40
+
+  # Walker Delta shortcut (used when `planes:` below is absent):
+  inter_plane_phasing_factor: 1     # F of Walker i:T/P/F
+  raan0_deg: 0.0                    # RAAN of the first plane
+  arg_perigee_deg: 0.0              # ω (all planes)
+
+  # ── OR full per-plane definition (S.1503-4 §B3.2: O/W/V per satellite) ──
+  # Takes precedence over the Walker shortcut. Same schema the SRS loader
+  # produces internally; every field optional except sats_per_plane.
+  # planes:
+  #   - orb_id: 1
+  #     sats_per_plane: 40
+  #     raan_deg: 0.0               # O[N] — longitude of ascending node
+  #     inclination_deg: 87.9
+  #     apogee_km: 1200.0           # or semi_major_axis_km + eccentricity
+  #     perigee_km: 1200.0
+  #     perigee_arg_deg: 0.0        # W[N]
+  #     phase_angles_deg: [0.0, 9.0, 18.0]   # V[N] per satellite (else uniform)
+  #   - orb_id: 2
+  #     sats_per_plane: 40
+  #     raan_deg: 20.0
+
+  # ── Operating parameters (subset of §B3.3) ────────────────────────────
+  min_operating_height_km: 0.0      # H_MIN (B3.1)
+  alpha0_deg: 6.0                   # exclusion-zone angle α₀ (MIN_EXCLUDE)
+  min_elevation_deg: 5.0            # ES minimum elevation ε₀
+
+  frequency_ghz: 17.8               # simulation frequency
+
+# ── PFD mask (B4.1) — standalone XML (SRS/BR schema) or 1-D CSV ─────────
+pfd_mask:
+  source: xml_file
+  file: path/to/mask.xml            # <satellite_system><pfd_mask …> XML
+  # mask_id: 3                      # when the XML holds several masks
+
+# ── Victim GSO earth station (Article 22 scenario) ───────────────────────
+gso_es:
+  service: FSS
+  antenna_diameter_m: 1.2
+
+article22_limits:
+  reference_bandwidth_khz: 40.0
+
+simulation:
+  num_time_steps: 86400
+  coarse_time_step_s: 1.0
+  dual_time_step_mode: s1503
+  # Orbit model (S.1503-4 §D6.3): J2 secular is the default (Case 1/2).
+  # artificial_precession: true    # §D6.3.5 artificial precession
+  # use_precession_mdb: true       # Case 3 — admin-supplied rate (MDB data)

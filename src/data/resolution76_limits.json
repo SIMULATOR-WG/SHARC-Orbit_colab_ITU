@@ -1,0 +1,82 @@
+{
+  "_source": "ITU Resolution 76 (Rev.WRC-23), Annex 1, Tables 1A-1D. Aggregate epfd_down limits for non-GSO FSS into GSO FSS/BSS.",
+  "_format_note": "Curve points are stored as [epfd_dB, percent_time_exceeded] (CCDF), i.e. pct = 100 - pct_not_exceeded_in_PDF. Ascending by pct.",
+  "Resolution 76, TABLE 1A": {
+    "bands": [
+      {"range": [10.7, 11.7], "regions": [1, 2, 3]},
+      {"range": [11.7, 12.2], "regions": [2]},
+      {"range": [12.2, 12.5], "regions": [3]},
+      {"range": [12.5, 12.75], "regions": [1, 3]}
+    ],
+    "service": "FSS",
+    "notes": [
+      "Footnote 2: for all D > 60 cm, also apply the latitude-dependent 100%-time aggregate epfd ramp (-160 dB(W/(m^2*40kHz)) up to |lat|<=57.5; ramp -160+3.4(57.5-|lat|)/4 up to |lat|<=63.75; -165.3 dB beyond).",
+      "Footnote 5: 3 m and 10 m masks apply only for the methodology referred to in invites the ITU-R Sector 1."
+    ],
+    "masks": [
+      {"d_cm": 60.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-160.0, 0.0], [-160.0, 0.01], [-160.4, 0.03], [-165.3, 1.0], [-168.6, 10.0], [-170.0, 100.0]]},
+      {"d_cm": 120.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-160.0, 0.0], [-160.0, 0.0025], [-160.5, 0.01], [-160.8, 0.01], [-161.4, 0.03], [-161.6, 0.055], [-164.0, 0.16], [-173.0, 0.5], [-176.5, 100.0]]},
+      {"d_cm": 300.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-160.0, 0.0], [-160.0, 0.003], [-162.0, 0.018], [-164.0, 0.04], [-168.0, 0.1], [-182.0, 0.5], [-184.0, 10.0], [-185.0, 100.0]], "note": "Footnote 5: methodology-only"},
+      {"d_cm": 1000.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-160.0, 0.0], [-160.0, 0.002], [-166.0, 0.01], [-190.0, 1.0], [-190.0, 100.0]], "note": "Footnote 5: methodology-only"}
+    ]
+  },
+  "Resolution 76, TABLE 1B": {
+    "bands": [
+      {"range": [17.8, 18.6], "regions": [1, 2, 3]}
+    ],
+    "service": "FSS",
+    "notes": [
+      "Footnote 3: a non-GSO system shall meet the limits in both the 40 kHz and the 1 MHz reference bandwidths."
+    ],
+    "masks": [
+      {"d_cm": 100.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-164.0, 0.0], [-164.0, 0.1], [-170.0, 10.0], [-170.0, 100.0]]},
+      {"d_cm": 100.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-150.0, 0.0], [-150.0, 0.1], [-156.0, 10.0], [-156.0, 100.0]]},
+      {"d_cm": 200.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-164.0, 0.0], [-164.0, 0.08], [-166.0, 0.1], [-173.0, 0.6], [-173.0, 100.0]]},
+      {"d_cm": 200.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-150.0, 0.0], [-150.0, 0.08], [-152.0, 0.1], [-159.0, 0.6], [-159.0, 100.0]]},
+      {"d_cm": 500.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-164.0, 0.0], [-164.0, 0.008], [-172.0, 0.2], [-180.0, 0.2], [-180.0, 100.0]]},
+      {"d_cm": 500.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-150.0, 0.0], [-150.0, 0.008], [-158.0, 0.2], [-166.0, 0.2], [-166.0, 100.0]]}
+    ]
+  },
+  "Resolution 76, TABLE 1C": {
+    "bands": [
+      {"range": [19.7, 20.2], "regions": [1, 2, 3]}
+    ],
+    "service": "FSS",
+    "notes": [
+      "Footnote 3: a non-GSO system shall meet the limits in both the 40 kHz and the 1 MHz reference bandwidths."
+    ],
+    "masks": [
+      {"d_cm": 70.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-154.0, 0.0], [-154.0, 0.06], [-172.0, 10.0], [-182.0, 100.0]]},
+      {"d_cm": 70.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-140.0, 0.0], [-140.0, 0.06], [-158.0, 10.0], [-168.0, 100.0]]},
+      {"d_cm": 90.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-154.0, 0.0], [-154.0, 0.01], [-160.0, 0.2], [-165.0, 0.2], [-176.0, 9.0], [-185.0, 100.0]]},
+      {"d_cm": 90.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-140.0, 0.0], [-140.0, 0.01], [-146.0, 0.2], [-151.0, 0.2], [-162.0, 9.0], [-171.0, 100.0]]},
+      {"d_cm": 250.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-154.0, 0.0], [-154.0, 0.002], [-162.0, 0.067], [-191.0, 100.0]]},
+      {"d_cm": 250.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-140.0, 0.0], [-140.0, 0.002], [-148.0, 0.067], [-177.0, 100.0]]},
+      {"d_cm": 500.0, "bw_khz": 40.0, "pattern": "ITU-R S.1428", "curve": [[-154.0, 0.0], [-154.0, 0.0008], [-161.0, 0.016], [-175.0, 0.4], [-184.0, 10.0], [-195.0, 100.0]]},
+      {"d_cm": 500.0, "bw_khz": 1000.0, "pattern": "ITU-R S.1428", "curve": [[-140.0, 0.0], [-140.0, 0.0008], [-147.0, 0.016], [-161.0, 0.4], [-170.0, 10.0], [-181.0, 100.0]]}
+    ]
+  },
+  "Resolution 76, TABLE 1D": {
+    "bands": [
+      {"range": [11.7, 12.5], "regions": [1]},
+      {"range": [11.7, 12.2], "regions": [3]},
+      {"range": [12.5, 12.75], "regions": [3]},
+      {"range": [12.2, 12.7], "regions": [2]}
+    ],
+    "service": "BSS",
+    "notes": [
+      "Footnote 1: for BSS antenna diameters of 180, 240 and 300 cm, also apply the latitude-dependent 100%-time aggregate epfd ramp (-160 dB up to |lat|<=57.5; ramp -160+3.4(57.5-|lat|)/4 up to |lat|<=63.75; -165.3 dB beyond).",
+      "Footnote 2: for BSS 240 cm in Region 2 (west of 140W, north of 60N, toward GSO BSS at 91W/101W/110W/119W/148W, elevation > 5 deg), an additional aggregate 100%-time operational limit of -167 dB(W/(m^2*40kHz)) applies during a 15-year transition."
+    ],
+    "masks": [
+      {"d_cm": 30.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-158.33, 0.0], [-158.33, 2.0], [-158.6, 2.0], [-158.6, 4.0], [-160.1, 75.0], [-160.4, 100.0]]},
+      {"d_cm": 45.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.05], [-160.75, 0.67], [-164.0, 2.25], [-167.0, 34.0], [-170.0, 100.0]]},
+      {"d_cm": 60.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.01], [-160.2, 0.1], [-161.0, 0.2], [-162.0, 0.4], [-167.75, 2.2], [-168.75, 10.0], [-171.0, 100.0]]},
+      {"d_cm": 90.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.03], [-161.0, 0.2], [-163.0, 0.5], [-165.5, 0.9], [-171.0, 2.0], [-173.0, 67.0], [-173.75, 100.0]]},
+      {"d_cm": 120.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.4, 0.007], [-161.0, 0.035], [-161.9, 0.1], [-164.0, 0.18], [-167.8, 0.3], [-169.5, 0.5], [-173.0, 1.1], [-173.75, 1.1], [-175.25, 10.0], [-177.0, 100.0]]},
+      {"d_cm": 180.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.005], [-160.35, 0.025], [-161.5, 0.09], [-163.25, 0.19], [-176.25, 1.5], [-178.66, 67.0], [-179.5, 100.0]]},
+      {"d_cm": 240.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.005], [-160.5, 0.02], [-161.9, 0.06], [-164.4, 0.15], [-178.0, 0.75], [-180.9, 67.0], [-182.0, 100.0]]},
+      {"d_cm": 300.0, "bw_khz": 40.0, "pattern": "ITU-R BO.1443, Annex 1", "curve": [[-160.0, 0.0], [-160.0, 0.03], [-162.0, 0.06], [-167.0, 0.17], [-173.0, 0.3], [-180.5, 0.5], [-184.0, 67.0], [-186.5, 100.0]]}
+    ]
+  }
+}
