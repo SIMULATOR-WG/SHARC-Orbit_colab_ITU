@@ -9,6 +9,16 @@ studies, methods under review).
 - No authentication / no client-server access control.
 - Open source, distributable via GitHub (target: `SIMULATOR-WG/SHARC-Orbit`).
 
+## About this version
+
+This is an **academic version**, written in Python to make collaboration
+between administrations easier. It is **not a commercial solution** and is not
+intended to be one.
+
+The software is **still under active development**: features, methods, and
+numerical results may change, and some parts are still being validated.
+**Suggestions for improvement are very welcome.**
+
 ## Status
 
 Local single-user Streamlit UI for the simulator. The numerical engine in
