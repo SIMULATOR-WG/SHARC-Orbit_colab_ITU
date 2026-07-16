@@ -42,6 +42,28 @@ _DUAL_TS_DESC = {
     "on": "Coarse step + S.1503-4 §D.4.7 fine refinement near the WCG (normative).",
     "off": "Single coarse step throughout (faster but less precise around WCG).",
 }
+_ITU_SW_OPTIONS = [
+    "Reading A — Ntracks kept = 16",
+    "Reading B — Ntracks follows N'hit (default)",
+]
+_ITU_SW_DESC = {
+    "Reading A — Ntracks kept = 16": (
+        "§D4.1 pseudo-code read literally: the 1e8 run-time reduction "
+        "redefines only N'hit and N'coarse — Ntracks stays at 16 (§D4.5), "
+        "so large non-repeating runs may stay above 1e8 steps. Reproduces "
+        "the official engine 'A' runs (BR_Space v10, 2026 — MCSAT, "
+        "Skybridge, Boeing) and the 'T' v5.35 MCSAT run (2018) to ≤0.06%."
+    ),
+    "Reading B — Ntracks follows N'hit (default)": (
+        "Reads §D4.5 'Ntrack = Nhit' as an identity that propagates through "
+        "the §D4.1 recalculation (N'track = N'hit), shortening large "
+        "non-repeating runs ~20–36×. Reproduces the 'T' v5.45 runs "
+        "(GIBC ≤ v9 — CRC STEAM-2, USASAT-NGSO-3X) to −0.05% on NSTEPS. "
+        "Affects NSTEPS only: Δt (θ3dB = 70·λ/D + the §D4.1 multi-sub rule) "
+        "is identical in both readings, and the EPFD statistics are "
+        "expected to converge."
+    ),
+}
 _ARTIFICIAL_PREC_DESC = {
     "off": "Force artificial RAAN precession off.",
     "on": "Force artificial RAAN precession on.",
@@ -162,6 +184,7 @@ prev = use_persisted_state("s1588.form", {
     "s1503_step_deg": 1.0,
     "dual_time_step_mode": "on",
     "fine_time_step_s": "",
+    "itu_software": "itu_epfd",
     "gso_longitude_mode": "arc_optimal",
     "alpha_method": "analytical",
     "country_codes": [],
@@ -581,6 +604,18 @@ with st.form("s1588_form"):
                     index=0 if prev.get("dual_time_step_mode", "on") == "on" else 1,
                     help="Engine key: `dual_time_step_mode`.",
                 )
+            itu_software_label = select_described(
+                "S.1503-4 §D4 reading (time-step dimensioning)",
+                _ITU_SW_OPTIONS, _ITU_SW_DESC,
+                index=1 if str(prev.get("itu_software", "itu_epfd")).lower().startswith(("transfinite", "itu")) else 0,
+                help="Engine key: `itu_software`. Two defensible readings of "
+                     "the §D4.1 run-time reduction in Rec. S.1503-4 — the "
+                     "text is ambiguous on whether Ntracks follows N'hit. "
+                     "Affects NSTEPS only (Δt is identical) — not the EPFD "
+                     "physics.",
+            )
+            itu_software = ("itu_epfd" if itu_software_label.startswith("Reading B")
+                            else "s1503_4")
     else:
         wcga_s1503 = bool(prev.get("wcga_s1503", True))
         wcga_no_mask_symmetry = bool(prev.get("wcga_no_mask_symmetry", False))
@@ -590,6 +625,7 @@ with st.form("s1588_form"):
         alpha_method = prev.get("alpha_method", "analytical")
         dual_mode = prev.get("dual_time_step_mode", "on")
         fine_dt = str(prev.get("fine_time_step_s") or "")
+        itu_software = str(prev.get("itu_software", "itu_epfd")).lower()
 
     # Orbital dynamics — applies to every method's EPFD↓ simulation (per filing).
     # Section number follows the conditional WCG search + Time step expanders
@@ -724,6 +760,7 @@ with st.form("s1588_form"):
             num_steps_override=_i(num_steps),
             fine_step_override=_f(fine_dt),
             coarse_step_override=_f(dt),
+            itu_software=itu_software,
         )
         if _tsp.ok:
             _nsteps = _tsp.nsteps
@@ -819,6 +856,7 @@ if submit:
     params["gso_longitude_mode"] = gso_lon_mode
     params["alpha_method"] = alpha_method
     params["dual_time_step_mode"] = dual_mode
+    params["itu_software"] = itu_software
     _set("fine_time_step_s", _f(fine_dt))
     if method == "method_2":
         _set("grid_step_deg", _f(grid_step))
@@ -877,6 +915,7 @@ if submit:
         "disable_gso_min_elevation": not bool(apply_table8_egso),
         "s1503_step_deg": float(s1503_step) if isinstance(s1503_step, (int, float)) else _f(str(s1503_step)),
         "dual_time_step_mode": dual_mode, "fine_time_step_s": fine_dt,
+        "itu_software": itu_software,
         "gso_longitude_mode": gso_lon_mode, "alpha_method": alpha_method,
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),

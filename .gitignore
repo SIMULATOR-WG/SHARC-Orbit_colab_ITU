@@ -65,6 +65,7 @@ streamlit_app/data/cluster.json
 !docs/test_data/*.mdb
 # Large downloaded ITU filing fixtures — fetched from a GitHub release, not tracked
 docs/test_data/NGSO_CRC_filings/
+docs/test_data/STEAM_2-CRC-Notice_ID-121520026-IFIC-2985/
 
 # Logs
 *.log

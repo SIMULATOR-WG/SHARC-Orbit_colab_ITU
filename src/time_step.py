@@ -211,6 +211,8 @@ def compute_time_step_and_count(
     ns_samples: int = 10,
     ntracks: int = 16,
     phi_coarse_deg: float = 1.5,
+    n_sat_total: int | None = None,
+    reduce_ntracks_1e8: bool = False,
 ) -> TimeStepResult:
     """Compute TSTEP (s) and NSTEPS per S.1503-4, Section D.4.
 
@@ -232,6 +234,19 @@ def compute_time_step_and_count(
         non-repeating orbits (S.1503-4 D4.6.2, D6.3.5)
     phi_coarse_deg : φcoarse (°) for Ncoarse (D4.7); also used by the §D4.1
         1e8 recalculation to derive N'coarse.
+    n_sat_total : real satellite count (Σ nbr_sat_pl over ALL planes) for the
+        √Nsatellites factor of §D4.1. Required for heterogeneous filings —
+        ``num_planes × sats_per_plane`` uses the reference plane only and
+        undercounts (e.g. CRC STEAM-2: 129×1 vs 1312 real). None = fall back
+        to ``num_planes × sats_per_plane``.
+    reduce_ntracks_1e8 : reading toggle for the §D4.1 recalculation.
+        §D4.5 states Ntrack = Nhit, so "re-calculate ... run time" can be read
+        as N'track = N'hit (Sreq widens, Norbits collapses). The official ITU
+        engines split by version: Agenium ('A', BR_Space v10, MCSAT 2026) and
+        Transfinite v5.35 ('T', MCSAT 2018) keep Ntracks=16 (reading A);
+        Transfinite v5.45 ('T', GIBC ≤ v9 — CRC STEAM-2 2021, USASAT-NGSO-3X
+        2025) reduces Ntracks (reading B). Δt is unaffected either way.
+        False = reading A (default), True = reading B.
 
     Returns
     -------
@@ -247,7 +262,12 @@ def compute_time_step_and_count(
     N'coarse = floor((N'hit/Nhit)·Ncoarse) accordingly.
     """
     T_orb = compute_orbital_period(a_km)
-    total_sats = max(1, num_planes * sats_per_plane)
+    # §D4.1 √Nsatellites: real fleet size. num_planes × sats_per_plane assumes
+    # a homogeneous constellation and undercounts heterogeneous filings.
+    if n_sat_total is not None and n_sat_total > 0:
+        total_sats = int(n_sat_total)
+    else:
+        total_sats = max(1, num_planes * sats_per_plane)
 
     def _fine_step(nhit_local: float) -> float:
         """Fine Δt for a given Nhit (S.1503-4 §D4.2 when literal, else legacy)."""
@@ -346,8 +366,10 @@ def compute_time_step_and_count(
         if theta_3db_deg is None or theta_3db_deg <= 0.0:
             raise ValueError("D4.6.2 requires theta_3db_deg > 0")
 
-        def _run_nonrepeating(nhit_local: float) -> dict:
+        def _run_nonrepeating(nhit_local: float, ntracks_local: float | None = None) -> dict:
             """Full D4.6.2 dimensioning for a given Nhit (incl. Nmin extension)."""
+            if ntracks_local is None:
+                ntracks_local = float(ntracks_eff)
             tstep_l = _fine_step(nhit_local)
             half_bw = float(theta_3db_deg) / 2.0
             h_min_km = _d42_altitude_km(a_km, e, min_operating_height_km)
@@ -373,8 +395,10 @@ def compute_time_step_and_count(
             if s_pass_l < 1e-12:
                 raise ValueError("D4.6.2 invalid: Spass ~0")
 
-            # Step 5 — note Ntrack is NOT reduced by the §D4.1 1e8 procedure.
-            s_req = (2.0 * phi_deg) / float(ntracks_eff)
+            # Step 5 — Ntrack stays at 16 through the §D4.1 recalculation
+            # (Agenium convention; Transfinite reduces it — see
+            # reduce_ntracks_1e8).
+            s_req = (2.0 * phi_deg) / float(ntracks_local)
             if s_req <= 0.0:
                 raise ValueError("D4.6.2 invalid: Sreq <= 0")
             # Step 6 + 7
@@ -429,7 +453,8 @@ def compute_time_step_and_count(
             # does not round or clamp this value; for large constellations it
             # can be fractional (e.g. 16/20 = 0.8).
             nhit_prime = float(nhit) / factor
-            res_reduced = _run_nonrepeating(nhit_prime)
+            ntracks_prime = nhit_prime if reduce_ntracks_1e8 else float(ntracks_eff)
+            res_reduced = _run_nonrepeating(nhit_prime, ntracks_prime)
             # N'coarse = floor((N'hit/Nhit)·Ncoarse); TS'coarse = TS'·N'coarse.
             ncoarse_eff = max(1, int(math.floor((nhit_prime / float(nhit)) * ncoarse_orig)))
             logger.info(
@@ -443,14 +468,16 @@ def compute_time_step_and_count(
             res = res_reduced
             nhit_eff = nhit_prime
             if res["nsteps"] > NSTEPS_TOLERANCE:
-                # The §D4.1 procedure is a single recalculation (no loop). For
-                # extreme geometries the run length (set by Ntrack, not Nhit) can
-                # keep nsteps above the tolerance; flag it rather than deviate.
+                # The §D4.1 procedure is a single recalculation (no loop).
+                # Under the Agenium convention (Ntrack kept at 16) the run
+                # length can stay above the tolerance; flag it rather than
+                # deviate.
                 logger.warning(
                     "D4.1: nsteps=%d still exceeds %.0e after the N'hit "
-                    "recalculation (run length is driven by Ntrack=%d, which "
-                    "§D4.1 does not reduce).",
-                    res["nsteps"], NSTEPS_TOLERANCE, ntracks_eff,
+                    "recalculation (run length driven by Ntrack=%g; the "
+                    "Agenium convention keeps it — set reduce_ntracks_1e8 "
+                    "for the Transfinite reading of §D4.1).",
+                    res["nsteps"], NSTEPS_TOLERANCE, ntracks_prime,
                 )
 
         tstep = res["tstep"]
@@ -506,6 +533,81 @@ def compute_time_step_and_count(
         nhit_eff=float(nhit_eff),
         ncoarse=int(ncoarse_eff),
     )
+
+
+def group_sub_constellations(planes: list[dict]) -> list[dict]:
+    """Group per-plane records into the §D4.1 dimensioning sets.
+
+    Planes sharing the same orbit geometry — (a, e, i) rounded to 1 km /
+    1e-3 / 0.1° — form one sub-constellation. Input dicts use the
+    ``srs_to_constellation_config`` plane keys (``semi_major_axis_km``,
+    ``eccentricity``, ``inclination_deg``, ``sats_per_plane``,
+    ``min_operating_height_km``); the output dicts carry the per-sub
+    kwargs consumed by :func:`compute_time_step_and_count`.
+    """
+    groups: dict[tuple, dict] = {}
+    for p in planes:
+        a = float(p.get("semi_major_axis_km", 0.0) or 0.0)
+        ecc = float(p.get("eccentricity", 0.0) or 0.0)
+        inc = float(p.get("inclination_deg", 0.0) or 0.0)
+        key = (round(a), round(ecc, 3), round(inc, 1))
+        g = groups.setdefault(key, {
+            "a_km": a, "e": ecc, "i_deg": inc,
+            "num_planes": 0, "_n_sats": 0, "_min_ops": [],
+        })
+        g["num_planes"] += 1
+        g["_n_sats"] += int(p.get("sats_per_plane", 0) or 0)
+        h_op = float(p.get("min_operating_height_km", 0.0) or 0.0)
+        if h_op > 0.0:
+            g["_min_ops"].append(h_op)
+    subs = []
+    for g in groups.values():
+        n_sats = g.pop("_n_sats")
+        min_ops = g.pop("_min_ops")
+        g["sats_per_plane"] = max(1, n_sats // max(1, g["num_planes"]))
+        g["min_operating_height_km"] = min(min_ops) if min_ops else 0.0
+        subs.append(g)
+    return subs
+
+
+def compute_time_step_and_count_multi(
+    sub_constellations: list[dict],
+    **kwargs,
+) -> TimeStepResult:
+    """§D4.1 multi-sub-constellation rule over :func:`compute_time_step_and_count`.
+
+    S.1503-4 §D4.1: "If there are multiple sets, e.g. for multiple
+    sub-constellations, then the longest run time and smallest time step over
+    all sub-constellations should be used." Each set is dimensioned separately
+    with its OWN (a, e, i, planes, H_min) — not just the lowest altitude — and
+    the combined result carries Δt = min over sets and
+    NSTEPS = floor(max Trun / min Δt).
+
+    Validated against the 'T' v5.45 EPFDRESULTS (CRC STEAM-2 A22+97B,
+    USASAT-NGSO-3X): Δt exact to the millisecond, NSTEPS within −0.06%
+    (STEAM-2: the 560 km/97.6° sub wins Δt over the lower 540 km/53.2° one —
+    the near-retrograde inclination raises the relative angular rate ω).
+
+    ``kwargs`` are the shared :func:`compute_time_step_and_count` parameters;
+    ``n_sat_total`` must be the WHOLE-constellation Σ (the §D4.1 √Nsatellites
+    factor is not per-sub).
+    """
+    if not sub_constellations:
+        raise ValueError("sub_constellations must be non-empty")
+    results = [
+        compute_time_step_and_count(**sub, **kwargs)
+        for sub in sub_constellations
+    ]
+    if len(results) == 1:
+        return results[0]
+    winner = min(results, key=lambda r: r.tstep_s)
+    trun_max = max(r.tstep_s * r.nsteps for r in results)
+    nsteps = int(math.floor(trun_max / winner.tstep_s))
+    logger.info(
+        "D4.1 multi-sub: %d sets; Δt=%.3f s (winning sub), Trun_max=%.0f s, "
+        "NSTEPS=%d", len(results), winner.tstep_s, trun_max, nsteps,
+    )
+    return winner._replace(nsteps=nsteps)
 
 
 class DualTimeStep:

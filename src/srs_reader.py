@@ -1722,12 +1722,17 @@ def srs_to_constellation_config(system: SRSNonGeoSystem) -> dict:
             "RAAN = long_asc + GMST0."
         )
 
-    # Detailed information for each plane (full orbital parameters)
+    # Detailed information for each plane (full orbital parameters).
+    # Same altitude priority as the top-level semi_major_axis above:
+    # apogee/perigee geometry → operational height → period-derived.
     config["planes"] = []
     for plane in system.orbit_planes:
-        a_km = plane.semi_major_axis_km
-        if plane.op_height_km > 100:
+        if plane.altitude_km > 100.0:
+            a_km = plane.altitude_km + RE_KM
+        elif plane.op_height_km > 100:
             a_km = plane.op_height_km + RE_KM
+        else:
+            a_km = plane.semi_major_axis_km
         n_sats = plane.nbr_sat_pl
         phase_map = system.phase_by_orbit.get(plane.orb_id, {})
         # 0-based list to ease direct use in create_constellation_from_config

@@ -209,6 +209,8 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
         sim["dual_time_step_mode"] = (
             common["dual_time_step_mode"] if common["dual_time_step_mode"] != "on" else "s1503"
         )
+    if common.get("itu_software"):
+        sim["itu_software"] = str(common["itu_software"]).lower()
     if "min_elevation_deg" in common:
         cfg.setdefault("non_gso", {})["min_elevation_deg"] = float(common["min_elevation_deg"])
     if common.get("es_antenna_diameter_m"):

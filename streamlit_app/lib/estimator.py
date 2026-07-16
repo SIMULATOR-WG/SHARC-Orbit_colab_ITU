@@ -285,6 +285,7 @@ def preview_time_step(
     num_steps_override: int | None = None,
     fine_step_override: float | None = None,
     coarse_step_override: float | None = None,
+    itu_software: str = "itu_epfd",
 ) -> TimeStepPreview:
     """Compute the S.1503-4 §D4 time step(s) and step count for a real system.
 
@@ -370,6 +371,10 @@ def preview_time_step(
     # when present (> 0), else the number of plane rows.
     num_planes = int(op.get("nbr_planes") or 0) or len(planes)
     sats_per_plane = int(p0["nbr_sat_pl"])
+    # §D4.1 √Nsatellites: real fleet size (Σ over planes) — heterogeneous
+    # filings undercount badly via num_planes × plane0 sats (CRC STEAM-2:
+    # 129×1 vs 1312 real).
+    n_sat_total = sum(int(p.get("nbr_sat_pl", 0) or 0) for p in planes) or None
     op_heights = [float(p.get("op_height_km", 0.0) or 0.0) for p in planes]
     op_heights = [h for h in op_heights if h > 0.0]
     min_operating_height_km = min(op_heights) if op_heights else 0.0
@@ -387,7 +392,9 @@ def preview_time_step(
         else:
             repeating = False
 
-    # Earth-station 3 dB beamwidth (drives the §D4.2 fine step).
+    # Earth-station 3 dB beamwidth (drives the §D4.2 fine step): θ3dB = 70λ/D
+    # in both §D4 readings — every official EPFDRESULTS run uses it.
+    _reading_b = str(itu_software or "itu_epfd").lower().startswith(("transfinite", "itu"))
     try:
         from src.antenna import create_gso_es_antenna  # type: ignore[import]
         es_ant = create_gso_es_antenna(
@@ -397,13 +404,40 @@ def preview_time_step(
     except Exception as exc:  # noqa: BLE001
         return _fail(f"antenna: {type(exc).__name__}: {exc}")
 
+    # §D4.1 multi-sub rule: dimension each sub-constellation with its own
+    # (a, e, i) — smallest Δt and longest run win. Mirror the engine's
+    # per-plane altitude priority (apogee/perigee mean → op height → SMA).
+    _plane_recs = []
+    for p in planes:
+        _alt = (float(p.get("apogee_km", 0.0) or 0.0)
+                + float(p.get("perigee_km", 0.0) or 0.0)) / 2.0
+        _op_h = float(p.get("op_height_km", 0.0) or 0.0)
+        if _alt > 100.0:
+            _a = _alt + RE_KM
+        elif _op_h > 100.0:
+            _a = _op_h + RE_KM
+        else:
+            _a = float(p.get("semi_major_axis_km", 0.0) or 0.0)
+        _plane_recs.append({
+            "semi_major_axis_km": _a,
+            "eccentricity": float(p.get("eccentricity", 0.0) or 0.0),
+            "inclination_deg": float(p.get("inclin_deg", 0.0) or 0.0),
+            "sats_per_plane": int(p.get("nbr_sat_pl", 0) or 0),
+            "min_operating_height_km": _op_h,
+        })
+
     try:
-        from src.time_step import compute_time_step_and_count  # type: ignore[import]
-        res = compute_time_step_and_count(
-            a_km=a_km, e=e, i_deg=i_deg,
-            num_planes=num_planes, sats_per_plane=sats_per_plane,
+        from src.time_step import (  # type: ignore[import]
+            compute_time_step_and_count_multi, group_sub_constellations,
+        )
+        subs = group_sub_constellations(_plane_recs) or [{
+            "a_km": a_km, "e": e, "i_deg": i_deg,
+            "num_planes": num_planes, "sats_per_plane": sats_per_plane,
+            "min_operating_height_km": min_operating_height_km,
+        }]
+        res = compute_time_step_and_count_multi(
+            subs,
             min_elevation_deg=float(min_elevation_deg),
-            min_operating_height_km=min_operating_height_km,
             artificial_precession=bool(artificial_precession),
             repeating_ground_track=bool(repeating),
             repeat_period_days=float(repeat_days),
@@ -412,6 +446,8 @@ def preview_time_step(
             min_exceedance_pct=min_exceedance_pct,
             ntracks=int(nhit),
             phi_coarse_deg=float(phi_coarse_deg),
+            n_sat_total=n_sat_total,
+            reduce_ntracks_1e8=_reading_b,
         )
     except Exception as exc:  # noqa: BLE001
         return _fail(f"time step: {type(exc).__name__}: {exc}")
@@ -445,6 +481,12 @@ def preview_time_step(
     notes: list[str] = []
     notes.append("Repeating ground track (§D4.6.1)" if repeating
                  else "Non-repeating orbit (§D4.6.2)")
+    if len(subs) > 1:
+        notes.append(f"§D4.1 multi-sub rule: {len(subs)} sub-constellations "
+                     "(smallest Δt + longest run)")
+    if _reading_b:
+        notes.append("§D4 reading B: N'track = N'hit in the §D4.1 recalc "
+                     "(as in ITU engine 'T' v5.45 runs)")
     if rr_reference:
         notes.append(f"Art.22 {rr_reference.replace('Article 22, ', '')} "
                      f"@ {frequency_ghz:.3f} GHz")

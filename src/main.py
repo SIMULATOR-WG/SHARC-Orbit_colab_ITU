@@ -38,7 +38,8 @@ from .pfd_mask import load_pfd_mask, load_pfd_mask_from_xml_content, PFDMask
 from .antenna import create_gso_es_antenna, EarthStationAntenna, s1503_or_condition_include
 from .wcg_search import search_wcg, search_wcg_s1503, WCGResult, _compute_pfd_3d
 from .time_step import (
-    compute_time_step_and_count, DualTimeStep,
+    compute_time_step_and_count, compute_time_step_and_count_multi,
+    group_sub_constellations, DualTimeStep,
     compute_orbital_period, repeat_track_is_physical,
 )
 from .epfd_calculator import (
@@ -343,6 +344,7 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             "fine_step_alpha_threshold_deg": 2.0,
             "dual_time_step_mode": "s1503",
             "s1503_nhit": 16,
+            "itu_software": "itu_epfd",
             "s1503_phi_coarse_deg": 1.5,
             "s1503_ncoarse": None,
             "s1503_literal_time_step": True,
@@ -550,6 +552,7 @@ def load_from_manual(manual: dict) -> dict:
             "fine_step_alpha_threshold_deg": 2.0,
             "dual_time_step_mode": "s1503",
             "s1503_nhit": 16,
+            "itu_software": "itu_epfd",
             "s1503_phi_coarse_deg": 1.5,
             "s1503_ncoarse": None,
             "s1503_literal_time_step": True,
@@ -1308,17 +1311,39 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
             _min_exc_pct = min(_cands)
     except Exception:
         _min_exc_pct = None
+    # §D4.1 √Nsatellites needs the REAL fleet size — heterogeneous filings
+    # (e.g. CRC STEAM-2: planes of 1/20/43/58 sats) undercount badly via
+    # num_planes × sats_per_plane(plane 0).
+    _n_sat_total = sum(
+        int(p.get("sats_per_plane", 0) or 0)
+        for p in (ngso_cfg.get("_planes") or [])
+    ) or None
+    # §D4 reading (itu_software) — S.1503-4 is ambiguous on whether Ntracks
+    # follows N'hit in the §D4.1 recalc. "itu_epfd" (default; legacy
+    # "transfinite" maps here) = reading B: N'track = N'hit, as in the current
+    # ITU 'T' v5.45 runs; "s1503_4" (legacy agenium/br_space) = reading A:
+    # Ntracks kept at 16. θ3dB = 70λ/D in both (all official runs).
+    _itu_sw = str(sim_cfg.get("itu_software", "itu_epfd") or "itu_epfd").lower()
+    _reading_b = _itu_sw.startswith(("transfinite", "itu"))
+    # §D4.1 multi-sub rule: dimension each sub-constellation with its own
+    # (a, e, i); smallest Δt + longest run win. Fall back to the top-level
+    # single-orbit parameters when per-plane data is unavailable.
+    _subs = group_sub_constellations(ngso_cfg.get("_planes") or []) or [{
+        "a_km": a_km, "e": ecc, "i_deg": i_deg,
+        "num_planes": num_planes, "sats_per_plane": sats_per_plane,
+        "min_operating_height_km": min_operating_height_km,
+    }]
     try:
-        _ts_ref = compute_time_step_and_count(
-            a_km=a_km, e=ecc, i_deg=i_deg,
-            num_planes=num_planes, sats_per_plane=sats_per_plane,
+        _ts_ref = compute_time_step_and_count_multi(
+            _subs,
             min_elevation_deg=min_elev_deg,
-            min_operating_height_km=min_operating_height_km,
             artificial_precession=artificial_precession,
             repeating_ground_track=repeating, repeat_period_days=repeat_days,
             theta_3db_deg=es_antenna.theta_3db_deg, nhit=nhit_s1503,
             literal_s1503_d42=literal_s1503_d42,
             min_exceedance_pct=_min_exc_pct, ntracks=nhit_s1503,
+            n_sat_total=_n_sat_total,
+            reduce_ntracks_1e8=_reading_b,
         )
         s1503_ref_tstep_s = float(_ts_ref.tstep_s)
         s1503_ref_nsteps = int(_ts_ref.nsteps)
@@ -2116,6 +2141,9 @@ def run_wcg_downlink(config: dict) -> tuple[
         )
         artificial_precession = False
 
+    # §D4 reading A/B (see build_downlink_engine_inputs).
+    _itu_sw = str(sim_cfg.get("itu_software", "itu_epfd") or "itu_epfd").lower()
+    _reading_b = _itu_sw.startswith(("transfinite", "itu"))
     theta_3db_deg = es_antenna.theta_3db_deg
     nhit_s1503 = int(sim_cfg.get("s1503_nhit", 16) or 16)
     literal_s1503_d42 = bool(sim_cfg.get("s1503_literal_time_step", True))
@@ -2164,12 +2192,20 @@ def run_wcg_downlink(config: dict) -> tuple[
         min_exc_pct = None
 
     phi_coarse_deg = float(sim_cfg.get("s1503_phi_coarse_deg", 1.5) or 1.5)
-    _ts_result = compute_time_step_and_count(
-        a_km=a_km, e=e, i_deg=i_deg,
-        num_planes=num_planes,
-        sats_per_plane=sats_per_plane,
+    # Real fleet size for §D4.1 √Nsatellites (heterogeneous filings).
+    _n_sat_total = sum(
+        int(p.get("sats_per_plane", 0) or 0)
+        for p in (ngso_cfg.get("_planes") or [])
+    ) or None
+    # §D4.1 multi-sub rule (see build_downlink_engine_inputs).
+    _subs = group_sub_constellations(ngso_cfg.get("_planes") or []) or [{
+        "a_km": a_km, "e": e, "i_deg": i_deg,
+        "num_planes": num_planes, "sats_per_plane": sats_per_plane,
+        "min_operating_height_km": min_operating_height_km,
+    }]
+    _ts_result = compute_time_step_and_count_multi(
+        _subs,
         min_elevation_deg=min_elev_deg,
-        min_operating_height_km=min_operating_height_km,
         artificial_precession=artificial_precession,
         repeating_ground_track=repeating,
         repeat_period_days=repeat_days,
@@ -2179,6 +2215,8 @@ def run_wcg_downlink(config: dict) -> tuple[
         min_exceedance_pct=min_exc_pct,
         ntracks=nhit_s1503,
         phi_coarse_deg=phi_coarse_deg,
+        n_sat_total=_n_sat_total,
+        reduce_ntracks_1e8=_reading_b,
     )
     s1503_tstep = _ts_result.tstep_s
     s1503_nsteps = _ts_result.nsteps

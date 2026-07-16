@@ -66,6 +66,28 @@ _DUAL_TS_DESC = {
     "on": "Coarse step + S.1503-4 §D.4.7 fine refinement near the WCG (normative).",
     "off": "Single coarse step throughout (faster but less precise around WCG).",
 }
+_ITU_SW_OPTIONS = [
+    "Reading A — Ntracks kept = 16",
+    "Reading B — Ntracks follows N'hit (default)",
+]
+_ITU_SW_DESC = {
+    "Reading A — Ntracks kept = 16": (
+        "§D4.1 pseudo-code read literally: the 1e8 run-time reduction "
+        "redefines only N'hit and N'coarse — Ntracks stays at 16 (§D4.5), "
+        "so large non-repeating runs may stay above 1e8 steps. Reproduces "
+        "the official engine 'A' runs (BR_Space v10, 2026 — MCSAT, "
+        "Skybridge, Boeing) and the 'T' v5.35 MCSAT run (2018) to ≤0.06%."
+    ),
+    "Reading B — Ntracks follows N'hit (default)": (
+        "Reads §D4.5 'Ntrack = Nhit' as an identity that propagates through "
+        "the §D4.1 recalculation (N'track = N'hit), shortening large "
+        "non-repeating runs ~20–36×. Reproduces the 'T' v5.45 runs "
+        "(GIBC ≤ v9 — CRC STEAM-2, USASAT-NGSO-3X) to −0.05% on NSTEPS. "
+        "Affects NSTEPS only: Δt (θ3dB = 70·λ/D + the §D4.1 multi-sub rule) "
+        "is identical in both readings, and the EPFD statistics are "
+        "expected to converge."
+    ),
+}
 _ARTIFICIAL_PREC_DESC = {
     "auto": "Engine decides from the SRS (rpt period / f_precess / plane count).",
     "on": "Force artificial RAAN precession on.",
@@ -122,6 +144,7 @@ prev = use_persisted_state("s1503.form", {
     "alpha_method": "analytical",
     "dual_time_step_mode": "on",
     "fine_time_step_s": "",
+    "itu_software": "itu_epfd",
     "wcg_manual": False,
     "wcg_manual_es_lat": "",
     "wcg_manual_es_lon": "",
@@ -488,6 +511,17 @@ with st.form("s1503_form"):
                 help="Engine key: `dual_time_step_mode`. Controls whether the "
                      "S.1503-4 §D.4.7 fine refinement runs.",
             )
+        itu_software_label = select_described(
+            "S.1503-4 §D4 reading (time-step dimensioning)",
+            _ITU_SW_OPTIONS, _ITU_SW_DESC,
+            index=1 if str(prev.get("itu_software", "itu_epfd")).lower().startswith(("transfinite", "itu")) else 0,
+            help="Engine key: `itu_software`. Two defensible readings of the "
+                 "§D4.1 run-time reduction in Rec. S.1503-4 — the text is "
+                 "ambiguous on whether Ntracks follows N'hit. Affects NSTEPS "
+                 "only (Δt is identical) — not the EPFD physics.",
+        )
+        itu_software = ("itu_epfd" if itu_software_label.startswith("Reading B")
+                        else "s1503_4")
 
     with st.expander("6. Orbital dynamics (station keeping / precession — S.1503-4 §D6.3)", expanded=False):
         col_h, col_i = st.columns(2)
@@ -619,6 +653,7 @@ with st.form("s1503_form"):
         num_steps_override=_i(num_steps),
         fine_step_override=_f(fine_dt),
         coarse_step_override=_f(dt),
+        itu_software=itu_software,
     )
     # Feed the real NSTEPS into the wall-time estimate when available.
     _nsteps = _tsp.nsteps if _tsp.ok else (_i(num_steps) or 86_400)
@@ -707,6 +742,7 @@ if submit:
     _set("wcg_manual_gso_lon", _f(wm_gso_lon))
     _set("fine_time_step_s", _f(fine_dt))
     params["dual_time_step_mode"] = dual_mode
+    params["itu_software"] = itu_software
     # Track-duration override (§D5.1.4.2). Only sent when > 0.
     _md_val = _f(min_duration_s)
     if _md_val is not None and _md_val > 0:
@@ -767,6 +803,7 @@ if submit:
         "wcg_manual_es_lat": wm_es_lat, "wcg_manual_es_lon": wm_es_lon,
         "wcg_manual_gso_lon": wm_gso_lon,
         "fine_time_step_s": fine_dt, "dual_time_step_mode": dual_mode,
+        "itu_software": itu_software,
         "min_duration_s": min_duration_s,
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),

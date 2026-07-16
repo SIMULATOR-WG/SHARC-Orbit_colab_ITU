@@ -144,6 +144,8 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["_fine_step_overridden"] = True
     if params.get("dual_time_step_mode"):
         sim["dual_time_step_mode"] = params["dual_time_step_mode"] if params["dual_time_step_mode"] != "on" else "s1503"
+    if params.get("itu_software"):
+        sim["itu_software"] = str(params["itu_software"]).lower()
     # ε₀ override: only when the user supplied a value. None/absent = keep the
     # filing's ε₀ (SRS grp.elev_min), per S.1503-4 (ε₀ is a system parameter).
     if params.get("min_elevation_deg") is not None:
