@@ -34,5 +34,8 @@ def test_d41_recalculation_allows_fractional_nhit() -> None:
 
     assert res.nhit_eff == 0.8
     assert res.ncoarse == 1
-    assert res.tstep_s == 4.213
-    assert res.nsteps == 24_317_731
+    # BR_Space v10 reference run (EPFDRESULTS_MCSAT_LEO_Ka): fine step
+    # 4.256 s (θ3dB = 70λ/D), 23 811 330 steps (ours +0.057% from Norbits
+    # rounding).
+    assert res.tstep_s == 4.256
+    assert res.nsteps == 23_824_941

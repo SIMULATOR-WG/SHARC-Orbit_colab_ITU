@@ -181,6 +181,10 @@ if planes:
                 title=f"Preview — {len(cons)} satellites",
                 height=560,
             )
+            # Same reference lines as Constellation: lat/lon graticule +
+            # emphasized equator (GSO-arc plane).
+            fig.add_traces(plots.graticule_3d())
+            fig.add_trace(plots.equator_3d())
             st.plotly_chart(fig, width="stretch")
         except Exception as exc:  # noqa: BLE001
             st.error(f"Preview failed: {exc}")

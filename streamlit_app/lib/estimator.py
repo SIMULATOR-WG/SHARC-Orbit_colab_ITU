@@ -352,9 +352,15 @@ def preview_time_step(
         return _fail("orbital parameters unavailable in the MDB")
 
     p0 = planes[0]
-    # a_km: prefer operational altitude when declared (>100 km), like build_config.
+    # a_km: prefer the actual orbit geometry (apogee/perigee mean), like
+    # srs_to_constellation_config — the BR software dimensions with the real
+    # orbit altitude, not the AP4 minimum operating height.
+    alt0 = (float(p0.get("apogee_km", 0.0) or 0.0)
+            + float(p0.get("perigee_km", 0.0) or 0.0)) / 2.0
     op_height0 = float(p0.get("op_height_km", 0.0) or 0.0)
-    if op_height0 > 100.0:
+    if alt0 > 100.0:
+        a_km = alt0 + RE_KM
+    elif op_height0 > 100.0:
         a_km = op_height0 + RE_KM
     else:
         a_km = float(p0["semi_major_axis_km"])
@@ -369,16 +375,13 @@ def preview_time_step(
     min_operating_height_km = min(op_heights) if op_heights else 0.0
 
     # Repeating ground track: explicit flag wins; else auto-detect from the SRS
-    # repeat period — but only when the track PHYSICALLY closes (near-integer
-    # orbits per repeat), mirroring the engine
-    # (src.time_step.repeat_track_is_physical). A declared repeat that does not
-    # close (e.g. a MEO at ~2.027 orbits/day) falls through to non-repeating
-    # §D4.6.2 — exactly what the run now does — so the estimate matches.
+    # — §D4.6.1 applies when station keeping maintains the declared repeat
+    # track (orbit.f_stn_keep), mirroring the engine and the BR software. A
+    # declared repeat without station keeping (e.g. Boeing ntc102, 1-day
+    # period, f_stn_keep=N) falls through to non-repeating §D4.6.2.
     if repeating is None:
-        from src.time_step import repeat_track_is_physical  # noqa: PLC0415
         rpt_s = float(p0.get("rpt_period_s", 0.0) or 0.0)
-        _rep_ok, _ = repeat_track_is_physical(rpt_s, a_km)
-        if rpt_s >= 3600.0 and _rep_ok:
+        if rpt_s >= 3600.0 and bool(p0.get("station_keep", False)):
             repeating = True
             repeat_days = rpt_s / 86400.0
         else:

@@ -1273,12 +1273,17 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     wdelta_deg_requested = float(ngso_cfg.get("_keep_range_deg", 0.0) or 0.0) if f_stn_keep else 0.0
 
     # Temporal sampling reference S.1503-4 §D4.2 (fine step + N).
+    # §D4.6.1 applies when station keeping maintains the declared repeat track
+    # (SRS orbit.f_stn_keep) — the BR software keys on this flag, not on the
+    # unperturbed geometric closure of the track (validated against the
+    # official EPFDRESULTS test runs: Skybridge ntc101 Y→repeating even at
+    # 5.56 orbits/repeat; Boeing ntc102 N→non-repeating despite a declared
+    # 1-day period).
     repeating = bool(sim_cfg.get("repeating_ground_track", False))
     repeat_days = float(sim_cfg.get("repeat_period_days", 1.0) or 1.0)
     if not repeating and (ngso_cfg.get("_rpt_period_s", 0) or 0) > 0:
         rpt_s = ngso_cfg["_rpt_period_s"]
-        _ok, _n_orb = repeat_track_is_physical(rpt_s, a_km)
-        if rpt_s >= 3600 and _ok:  # ≥1h AND track actually closes (§D4.6.1)
+        if rpt_s >= 3600 and bool(ngso_cfg.get("_f_stn_keep", False)):
             repeat_days = rpt_s / 86400.0
             repeating = True
     _orbit_case = classify_orbit_case(
@@ -2119,20 +2124,22 @@ def run_wcg_downlink(config: dict) -> tuple[
     repeating = sim_cfg.get("repeating_ground_track", False)
     repeat_days = sim_cfg.get("repeat_period_days", 1.0)
     if not repeating and ngso_cfg.get("_rpt_period_s", 0) > 0:
+        # §D4.6.1 keyed on station keeping (orbit.f_stn_keep), matching the BR
+        # software — see build_downlink_engine_inputs for the rationale.
         rpt_s = ngso_cfg["_rpt_period_s"]
-        _ok, _n_orb = repeat_track_is_physical(rpt_s, a_km)
-        if rpt_s >= 3600 and _ok:  # ≥1h AND track actually closes (§D4.6.1)
+        _, _n_orb = repeat_track_is_physical(rpt_s, a_km)
+        if rpt_s >= 3600 and bool(ngso_cfg.get("_f_stn_keep", False)):
             repeat_days = rpt_s / 86400.0
             repeating = True
             logger.info(
-                f"Repeating orbit detected (MDB): P_repeat = {repeat_days:.2f} days "
-                f"({_n_orb:.4f} orbits/repeat)"
+                f"Repeating orbit (MDB f_stn_keep=Y): P_repeat = {repeat_days:.2f} days "
+                f"({_n_orb:.4f} orbits/repeat, track held by station keeping)"
             )
         elif rpt_s >= 3600:
             logger.info(
-                f"Declared repeat (P_repeat = {rpt_s / 86400.0:.2f} days) rejected: "
-                f"{_n_orb:.4f} orbits/repeat is non-integer (track drifts) — using "
-                f"non-repeating §D4.6.2 dimensioning."
+                f"Declared repeat (P_repeat = {rpt_s / 86400.0:.2f} days) ignored: "
+                f"f_stn_keep=N (no station keeping to hold the track; "
+                f"{_n_orb:.4f} orbits/repeat) — using non-repeating §D4.6.2 dimensioning."
             )
     _orbit_case = classify_orbit_case(
         repeating_ground_track=bool(repeating),

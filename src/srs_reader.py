@@ -1619,12 +1619,21 @@ def srs_to_constellation_config(system: SRSNonGeoSystem) -> dict:
     if system.nbr_planes > 0:
         num_planes = system.nbr_planes
 
-    # Prefer Operational Altitude if available (more common in BR filings)
-    semi_major_axis = p0.semi_major_axis_km
-    if p0.op_height_km > 100:
+    # Semi-major axis: prefer the actual orbit geometry (apogee/perigee) —
+    # this is what the BR software uses (validated against EPFDRESULTS: Boeing
+    # ntc102 apog=20182 km vs op_ht=20000 km → ITU Δt matches apogee). The
+    # AP4 minimum operating height (op_ht) is a transmit gate, not the orbit.
+    if p0.altitude_km > 100.0:
+        semi_major_axis = p0.altitude_km + RE_KM
+        logger.info(
+            f"Using apogee/perigee from the MDB: h={p0.altitude_km:.2f} km "
+            f"(a={semi_major_axis:.2f} km)"
+        )
+    elif p0.op_height_km > 100:
         semi_major_axis = p0.op_height_km + RE_KM
         logger.info(f"Using operational altitude from the MDB: {p0.op_height_km} km (a={semi_major_axis:.2f} km)")
     else:
+        semi_major_axis = p0.semi_major_axis_km
         logger.info(f"Using orbital period to compute SMA: a={semi_major_axis:.2f} km")
 
     # SRS ``orbit.op_ht`` (× 10^op_ht_exp) is the AP4 "minimum operating

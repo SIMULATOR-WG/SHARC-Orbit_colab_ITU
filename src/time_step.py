@@ -59,16 +59,15 @@ def compute_orbital_period(a_km: float) -> float:
 def repeat_track_is_physical(
     rpt_period_s: float, a_km: float, tol_orbits: float = 0.02,
 ) -> tuple[bool, float]:
-    """Whether a declared repeat period actually closes the ground track.
+    """Whether a declared repeat period closes the unperturbed ground track.
 
-    S.1503-4 §D4.6.1 (repeating-orbit dimensioning, one repeat period) is valid
-    ONLY when the track truly repeats — the repeat period must hold a
-    (near-)integer number of orbital periods, otherwise the sub-satellite track
-    drifts and one repeat under-samples the geometry. A non-integer count (e.g.
-    a MEO at ~2.027 orbits/day declaring a 1-day repeat) must fall through to
-    the non-repeating §D4.6.2 dimensioning. Conservative on purpose: a wrongly
-    rejected genuine repeat only costs run length (oversampling, still correct),
-    while a wrongly accepted pseudo-repeat corrupts the EPFD statistic.
+    DIAGNOSTIC ONLY — the §D4.6.1/§D4.6.2 branch is keyed on the SRS
+    ``orbit.f_stn_keep`` flag (station keeping actively holds the declared
+    track, so closure is enforced operationally even when the unperturbed
+    Kepler track would drift). This matches the BR software: the official
+    EPFDRESULTS test runs dimension Skybridge (ntc101, f_stn_keep=Y,
+    5.56 orbits/repeat — does NOT close) as repeating, and Boeing (ntc102,
+    f_stn_keep=N, ~2.03 orbits/day — nearly closes) as non-repeating.
 
     Returns ``(is_physical, n_orbits_in_repeat)``.
     """

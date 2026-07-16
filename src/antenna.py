@@ -37,9 +37,15 @@ class EarthStationAntenna:
 
     @property
     def theta_3db_deg(self) -> float:
-        """3 dB beamwidth (full-width, degrees) in the parabolic region."""
-        phi_3db_half = math.sqrt(3.0 / 2.5e-3) / self.d_over_lambda
-        return 2.0 * phi_3db_half
+        """3 dB beamwidth (full-width, degrees): θ3dB = 70·λ/D.
+
+        Convention used by the ITU BR_Space EPFD software for the §D4
+        dimensioning beamwidth (both S.1428 and BO.1443) — validated against
+        official EPFDRESULTS runs (fine/coarse Δt match exactly). The
+        parabolic-region derivation (2·√(3/2.5e-3)·λ/D ≈ 69.28·λ/D) is ~1%
+        narrower and yields ~2% more time steps than the BR reference.
+        """
+        return 70.0 / self.d_over_lambda
 
 
 # =====================================================================
