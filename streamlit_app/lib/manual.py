@@ -62,12 +62,12 @@ _HELP: dict[str, str] = {
     ),
     "aggregate": (
         "**Aggregate page (Resolution 76 studies)**\n\n"
-        "Combines **two or more** systems and runs one of five "
+        "Combines **two or more** systems and runs one of four "
         "aggregation methods. Each item in the radio describes its "
         "strategy and cost; the box below the radio expands with a "
         "step-by-step explanation when you pick a method.\n\n"
         "Pick `method_1` for the conservative per-WCG convolution, "
-        "`method_2`/`method_5` for the grid sweep, `method_3` for the "
+        "`method_2` for the grid sweep, `method_3` for the "
         "joint megaconstellation sim, or `method_4` for the per-WCG "
         "audit. See the [Help page](./Help) for the full table.\n\n"
         "The WCG search / Time step / **Orbital dynamics** (station "
@@ -76,7 +76,7 @@ _HELP: dict[str, str] = {
         "The **Convolution tail (S.1588 Annex 1 §1)** section sits right "
         "after *Orbital dynamics* in the form. The *Tail floor* field is "
         "always editable but only used when the checkbox is ticked. It "
-        "applies to the convolving methods only (not `method_5`); reloading "
+        "applies to the convolving methods; reloading "
         "a run's config from the **Runs** page restores the truncation "
         "settings too."
     ),
@@ -87,7 +87,7 @@ _HELP: dict[str, str] = {
         "approaches under identical inputs.\n\n"
         "Mirrors **every Aggregate option** — WCG search, time step, "
         "**Orbital dynamics** (station keeping / precession) and the "
-        "method-2/5 grid params (grid / GSO step, max geometries, country "
+        "method-2 grid params (grid / GSO step, max geometries, country "
         "filter). Set once → applied to all selected methods. The form is "
         "**persisted** across visits (same defaults as Aggregate).\n\n"
         "All child runs share a `campaign_id` and roll up in the "
@@ -123,7 +123,7 @@ _HELP: dict[str, str] = {
     "results": (
         "**Results page**\n\n"
         "- **CCDF chart** — main aggregate curve + per-WCG (method_4) "
-        "or per-(point, system) (method_5) overlays. Article 22 / "
+        "or per-(point, system) (method_2) overlays. Article 22 / "
         "Resolution 76 limit curves drawn dashed/dotted.\n"
         "- **Normative percentiles** — bar chart at the Resolution 76 "
         "thresholds (100 %, 10 %, 1 %, 0.1 %, …). When the S.1588 "

@@ -57,7 +57,7 @@ help_expander("aggregate")
 tour.maybe_render("aggregate")
 st.caption(
     "Multi-system aggregation (Resolution 76 context) — pick ≥ 2 systems and "
-    "aggregate using one of 5 methods. Systems may belong to the same filing "
+    "aggregate using one of 4 methods. Systems may belong to the same filing "
     "(different notices) or to distinct filings."
 )
 

@@ -150,7 +150,7 @@ streamlit_app/
 │   ├── report.py             # S.1503-4 §D7.3 summary.html (statement + Table 17 + CDF)
 │   └── job_runners/
 │       ├── s1503_worker.py   # single-system worker
-│       └── s1588_worker.py   # multi-system worker (method_1..5)
+│       └── s1588_worker.py   # multi-system worker (method_1..4)
 ├── tests/                    # smoke tests
 ├── data/                     # SQLite + uploads + runs + cluster.json (gitignored)
 ├── README.md
@@ -167,7 +167,7 @@ streamlit_app/
 | Uploads | List filings + systems; **per-system orbital parameters** (planes, alt, e, i, RAAN, period) + **operating frequency bands** (masks + groups); *View mask* buttons → Mask Viewer; bulk delete / re-scan |
 | Mask Viewer | Interactive PFD mask visualiser — metadata header, real-degree A/B sliders, 2D heatmap (uniform vs proportional), slice line plot, point-wise PFD calculator |
 | Single-entry | S.1503-4 form (WCGA + EPFD↓); retractable WCG search / Manual WCG / Time step / **Orbital dynamics** (station keeping `Wdelta`, artificial precession, precession-from-MDB) sections |
-| Aggregate | Multi-system form (5 methods) + per-method panel; same WCG / Time step / **Orbital dynamics** sections (per filing) |
+| Aggregate | Multi-system form (4 methods) + per-method panel; same WCG / Time step / **Orbital dynamics** sections (per filing) |
 | Launcher | Multi-method campaign — mirrors all Aggregate options; persisted form |
 | Runs | Row-per-run table; per-row Results/Status; **delete actions behind a confirmation modal**; `finished_at (BRT)` + `duration` |
 | Status | Progress + log streaming + cancel; **live host CPU%/mem% + per-worker utilisation** (while running) |
@@ -189,7 +189,7 @@ from the title.
 The tool exposes two top-level simulation modes:
 
 - **Single-entry** (one system) — ITU-R S.1503-4 reference flow
-- **Aggregate** (≥ 2 systems) — five alternative aggregation methods (methods
+- **Aggregate** (≥ 2 systems) — four alternative aggregation methods (methods
   under study, **not necessarily tied to a single ITU-R recommendation**)
 
 ### 4.1 Single-entry — ITU-R S.1503-4
@@ -255,15 +255,15 @@ The Single-entry method **does not** spawn additional simulations: the
 `PHASE 3B — Static ES (Brasília)` legacy stage is **disabled** by default
 (`simulation.run_static_es = False` set by the worker).
 
-### 4.2 Aggregate — Methods 1 to 5 (under study)
+### 4.2 Aggregate — Methods 1 to 4 (under study)
 
 The Aggregate page accepts ≥ 2 systems (each a `(upload_id, ntc_id)` tuple)
-and exposes five aggregation alternatives. All five run through the
+and exposes four aggregation alternatives. All four run through the
 `s1588_worker.py` subprocess; their output artifacts share the same envelope
 JSON schema (`ccdf_bins_db`, `ccdf_pct`, `max_epfd_dbw_m2_40khz`, `percentiles`)
 plus method-specific keys.
 
-The five methods are **not all normative** — they exist to support comparison
+The four methods are **not all normative** — they exist to support comparison
 of aggregation policies during the Resolution 76 studies.
 
 ---
@@ -375,25 +375,11 @@ geometries of each filing — exposes inhomogeneity between systems.
 
 ---
 
-#### Method 5 — Step-1 per geometry (no envelope)
-
-**Concept:**
-
-1. Build a grid via `iter_geometry_grid(...)` (same as Method 2).
-2. For each grid point, simulate **each system independently** at that
-   geometry → keep individual per-system CCDFs at each point.
-3. **No convolution, no envelope.** Stores `per_point[].per_system[j]` raw.
-4. Top-level CCDF is empty; the headline `max_epfd_dbw_m2_40khz` reports the
-   maximum across all (point, system) combinations.
-
-**Use case:** preparatory Stage 1 study — the analyst can post-process the raw
-matrix (per_point × per_system) however they want without committing to a
-particular aggregation policy.
-
-**Cost:** N_geom × N EPFD simulations. No convolution overhead.
-
-**Artifact extra keys:** `grid_step_deg`, `gso_pointing_step_deg`,
-`n_grid_points`, `per_point[].per_system[]`.
+> **Retired: Method 5 (Step-1 raw, no envelope).** Folded into Method 2, whose
+> artifacts now keep the full curve set (`per_point[].per_system[]` raw CCDFs
+> alongside the per-point convolutions and the envelope). `method_5` survives
+> only as a dormant back-compat dispatch in `s1588_worker.py` so historical
+> runs still reload; it is not selectable in the UI.
 
 ---
 
@@ -441,19 +427,10 @@ graph LR
         M4a --> M4b --> M4c
     end
 
-    subgraph M5["method_5 (Step-1 raw)"]
-        direction TB
-        M5a[grid sweep]
-        M5b[for each pt:<br>N per-system CCDFs]
-        M5c[no envelope<br>raw matrix kept]
-        M5a --> M5b --> M5c
-    end
-
     Inputs --> M1
     Inputs --> M2
     Inputs --> M3
     Inputs --> M4
-    Inputs --> M5
 ```
 
 ### 4.4 Common technical notes (all aggregate methods)
@@ -615,7 +592,6 @@ Three scheduling refinements (all transparent to callers):
 | method_2 | `n_grid_points × N` (geometry × filing) |
 | method_3 | joint sim sequential; post_sum `N` tasks parallel |
 | method_4 | `N` WCGAs + `N × N` (WCG × filing) sims |
-| method_5 | `n_grid_points × N` (no envelope) |
 
 #### 4.5.6 Multi-machine flow
 
@@ -853,7 +829,7 @@ erDiagram
     RUNS {
         TEXT id PK
         TEXT kind "single|aggregate"
-        TEXT method "method_1..5"
+        TEXT method "method_1..4 (legacy rows: method_5)"
         TEXT status "pending|running|success|failed|cancelled"
         REAL progress_pct
         TEXT params_json
@@ -1032,8 +1008,7 @@ flowchart TD
     M -->|method_2| F2[_run_method_2]
     M -->|method_3| F3[_run_method_3]
     M -->|method_4| F4[_run_method_4]
-    M -->|method_5| F5[_run_method_5]
-    F1 & F2 & F3 & F4 & F5 --> ATT[attach Art22 + Res76 limits]
+    F1 & F2 & F3 & F4 --> ATT[attach Art22 + Res76 limits]
     ATT --> OUT[sim_data.json + summary.json]
 ```
 
@@ -1115,24 +1090,7 @@ flowchart TD
     PerWCG --> Out
 ```
 
-### 5.12 Aggregate · method_5 (Step-1 raw, no envelope)
-
-```mermaid
-flowchart TD
-    Start[N systems]
-    Grid["iter_geometry_grid(...)"]
-    PointLoop[for each grid point p]
-    SimLoop["for each filing i:<br>run_epfd_at_geometry(i, p)"]
-    Keep["store per_point[p].per_system[i]<br>(raw CCDF)"]
-    Out["matrix N_geom × N<br>no convolution<br>no envelope"]
-
-    Start --> Grid --> PointLoop
-    PointLoop --> SimLoop --> Keep
-    PointLoop -. next p .-> PointLoop
-    Keep --> Out
-```
-
-### 5.13 Results page rendering
+### 5.12 Results page rendering
 
 ```mermaid
 flowchart TB
@@ -1159,7 +1117,7 @@ clicked point is mapped to the *Geometry* picker via exact rounded
 (`@st.dialog(width="large")`) with the selected geometry's CCDF +
 Article 22 / Resolution 76 limit overlays.
 
-### 5.14 Globe visualization per method
+### 5.13 Globe visualization per method
 
 | Method | ES (★ star) | GSO (◆ diamond) | Grid points |
 |---|---|---|---|
@@ -1168,7 +1126,6 @@ Article 22 / Resolution 76 limit overlays.
 | method_3 | 1 WCG_agg | 1 GSO_agg | — |
 | method_4 | N WCGs | N GSOs | — |
 | method_2 | — | GSO sweep (translucent) | ES grid (blue dots) |
-| method_5 | — | GSO sweep | ES grid |
 
 Clicking a geometry on the globe **selects the matching entry in the
 *Geometry* picker** below the chart (single-select via
@@ -1235,8 +1192,9 @@ corresponding worker script. The UI reads stdout via a thread + `queue.Queue`.
   legitimate no-geometry outcome, not an error. Emits `FINISHED_AT:<iso>` on
   stdout before exit so the launcher can stamp the run's `finished_at`
   precisely.
-- `s1588_worker.py` — implements `method_1..method_5` (convolution / grid /
-  joint), reusing `src/s1588_studies` and `src/epfd_calculator`. Wraps
+- `s1588_worker.py` — implements `method_1..method_4` (convolution / grid /
+  joint; plus a dormant `method_5` back-compat dispatch for pre-merge runs),
+  reusing `src/s1588_studies` and `src/epfd_calculator`. Wraps
   each per-task body (`_single_filing_task`, `_at_geometry_task`) so it
   can run either sequentially or via `cluster.parallel_starmap_progress`
   (Ray) — see section 4.5. A `NoValidGeometry` from any per-filing sim is caught
@@ -1558,7 +1516,7 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A["N systems +<br>method ∈ {1..5}"]
+    A["N systems +<br>method ∈ {1..4}"]
     B[launcher.launch_s1588]
     C[subprocess s1588_worker]
     D{method?}
@@ -1566,13 +1524,12 @@ flowchart LR
     M2[method_2<br>grid + envelope]
     M3[method_3<br>joint + post_sum]
     M4[method_4<br>per-WCG sweep]
-    M5[method_5<br>raw matrix]
     E[attach Art.22 + Res.76]
     F[sim_data.json]
     G["8_Results<br>CCDFs + limits + globe<br>+ per-geometry modals"]
     A --> B --> C --> D
-    D --> M1 & M2 & M3 & M4 & M5
-    M1 & M2 & M3 & M4 & M5 --> E --> F --> G
+    D --> M1 & M2 & M3 & M4
+    M1 & M2 & M3 & M4 --> E --> F --> G
 ```
 
 ---

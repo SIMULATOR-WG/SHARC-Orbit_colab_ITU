@@ -388,7 +388,7 @@ streamlit_app/
 │   ├── 1_Upload.py
 │   ├── 2_Uploads.py
 │   ├── 3_Single_entry.py   # Single-system run (ITU-R S.1503-4)
-│   ├── 4_Aggregate.py      # Multi-system aggregation (5 methods under study)
+│   ├── 4_Aggregate.py      # Multi-system aggregation (4 methods under study)
 │   ├── 5_Launcher.py       # Campaign launcher
 │   ├── 6_Runs.py           # Run history (per-row Results/Status buttons)
 │   ├── 7_Status.py         # Run progress + log stream
@@ -425,7 +425,7 @@ streamlit_app/
 │   ├── plan.py             # cost-aware LPT task ordering for cluster dispatch
 │   └── job_runners/
 │       ├── s1503_worker.py # single-system worker
-│       └── s1588_worker.py # multi-system worker (method_1..5)
+│       └── s1588_worker.py # multi-system worker (method_1..4)
 ├── data/                   # SQLite + uploads + runs + cluster.json (gitignored)
 ├── tests/                  # pytest
 │   ├── test_smoke.py       # end-to-end worker + storage
@@ -659,7 +659,6 @@ oversubscription from Numba's internal threading).
 | method_2 | `n_grid_points × N` (geometry × filing) |
 | method_3 | joint sim sequential; post_sum `N` tasks parallel |
 | method_4 | `N` WCGAs + `N × N` (WCG × filing) sims |
-| method_5 | `n_grid_points × N` (no envelope) |
 
 Each Ray task receives only JSON-serialisable dicts (filing payload
 with relative paths + common params + lat/lon/gso_lon).
@@ -676,7 +675,7 @@ turn it on when you need to spread the load across machines.
 ## Roadmap
 
 Done:
-- Ray distributed worker pool (method_1..5 dispatch via `lib/cluster.py`)
+- Ray distributed worker pool (method_1..4 dispatch via `lib/cluster.py`)
 - Ray runtime_env shipping (`src/` + `streamlit_app/` as `py_modules`,
   `uploads/` as `working_dir`) — no manual rsync on worker hosts
 - Cluster page state machine (Standalone / Active / Unreachable / Missing)

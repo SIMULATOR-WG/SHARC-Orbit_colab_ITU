@@ -131,12 +131,12 @@ st.markdown(
 )
 st.markdown(
     "**Aggregate** — Run a multi-system aggregation study with one of "
-    "five methods (see [Aggregation methods](#aggregation-methods)). The "
+    "four methods (see [Aggregation methods](#aggregation-methods)). The "
     "selected method's strategy is shown step-by-step in a panel below "
     "the method picker."
 )
 st.markdown(
-    "**Launcher** — Launch a *campaign* (Methods 1–3 + optionally 4/5) on "
+    "**Launcher** — Launch a *campaign* (Methods 1–3 + optionally 4) on "
     "the same systems as a reproducible bundle. All child runs share a "
     "`campaign_id` and roll up in **Campaign**."
 )
