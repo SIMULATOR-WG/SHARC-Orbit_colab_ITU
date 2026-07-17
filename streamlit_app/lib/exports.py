@@ -16,10 +16,14 @@ def run_to_xlsx(sim_data: dict[str, Any], params: dict[str, Any] | None = None) 
 
     Sheets (each maps to a normative block of S.1503-4):
       ``run_def``    — run attributes / background info (§D7.2, §D2.1)
-      ``result_def`` — Article 22 specification points Ji/Pi (§D7.1.3)
+      ``result_def`` — specification points Ji/Pi (§D7.1.3): Article 22 and,
+                       for aggregate runs, Resolution 76 (``limit_set`` column)
       ``results``    — statement + Table 17 rows (§D7.3.1 / §D7.3.2)
-      ``cdf``        — the CDF/CCDF table (§D7.3.3)
+      ``cdf``        — the headline CDF/CCDF table (§D7.3.3; the envelope on
+                       aggregate method_2 runs)
       ``pdf``        — the 0.1 dB-bin histogram (§D7.1.1), when embedded
+      ``cdf_per_point``/``cdf_per_system`` — the full overlay curves shown in
+                       the Results-page chart, when the artifact carries them
     Units follow A2.1 Table 1 and are spelled out in the column headers.
     """
     ident = sim_data.get("identification") or {}
@@ -56,11 +60,19 @@ def run_to_xlsx(sim_data: dict[str, Any], params: dict[str, Any] | None = None) 
         columns=["parameter", "value"],
     )
 
-    limits = art22.get("limits") or []
+    res76 = sim_data.get("resolution76") or {}
+    _lim_rows = [
+        ("Article 22", float(l[0]), float(l[1]))
+        for l in (art22.get("limits") or [])
+        if isinstance(l, (list, tuple)) and len(l) >= 2
+    ] + [
+        ("Resolution 76 (aggregate)", float(l[0]), float(l[1]))
+        for l in (res76.get("limits") or [])
+        if isinstance(l, (list, tuple)) and len(l) >= 2
+    ]
     result_def = pd.DataFrame(
-        [(float(l[0]), float(l[1])) for l in limits
-         if isinstance(l, (list, tuple)) and len(l) >= 2],
-        columns=[f"Ji_epfd [{epfd_unit}]", "Pi_pct [%]"],
+        _lim_rows,
+        columns=["limit_set", f"Ji_epfd [{epfd_unit}]", "Pi_pct [%]"],
     )
 
     t17 = sim_data.get("table17") or []
@@ -94,6 +106,22 @@ def run_to_xlsx(sim_data: dict[str, Any], params: dict[str, Any] | None = None) 
         "probability [fraction]": hist.get("probability") or [],
     })
 
+    def _curves_sheet(entries: list, tag: str) -> pd.DataFrame:
+        """One (epfd, pct) column pair per stored curve — ragged lengths padded
+        with blanks so every point of every curve survives the export."""
+        cols: dict[str, pd.Series] = {}
+        for i, p in enumerate(entries):
+            b, q = p.get("ccdf_bins_db"), p.get("ccdf_pct")
+            if not b or not q:
+                continue
+            key = p.get("index", p.get("system_index", i))
+            cols[f"{tag}{key}_epfd [{epfd_unit}]"] = pd.Series(b, dtype=float)
+            cols[f"{tag}{key}_pct [%]"] = pd.Series(q, dtype=float)
+        return pd.DataFrame(cols)
+
+    per_point_df = _curves_sheet(sim_data.get("per_point") or [], "pt")
+    per_system_df = _curves_sheet(sim_data.get("per_system") or [], "sys")
+
     buf = io.BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xw:
         run_def.to_excel(xw, sheet_name="run_def", index=False)
@@ -104,6 +132,10 @@ def run_to_xlsx(sim_data: dict[str, Any], params: dict[str, Any] | None = None) 
                              startrow=len(verdict) + 2)
         cdf.to_excel(xw, sheet_name="cdf", index=False)
         pdf_df.to_excel(xw, sheet_name="pdf", index=False)
+        if not per_point_df.empty:
+            per_point_df.to_excel(xw, sheet_name="cdf_per_point", index=False)
+        if not per_system_df.empty:
+            per_system_df.to_excel(xw, sheet_name="cdf_per_system", index=False)
     return buf.getvalue()
 
 

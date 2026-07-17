@@ -31,6 +31,25 @@ def _load() -> dict:
     return _CACHE
 
 
+def iter_polygons() -> "list[list[list[list[float]]]]":
+    """Every country polygon in the dataset, as [polygon][ring][pt][lon, lat].
+
+    MultiPolygons are flattened to one entry per polygon; holes (rings after
+    the first) are preserved. Used to draw the world background on exported
+    maps without a cartopy dependency.
+    """
+    polys: list = []
+    for feat in _load().get("features", []):
+        geom = feat.get("geometry") or {}
+        coords = geom.get("coordinates") or []
+        gtype = geom.get("type")
+        if gtype == "Polygon":
+            polys.append(coords)
+        elif gtype == "MultiPolygon":
+            polys.extend(coords)
+    return polys
+
+
 def list_countries() -> list[dict]:
     """List all countries in the dataset."""
     data = _load()

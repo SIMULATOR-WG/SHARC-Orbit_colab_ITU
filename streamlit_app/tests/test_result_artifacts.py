@@ -163,3 +163,39 @@ def test_timeseries_gz_for_long_traces(tmp_path):
     assert name == "epfd_timeseries.csv.gz"
     text = gzip.decompress((tmp_path / name).read_bytes()).decode()
     assert text.count("\n") > 60_000
+
+
+def test_run_to_xlsx_aggregate_curves_and_res76():
+    """Aggregate export parity with the UI chart: per-point curves get their
+    own sheet and Resolution 76 joins the result_def specification points."""
+    import openpyxl
+    sim = _sim_data()
+    sim["method"] = "method_2"
+    sim["resolution76"] = {"limits": [[-157.0, 0.1], [-170.0, 25.0]]}
+    sim["per_point"] = [
+        {"index": 0, "ccdf_bins_db": [-160.0, -170.0], "ccdf_pct": [0.01, 50.0]},
+        {"index": 1, "ccdf_bins_db": [-158.0, -168.0, -175.0],
+         "ccdf_pct": [0.005, 10.0, 90.0]},
+    ]
+    wb = openpyxl.load_workbook(io.BytesIO(run_to_xlsx(sim)))
+    assert "cdf_per_point" in wb.sheetnames
+    ws = wb["cdf_per_point"]
+    heads = [c.value for c in ws[1]]
+    assert "pt0_epfd [dBW/m^2/40kHz]" in heads and "pt1_pct [%]" in heads
+    # ragged curves padded, all points preserved
+    assert ws.max_row == 1 + 3
+    rd = wb["result_def"]
+    sets = {r[0].value for r in rd.iter_rows(min_row=2)}
+    assert sets == {"Article 22", "Resolution 76 (aggregate)"}
+
+
+def test_ccdf_png_includes_overlays(tmp_path):
+    from streamlit_app.lib.result_artifacts import write_ccdf_png
+    sim = _sim_data()
+    sim["method"] = "method_2"
+    sim["resolution76"] = {"limits": [[-157.0, 0.1], [-170.0, 25.0]]}
+    sim["per_point"] = [
+        {"index": 0, "ccdf_bins_db": [-160.0, -170.0], "ccdf_pct": [0.01, 50.0]},
+    ]
+    assert write_ccdf_png(tmp_path, sim) == "ccdf.png"
+    assert (tmp_path / "ccdf.png").stat().st_size > 1000

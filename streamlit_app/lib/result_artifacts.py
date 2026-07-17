@@ -139,20 +139,57 @@ def _mpl():
 
 
 def write_ccdf_png(result_path: Path, sim_data: dict[str, Any]) -> str | None:
-    """``ccdf.png`` — CCDF on a log-y axis, with the Article 22 limit points
-    when present in the artifact."""
+    """``ccdf.png`` — CCDF on a log-y axis with the SAME content as the
+    Results-page chart: headline curve, light overlays (per-point grid
+    convolutions, per-system single entries, §D5.1.4.2 window sets, post_sum)
+    and BOTH limit curves (Article 22 + Resolution 76) when present."""
     bins = sim_data.get("ccdf_bins_db") or []
     pct = sim_data.get("ccdf_pct") or []
     if not bins or not pct:
         return None
     plt = _mpl()
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    ax.semilogy(bins, pct, lw=1.6, color="#0e7490", label="EPFD↓ CCDF")
-    limits = ((sim_data.get("article22") or {}).get("limits")) or []
-    lx = [float(l[0]) for l in limits if isinstance(l, (list, tuple)) and len(l) >= 2]
-    ly = [float(l[1]) for l in limits if isinstance(l, (list, tuple)) and len(l) >= 2]
-    if lx:
-        ax.plot(lx, ly, "s--", ms=4, lw=1.0, color="#b91c1c", label="Article 22 limit")
+    fig, ax = plt.subplots(figsize=(9, 5.5), dpi=150)
+
+    def _overlay(entries: list, color: str, label: str, ls: str = "-",
+                 lw: float = 0.8, alpha: float = 0.55) -> None:
+        first = True
+        for p in entries:
+            b, q = p.get("ccdf_bins_db"), p.get("ccdf_pct")
+            if not b or not q:
+                continue
+            ax.semilogy(b, q, lw=lw, ls=ls, color=color, alpha=alpha,
+                        label=label if first else None)
+            first = False
+
+    # Light overlays first so the headline stays on top (mirrors 8_Results).
+    _overlay(sim_data.get("per_point") or [], "#60a5fa", "grid points (conv.)")
+    _overlay(sim_data.get("per_system") or [], "#94a3b8",
+             "single-entry curves", ls=":", lw=0.9)
+    _overlay(sim_data.get("per_window") or [], "#94a3b8",
+             "window sets (§D5.1.4.2)", ls=":", lw=0.9)
+    ps = sim_data.get("post_sum") or {}
+    if ps.get("ccdf_bins_db") and ps.get("ccdf_pct"):
+        ax.semilogy(ps["ccdf_bins_db"], ps["ccdf_pct"], lw=1.2, ls="--",
+                    color="#fbbf24", alpha=0.9,
+                    label="post_sum (convolution complement)")
+
+    headline = str(sim_data.get("method") or "EPFD↓") + " CCDF"
+    ax.semilogy(bins, pct, lw=1.8, color="#0e7490", label=headline)
+
+    for key, style, name in (
+        ("article22", dict(marker="s", ms=4, ls="--", color="#b91c1c"),
+         "Article 22 limit"),
+        ("resolution76", dict(marker="o", ms=4, ls=":", color="#d97706"),
+         "Resolution 76 limit (aggregate)"),
+    ):
+        limits = ((sim_data.get(key) or {}).get("limits")) or []
+        lx = [float(l[0]) for l in limits
+              if isinstance(l, (list, tuple)) and len(l) >= 2]
+        ly = [float(l[1]) for l in limits
+              if isinstance(l, (list, tuple)) and len(l) >= 2]
+        if lx:
+            ax.plot(lx, ly, lw=1.0, label=name, **style)
+
     unit = _epfd_unit(sim_data)
     ax.set_xlabel(f"EPFD↓ [{unit}]")
     ax.set_ylabel("% of time exceeded")
@@ -240,18 +277,56 @@ def write_geometries_csv(result_path: Path, sim_data: dict[str, Any]) -> str | N
     return out.name
 
 
-def write_geometry_map_png(result_path: Path, sim_data: dict[str, Any]) -> str | None:
-    """``map.png`` — the tested geometry points on a plate-carrée map (R10).
+def _draw_world(ax) -> None:
+    """Country polygons (Natural Earth geojson already shipped with the app)
+    as a light land background — plate carrée, no cartopy dependency.
+    Best-effort: silently skipped if the dataset is unavailable."""
+    try:
+        from src.s1588_studies.countries import iter_polygons  # noqa: PLC0415
+        from matplotlib.collections import PolyCollection  # noqa: PLC0415
+        from matplotlib.path import Path as MplPath  # noqa: PLC0415
+        from matplotlib.patches import PathPatch  # noqa: PLC0415
 
-    ES points colour-coded by max EPFD when available; GSO sub-satellite
-    longitudes marked on the equator. Headless matplotlib; coastlines are
-    omitted (no cartopy dependency) — the lat/lon grid gives the frame.
+        exteriors = []
+        patches = []
+        for poly in iter_polygons():
+            if not poly:
+                continue
+            if len(poly) == 1:
+                exteriors.append(poly[0])
+            else:
+                # Rings after the first are holes — build a Path with them so
+                # lakes/enclaves render as gaps.
+                verts, codes = [], []
+                for ring in poly:
+                    verts.extend(ring)
+                    codes.extend([MplPath.MOVETO]
+                                 + [MplPath.LINETO] * (len(ring) - 1))
+                patches.append(PathPatch(
+                    MplPath(verts, codes), facecolor="#e2e8f0",
+                    edgecolor="#94a3b8", linewidth=0.4, zorder=1))
+        if exteriors:
+            ax.add_collection(PolyCollection(
+                exteriors, facecolor="#e2e8f0", edgecolor="#94a3b8",
+                linewidths=0.4, zorder=1))
+        for p in patches:
+            ax.add_patch(p)
+    except Exception:  # noqa: BLE001 — map background is decorative
+        pass
+
+
+def write_geometry_map_png(result_path: Path, sim_data: dict[str, Any]) -> str | None:
+    """``map.png`` — the tested geometry points on a plate-carrée world map
+    (R10): country outlines from the shipped Natural Earth geojson, ES points
+    colour-coded by max EPFD when available, GSO sub-satellite longitudes on
+    the equator. Headless matplotlib, no cartopy dependency.
     """
     rows = _geometry_rows(sim_data)
     if not rows:
         return None
     plt = _mpl()
     fig, ax = plt.subplots(figsize=(9, 5), dpi=150)
+    _draw_world(ax)
     lats = [float(r["es_lat_deg"]) for r in rows]
     lons = [float(r["es_lon_deg"]) for r in rows]
     vals = [r["max_epfd_db"] for r in rows]

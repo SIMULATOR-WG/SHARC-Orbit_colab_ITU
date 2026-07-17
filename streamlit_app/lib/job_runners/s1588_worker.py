@@ -75,6 +75,51 @@ def _percentiles(bins_desc, pct_asc,
     }
 
 
+def _ccdf_envelope(
+    curves: "list[tuple[list[float], list[float]]]",
+    pct_lo: float = 0.0,
+) -> "tuple[list[float], list[float]]":
+    """Worst-per-percentage CCDF envelope (linear power scale).
+
+    The envelope is evaluated at EVERY percentage breakpoint observed in any
+    input curve (union of all ``ccdf_pct`` values), so no real point is lost —
+    a fixed resampled axis (e.g. ``linspace(0.0001, 100, 1024)``) has ~0.1%
+    spacing and collapses the whole <0.1% tail (the region the Article 22
+    limits actually probe) to a single sample. The tail is kept down to the
+    smallest observed breakpoint (100·1/N of the longest run) — no arbitrary
+    lower cut. Curves are (bins_db, pct) pairs; breakpoints at or below
+    ``pct_lo`` (the truncation floor, when active) are dropped, as are
+    zero-exceedance entries. Returns (bins_db descending, pct) like the
+    per-point curves.
+    """
+    import numpy as np
+
+    if not curves:
+        return [], []
+    common_pct = np.unique(np.concatenate([
+        np.asarray(pct, dtype=float) for _bins, pct in curves
+    ]))
+    common_pct = common_pct[
+        (common_pct >= pct_lo) & (common_pct > 0.0) & (common_pct <= 100.0)
+    ]
+    if common_pct.size == 0:
+        return [], []
+    env = np.full(common_pct.shape, 1e-30)
+    for bins, pct in curves:
+        bins_arr = np.asarray(bins, dtype=float)
+        pct_arr = np.asarray(pct, dtype=float)
+        order = np.argsort(pct_arr)
+        bins_lin = np.power(10.0, bins_arr / 10.0)[order]
+        pct_asc = pct_arr[order]
+        interp = np.interp(common_pct, pct_asc, bins_lin,
+                           left=bins_lin[0], right=bins_lin[-1])
+        env = np.maximum(env, interp)
+    env_db = 10.0 * np.log10(np.maximum(env, 1e-30))
+    order_desc = np.argsort(-env_db)
+    return ([float(x) for x in env_db[order_desc]],
+            [float(x) for x in common_pct[order_desc]])
+
+
 def _resolve_filing_path(filing: dict[str, Any], abs_key: str, rel_key: str) -> str | None:
     """Resolve a filing's file path, trying (in order):
 
@@ -594,7 +639,7 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
             entry["max_epfd_dbw"] = bins[0] if bins else None
         per_point.append(entry)
 
-    # Envelope (worst per percentile, linear power scale). When tail truncation
+    # Envelope (worst per percentage, linear power scale). When tail truncation
     # is active the per-point curves stop at the floor — do NOT extend them flat
     # down to 0.0001% via np.interp(left=...): that would fabricate probability
     # resolution the truncated curves don't have, inconsistent with methods
@@ -603,22 +648,10 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
     env_floor = _truncation_floor(
         params, [(p["ccdf_bins_db"], p["ccdf_pct"]) for p in conv_points],
     )
-    pct_lo = max(0.0001, float(env_floor)) if env_floor is not None else 0.0001
-    common_pct = np.linspace(pct_lo, 100.0, 1024)
-    env = np.full(common_pct.shape, 1e-30)
-    for p in conv_points:
-        bins_arr = np.asarray(p["ccdf_bins_db"], dtype=float)
-        pct_arr = np.asarray(p["ccdf_pct"], dtype=float)
-        order = np.argsort(pct_arr)
-        bins_lin = np.power(10.0, bins_arr / 10.0)[order]
-        pct_asc = pct_arr[order]
-        interp = np.interp(common_pct, pct_asc, bins_lin,
-                            left=bins_lin[0], right=bins_lin[-1])
-        env = np.maximum(env, interp)
-    env_db = 10.0 * np.log10(np.maximum(env, 1e-30))
-    order_desc = np.argsort(-env_db)
-    env_bins = [float(x) for x in env_db[order_desc]] if conv_points else []
-    env_pct = [float(x) for x in common_pct[order_desc]] if conv_points else []
+    pct_lo = float(env_floor) if env_floor is not None else 0.0
+    env_bins, env_pct = _ccdf_envelope(
+        [(p["ccdf_bins_db"], p["ccdf_pct"]) for p in conv_points], pct_lo,
+    )
 
     out = {
         "method": method_label,
