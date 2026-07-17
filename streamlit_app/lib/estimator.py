@@ -419,6 +419,7 @@ def preview_time_step(
         else:
             _a = float(p.get("semi_major_axis_km", 0.0) or 0.0)
         _plane_recs.append({
+            "a_km_d4": _a,  # §D4 dimensioning altitude (geometry-first)
             "semi_major_axis_km": _a,
             "eccentricity": float(p.get("eccentricity", 0.0) or 0.0),
             "inclination_deg": float(p.get("inclin_deg", 0.0) or 0.0),

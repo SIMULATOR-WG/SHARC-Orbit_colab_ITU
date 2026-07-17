@@ -547,7 +547,10 @@ def group_sub_constellations(planes: list[dict]) -> list[dict]:
     """
     groups: dict[tuple, dict] = {}
     for p in planes:
-        a = float(p.get("semi_major_axis_km", 0.0) or 0.0)
+        # §D4 dimensioning altitude (a_km_d4, apogee/perigee geometry first)
+        # when the loader provides it; the plain semi-major axis (propagation
+        # field, op-height first) otherwise. See srs_to_constellation_config.
+        a = float(p.get("a_km_d4") or p.get("semi_major_axis_km", 0.0) or 0.0)
         ecc = float(p.get("eccentricity", 0.0) or 0.0)
         inc = float(p.get("inclination_deg", 0.0) or 0.0)
         key = (round(a), round(ecc, 3), round(inc, 1))

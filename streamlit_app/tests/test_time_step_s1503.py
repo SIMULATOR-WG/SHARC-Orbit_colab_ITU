@@ -147,6 +147,44 @@ def test_d41_multi_sub_rule_steam2() -> None:
     assert reading_a.nsteps == 95_271_970  # Ntracks=16 kept
 
 
+def test_boeing_102_propagation_vs_dimensioning_altitude() -> None:
+    """Boeing test notice 102 declares op_height (20000 km) ≠ apogee/perigee
+    (20182 km). The ITU BR software PROPAGATES at the operational height
+    (official EPFDRESULTS_102_045 CCDF matches the 20000 km orbit at every
+    level) but DIMENSIONS §D4 with the real geometry (official Δt = 26.977 s
+    = h 20182 km; op_height would give 26.36 s). The loader must keep the two
+    apart: ``semi_major_axis_km`` (propagation) vs ``a_km_d4`` (dimensioning).
+    """
+    import os
+
+    import pytest
+
+    mdb = os.path.join("docs", "test_data", "EPFD_Test_Data.mdb")
+    if not os.path.exists(mdb):
+        pytest.skip("EPFD_Test_Data.mdb not available")
+    from src.srs_reader import read_srs_mdb, srs_to_constellation_config
+
+    cfg = srs_to_constellation_config(read_srs_mdb(mdb, ntc_id="102"))
+    planes = cfg["planes"]
+    assert {round(p["semi_major_axis_km"], 3) for p in planes} == {26378.145}
+    assert {round(p["a_km_d4"], 3) for p in planes} == {26560.145}
+
+    subs = group_sub_constellations(planes)
+    assert len(subs) == 1
+    assert abs(subs[0]["a_km"] - 26560.145) < 1e-6
+
+    theta = 70.0 / (0.45 / (299792458.0 / 11.70002e9))  # BO.1443 0.45 m dish
+    res = compute_time_step_and_count_multi(
+        subs, min_elevation_deg=10.0, repeating_ground_track=False,
+        theta_3db_deg=theta, nhit=16, literal_s1503_d42=True,
+        min_exceedance_pct=0.0007, ntracks=16, phi_coarse_deg=1.5,
+        n_sat_total=sum(p["sats_per_plane"] for p in planes),
+        reduce_ntracks_1e8=True,
+    )
+    assert res.tstep_s == 26.977  # official EPFDRESULTS_102_045
+    assert res.nsteps == 1_518_572  # official: 1 518 606 (−0.002%)
+
+
 def test_group_sub_constellations() -> None:
     """Planes sharing (a, e, i) collapse into one dimensioning set."""
     planes = []

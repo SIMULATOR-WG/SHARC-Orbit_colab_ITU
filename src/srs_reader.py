@@ -1723,16 +1723,32 @@ def srs_to_constellation_config(system: SRSNonGeoSystem) -> dict:
         )
 
     # Detailed information for each plane (full orbital parameters).
-    # Same altitude priority as the top-level semi_major_axis above:
-    # apogee/perigee geometry → operational height → period-derived.
+    #
+    # Two altitudes per plane — the ITU BR software uses DIFFERENT fields for
+    # propagation and for §D4 dimensioning (exposed by the Boeing test notice
+    # 102, where op_height=20000 km ≠ apogee/perigee=20182 km):
+    #  - ``semi_major_axis_km`` (PROPAGATION → create_constellation_from_config):
+    #    operational height first — the official EPFDRESULTS_102 CCDF matches
+    #    the 20000 km orbit at every level (max −167.9 vs −168.0);
+    #  - ``a_km_d4`` (§D4 DIMENSIONING → group_sub_constellations): real
+    #    apogee/perigee geometry first — the official Δt (26.977 s) matches
+    #    h=20182, not h=20000 (26.36 s).
+    # All real filings in docs/test_data declare op_height == geometry, so the
+    # split only matters when a filing makes them inconsistent.
     config["planes"] = []
     for plane in system.orbit_planes:
-        if plane.altitude_km > 100.0:
-            a_km = plane.altitude_km + RE_KM
-        elif plane.op_height_km > 100:
+        if plane.op_height_km > 100:
             a_km = plane.op_height_km + RE_KM
+        elif plane.altitude_km > 100.0:
+            a_km = plane.altitude_km + RE_KM
         else:
             a_km = plane.semi_major_axis_km
+        if plane.altitude_km > 100.0:
+            a_km_d4 = plane.altitude_km + RE_KM
+        elif plane.op_height_km > 100:
+            a_km_d4 = plane.op_height_km + RE_KM
+        else:
+            a_km_d4 = plane.semi_major_axis_km
         n_sats = plane.nbr_sat_pl
         phase_map = system.phase_by_orbit.get(plane.orb_id, {})
         # 0-based list to ease direct use in create_constellation_from_config
@@ -1746,6 +1762,7 @@ def srs_to_constellation_config(system: SRSNonGeoSystem) -> dict:
         config["planes"].append({
             "orb_id": plane.orb_id,
             "semi_major_axis_km": a_km,
+            "a_km_d4": a_km_d4,
             "eccentricity": plane.eccentricity,
             "inclination_deg": plane.inclin_deg,
             "raan_deg": raan_deg,
