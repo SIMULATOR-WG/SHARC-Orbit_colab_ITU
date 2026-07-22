@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "SHARC-Orbit — Runtime Architecture",
+    "subtitle": "EPFD↓ simulation per ITU-R S.1503-4 · Streamlit UI · src/ numerical engine · optional Ray cluster",
+    "output": "sharc-orbit-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "primary-run",
+        "label": "Single-entry run",
+        "focus": ["analyst", "ui", "worker", "reader", "wcga", "epfd", "compliance", "artifacts"],
+        "note": "One S.1503-4 run: launch, parse filing, find worst-case geometry, simulate EPFD, grade against Article 22, persist artifacts."
+      },
+      {
+        "id": "trust-crossings",
+        "label": "Trust boundaries",
+        "focus": ["srs_mdb", "reader", "ui", "worker", "ray"],
+        "note": "User-supplied .mdb filings enter the engine; Ray ships code + uploads to LAN workers; UI listens on loopback only."
+      },
+      {
+        "id": "aggregate-run",
+        "label": "Aggregate run (Res.76)",
+        "focus": ["ui", "worker", "aggregation", "wcga", "epfd", "artifacts"],
+        "note": "≥2 systems: s1588_studies runs N× WCGA/EPFD loops per method — convolution, grid envelope, joint megaconstellation, per-WCG audit."
+      },
+      {
+        "id": "state",
+        "label": "Local state",
+        "focus": ["ui", "sqlite", "artifacts"],
+        "note": "SQLite registry plus per-run filesystem artifacts — no external services."
+      }
+    ]
+  },
+  "components": [
+    { "id": "analyst", "type": "external", "label": "Analyst", "sublabel": "browser, loopback", "pos": [38, 300], "size": [122, 62] },
+    { "id": "ui", "type": "frontend", "label": "Streamlit UI", "sublabel": "app.py · 16 pages", "pos": [230, 300], "size": [130, 62], "tag": "presentation" },
+    { "id": "sqlite", "type": "database", "label": "SQLite", "sublabel": "data/sharc_orbit.db", "pos": [230, 490], "size": [130, 62] },
+    { "id": "worker", "type": "backend", "label": "Job Workers", "sublabel": "s1503 · s1588", "pos": [430, 300], "size": [130, 62], "tag": "isolation" },
+    { "id": "ray", "type": "cloud", "label": "Ray Cluster", "sublabel": "optional, LAN", "pos": [430, 110], "size": [130, 62], "tag": "scale-out" },
+    { "id": "aggregation", "type": "backend", "label": "Aggregation", "sublabel": "s1588_studies", "pos": [630, 490], "size": [130, 62], "tag": "Res.76" },
+    { "id": "srs_mdb", "type": "external", "label": "SRS Filings", "sublabel": ".mdb (ITU BR extract)", "pos": [630, 110], "size": [130, 62], "tag": "user data" },
+    { "id": "reader", "type": "backend", "label": "SRS Reader", "sublabel": "srs_reader.py", "pos": [630, 300], "size": [130, 62] },
+    { "id": "wcga", "type": "backend", "label": "WCGA", "sublabel": "wcg_search §D3.1", "pos": [830, 300], "size": [130, 62] },
+    { "id": "epfd", "type": "backend", "label": "EPFD↓ Simulator", "sublabel": "epfd_calculator §D5", "pos": [1030, 300], "size": [130, 62] },
+    { "id": "masks", "type": "backend", "label": "Masks + Antennas", "sublabel": "pfd_mask · antenna", "pos": [1030, 490], "size": [130, 62] },
+    { "id": "compliance", "type": "security", "label": "Compliance", "sublabel": "Art.22 / Res.76", "pos": [1230, 300], "size": [130, 62] },
+    { "id": "artifacts", "type": "database", "label": "Run Artifacts", "sublabel": "data/runs/<id>/", "pos": [1430, 300], "size": [130, 62] }
+  ],
+  "boundaries": [
+    { "kind": "security-group", "label": "localhost — Streamlit server (loopback, no auth)", "wraps": ["ui", "sqlite"] },
+    { "kind": "region", "label": "worker subprocess — numerical engine (src/)", "wraps": ["worker", "reader", "wcga", "epfd", "masks", "compliance", "aggregation"] },
+    { "kind": "region", "label": "Ray workers (other hosts)", "wraps": ["ray"] }
+  ],
+  "connections": [
+    { "id": "analyst-to-ui", "from": "analyst", "to": "ui", "label": "HTTP :8501", "variant": "emphasis" },
+    { "id": "ui-to-worker", "from": "ui", "to": "worker", "label": "spawn + params.json", "variant": "emphasis", "labelAt": [395, 296] },
+    { "id": "worker-to-reader", "from": "worker", "to": "reader", "variant": "emphasis" },
+    { "id": "reader-to-wcga", "from": "reader", "to": "wcga", "variant": "emphasis" },
+    { "id": "wcga-to-epfd", "from": "wcga", "to": "epfd", "label": "WCG", "variant": "emphasis" },
+    { "id": "epfd-to-compliance", "from": "epfd", "to": "compliance", "label": "CCDF", "variant": "emphasis" },
+    { "id": "compliance-to-artifacts", "from": "compliance", "to": "artifacts", "label": "sim_data.json", "variant": "emphasis" },
+    { "id": "filing-into-engine", "from": "srs_mdb", "to": "reader", "label": "user-supplied filing", "variant": "security", "labelAt": [695, 196] },
+    { "id": "ui-registry", "from": "ui", "to": "sqlite", "label": "runs registry", "labelAt": [295, 400] },
+    { "id": "ray-fanout", "from": "worker", "to": "ray", "label": "tasks (SPREAD)", "variant": "dashed", "labelAt": [495, 236] },
+    { "id": "worker-to-aggregation", "from": "worker", "to": "aggregation", "label": "≥2 systems · methods 1–4", "variant": "dashed", "fromSide": "bottom", "toSide": "left", "route": "orthogonal-v", "labelAt": [495, 545] },
+    { "id": "aggregation-loops", "from": "aggregation", "to": "wcga", "label": "N× WCGA + EPFD, convolve", "fromSide": "right", "toSide": "bottom", "route": "orthogonal-h", "labelAt": [880, 545] },
+    { "id": "mask-lookup", "from": "masks", "to": "epfd", "label": "PFD(az,el) · G(θ)" },
+    { "id": "results-readback", "from": "artifacts", "to": "ui", "label": "Results page reads", "variant": "dashed", "fromSide": "top", "toSide": "top", "via": [[1495, 48], [295, 48]] }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Engine Internals", "items": ["Keplerian + J2 propagator (orbit_propagator) feeds WCGA and EPFD", "Dual time step §D4.7; streaming CCDF accumulator (<1 MB at any N)", "PFDMaskMulti: per-satellite masks via mask_lnk1; masks also gate WCGA", "Numba JIT + multiprocessing Pool saturate local cores without Ray"] },
+    { "dot": "rose", "title": "Trust Boundaries", "items": ["UI binds loopback only — no login, no external APIs", "Filings parsed in-process by access-parser (pure Python)", "Ray ships src/ + uploads to LAN workers (content-hashed runtime_env)", "Manual systems: JET4 .mdb written via Java/Jackcess shell-out"] },
+    { "dot": "emerald", "title": "Modes & Outputs", "items": ["Single-entry (S.1503-4) or Aggregate: 4 Res.76 study methods", "Aggregate: convolution, ES×GSO grid, joint megaconstellation, per-WCG", "Artifacts: params/sim_data JSON, CCDF/histogram CSV+PNG, summary.html", "Campaign dashboard exports ITU-style XLSX workbooks"] }
+  ]
+}

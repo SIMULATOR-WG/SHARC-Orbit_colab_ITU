@@ -147,7 +147,8 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
                   epfd_limits_mdb: str | None = None,
                   epfd_limits_mask_id: int | None = None,
                   ntc_id: str | None = None,
-                  service: str = "FSS") -> dict:
+                  service: str = "FSS",
+                  simulation_frequency_ghz: float | None = None) -> dict:
     """Load parameters from SRS files.
 
     Supported modes:
@@ -163,6 +164,14 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
     ``ntc_id`` (optional) selects the system in the ``non_geo`` table when the
     MDB contains several notices; the mask in ``mask_info`` is filtered by the
     same ``ntc_id`` when the column exists.
+
+    ``simulation_frequency_ghz`` (optional) is the user-selected frequency
+    run. When provided it (a) restricts the default ``mask_lnk1`` mask
+    resolution to masks linked to transmitting groups whose band contains the
+    frequency, (b) biases the mask→group resolution the same way, and (c) is
+    pinned under ``pfd_mask.simulation_frequency_ghz`` so
+    ``apply_article22_limits_to_config`` resolves the run at that frequency.
+    Absent → legacy behaviour (precedence-first mask, band start + RefBW/2).
     """
     from .srs_reader import (read_srs_mdb, read_mask_info,
                               read_group_for_mask,
@@ -192,15 +201,51 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
     masks = read_mask_info(mdb_path, ntc_id=system.ntc_id)
     pfd_masks = [m for m in masks if m.f_mask == "P"]
 
+    # Groups operating at the requested simulation frequency (grp, emi_rcp='E')
+    # — used to bias mask/group resolution towards the sub-band actually being
+    # simulated. Empty/None when no frequency was requested or grp data is
+    # unavailable (legacy precedence applies).
+    _grps_at_freq: frozenset | None = None
+    if simulation_frequency_ghz is not None:
+        try:
+            from .srs_reader import read_emitters_in_band
+            _sel_f = read_emitters_in_band(
+                mdb_path, ntc_id=system.ntc_id,
+                freq_ghz=float(simulation_frequency_ghz), emi_rcp="E",
+            )
+            if _sel_f.has_data and _sel_f.active_grp_ids:
+                _grps_at_freq = _sel_f.active_grp_ids
+        except Exception as exc:  # noqa: BLE001 — bias only, never block
+            logger.warning(
+                "Could not resolve groups at %.6f GHz (%s); using legacy "
+                "mask precedence.", float(simulation_frequency_ghz), exc,
+            )
+
     # MASK MDB mode without an explicit mask_id: resolve from mask_lnk1
     # precedence (emi_rcp=E → lowest grp_id → lowest seq_no) instead of
-    # blindly taking the first declared PFD. Wildcard (orb -1) wins, else the
-    # lowest orbit's precedence-first; first PFD declared as a last resort.
+    # blindly taking the first declared PFD. When a simulation frequency was
+    # requested, only masks linked to groups covering it are considered
+    # (falling back to the unrestricted set if none matches). Wildcard
+    # (orb -1) wins, else the lowest orbit's precedence-first; first PFD
+    # declared as a last resort.
     if pfd_mask_mdb and mask_id is None:
         try:
             from .srs_reader import read_mask_assignment_all
-            _amap = read_mask_assignment_all(
-                mdb_path, ntc_id=system.ntc_id, f_mask_filter="P") or {}
+            _amap = {}
+            if _grps_at_freq is not None:
+                _amap = read_mask_assignment_all(
+                    mdb_path, ntc_id=system.ntc_id, f_mask_filter="P",
+                    restrict_grp_ids=_grps_at_freq) or {}
+                if _amap:
+                    logger.info(
+                        "Default PFD mask restricted to groups covering "
+                        "%.6f GHz (grp_ids=%s).",
+                        float(simulation_frequency_ghz),
+                        sorted(_grps_at_freq),
+                    )
+            if not _amap:
+                _amap = read_mask_assignment_all(
+                    mdb_path, ntc_id=system.ntc_id, f_mask_filter="P") or {}
         except Exception:  # noqa: BLE001
             _amap = {}
         if _amap.get(-1):
@@ -208,7 +253,18 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         elif _amap:
             mask_id = int(_amap[sorted(_amap)[0]][0])
         elif pfd_masks:
-            mask_id = int(pfd_masks[0].mask_id)
+            # No mask_lnk1 assignment: prefer a PFD mask whose own band
+            # contains the requested frequency, else first declared.
+            _cand = pfd_masks
+            if simulation_frequency_ghz is not None:
+                _cover = [
+                    m for m in pfd_masks
+                    if float(m.freq_min_ghz) - 1e-9
+                    <= float(simulation_frequency_ghz)
+                    <= float(m.freq_max_ghz) + 1e-9
+                ]
+                _cand = _cover or pfd_masks
+            mask_id = int(_cand[0].mask_id)
         else:
             raise ValueError(
                 f"pfd_mask_mdb mode: no PFD mask (f_mask='P') in {pfd_mask_mdb}."
@@ -233,6 +289,10 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             ntc_id=system.ntc_id,
             mask_id=int(mask_id),
             preferred_emi_rcp="E",
+            prefer_freq_ghz=(
+                float(simulation_frequency_ghz)
+                if simulation_frequency_ghz is not None else None
+            ),
         )
 
     # Nominal RefBW before querying the limits MDB (Art. 22 default = 40 kHz).
@@ -355,6 +415,10 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         "pfd_mask": {
             "type": "alpha",
             "mask_id": mask_id,
+            "simulation_frequency_ghz": (
+                float(simulation_frequency_ghz)
+                if simulation_frequency_ghz is not None else None
+            ),
             "srs_mdb": os.path.abspath(mdb_path),
             "freq_min_ghz": (
                 float(effective_freq_min_ghz) if effective_freq_min_ghz is not None else None
@@ -1048,7 +1112,7 @@ class DownlinkEngineInputs:
 
 
 def _resolve_mask_lnk1_assignments(
-    config: dict, pfd_cfg: dict,
+    config: dict, pfd_cfg: dict, freq_ghz: float | None = None,
 ) -> tuple[dict[int, int], dict[tuple[int, int | None], list[int]]]:
     """Resolve the mask_lnk1 mapping (S.1503-4 multi-mask) from the SRS MDB.
 
@@ -1058,6 +1122,12 @@ def _resolve_mask_lnk1_assignments(
     epfd↓. ``mask_assignment`` (keyed by orbit) is kept as a fallback for
     callers that still use the reduced form. Returns empty mappings
     (single-mask mode) when the SRS reference is missing or reading fails.
+
+    When ``freq_ghz`` is provided, mask_lnk1 rows are restricted to groups
+    whose declared band contains it — a satellite carrying one PFD mask per
+    sub-band gets the mask of the sub-band being simulated, not the
+    precedence-first one. Falls back to the unrestricted mapping when the
+    restriction yields nothing (e.g. grp band data absent).
     """
     mask_assignment: dict[int, int] = {}
     mask_assignment_per_sat: dict[tuple[int, int | None], list[int]] = {}
@@ -1067,19 +1137,54 @@ def _resolve_mask_lnk1_assignments(
     if srs_mdb_for_assignment and ntc_id_for_assignment:
         try:
             from .srs_reader import (
+                read_emitters_in_band,
                 read_mask_assignment_all,
                 read_mask_assignment_per_sat,
             )
-            mask_assignment_per_sat = read_mask_assignment_per_sat(
-                srs_mdb_for_assignment,
-                ntc_id=ntc_id_for_assignment,
-                f_mask_filter="P",
-            ) or {}
-            assignment_all = read_mask_assignment_all(
-                srs_mdb_for_assignment,
-                ntc_id=ntc_id_for_assignment,
-                f_mask_filter="P",
-            ) or {}
+            restrict: frozenset | None = None
+            if freq_ghz is not None and float(freq_ghz) > 0.0:
+                try:
+                    _sel = read_emitters_in_band(
+                        srs_mdb_for_assignment,
+                        ntc_id=ntc_id_for_assignment,
+                        freq_ghz=float(freq_ghz), emi_rcp="E",
+                    )
+                    if _sel.has_data and _sel.active_grp_ids:
+                        restrict = _sel.active_grp_ids
+                except Exception:  # noqa: BLE001 — bias only
+                    restrict = None
+            if restrict is not None:
+                mask_assignment_per_sat = read_mask_assignment_per_sat(
+                    srs_mdb_for_assignment,
+                    ntc_id=ntc_id_for_assignment,
+                    f_mask_filter="P",
+                    restrict_grp_ids=restrict,
+                ) or {}
+                assignment_all = read_mask_assignment_all(
+                    srs_mdb_for_assignment,
+                    ntc_id=ntc_id_for_assignment,
+                    f_mask_filter="P",
+                    restrict_grp_ids=restrict,
+                ) or {}
+                if mask_assignment_per_sat or assignment_all:
+                    logger.info(
+                        "mask_lnk1 assignment restricted to groups covering "
+                        "%.6f GHz (grp_ids=%s).",
+                        float(freq_ghz), sorted(restrict),
+                    )
+                else:
+                    restrict = None  # nothing linked to those grps — fall back
+            if restrict is None:
+                mask_assignment_per_sat = read_mask_assignment_per_sat(
+                    srs_mdb_for_assignment,
+                    ntc_id=ntc_id_for_assignment,
+                    f_mask_filter="P",
+                ) or {}
+                assignment_all = read_mask_assignment_all(
+                    srs_mdb_for_assignment,
+                    ntc_id=ntc_id_for_assignment,
+                    f_mask_filter="P",
+                ) or {}
             mask_assignment = {
                 orb: lst[0] for orb, lst in assignment_all.items() if lst
             }
@@ -1090,6 +1195,98 @@ def _resolve_mask_lnk1_assignments(
             mask_assignment = {}
             mask_assignment_per_sat = {}
     return mask_assignment, mask_assignment_per_sat
+
+
+def _resolve_emitter_band_filter(config: dict, freq_ghz: float):
+    """Build an ``EmitterBandSelection`` for ``freq_ghz``, or ``None``.
+
+    Reads SRS ``grp`` ⋈ ``mask_lnk1`` (emi_rcp='E'). Returns ``None`` when
+    the MDB/notice is missing or the lookup fails — callers then keep the
+    full constellation. Never raises.
+    """
+    pfd_cfg = config.get("pfd_mask") or {}
+    srs_mdb = config.get("_srs_mdb_path") or pfd_cfg.get("srs_mdb")
+    srs_sys = config.get("_srs_system")
+    ntc_id = getattr(srs_sys, "ntc_id", None) if srs_sys is not None else None
+    if not srs_mdb or not ntc_id:
+        return None
+    try:
+        from .srs_reader import read_emitters_in_band
+        sel = read_emitters_in_band(
+            srs_mdb, ntc_id=ntc_id, freq_ghz=float(freq_ghz), emi_rcp="E",
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the run
+        logger.warning(
+            "Emitter band filter failed (%s); simulating full constellation.", exc,
+        )
+        return None
+    if sel.has_data:
+        logger.info(
+            "Emitter band filter @ %.4f GHz: %d active grp(s), "
+            "wildcard=%s, whole-orbits=%d, specific-sats=%d.",
+            float(freq_ghz), sel.n_active_grps,
+            sel.wildcard_all,
+            len(sel.active_orbits),
+            len(sel.active_sats),
+        )
+    else:
+        logger.info(
+            "Emitter band filter requested but grp/mask_lnk1 data is "
+            "unavailable; simulating the full constellation."
+        )
+    return sel
+
+
+def create_constellation_for_config(
+    config: dict,
+) -> tuple[list[OrbitalElements], list[int]]:
+    """Constellation + per-sat mask_ids, honouring ``restrict_emitters_to_sim_band``.
+
+    Shared entry point for Single-entry / Aggregate paths that need a filtered
+    constellation without going through :func:`run_wcg_downlink`.
+    """
+    ngso_cfg = config["non_gso"]
+    pfd_cfg = config.get("pfd_mask") or {}
+    sim_cfg = config.get("simulation") or {}
+    freq_ghz = float(ngso_cfg["frequency_ghz"])
+    # The band membership test runs at the USER-PINNED frequency when one was
+    # selected (Art. 22 scenario / manual field) — apply_article22 may have
+    # clamped ngso.frequency_ghz into the mask∩grp band, and a system that
+    # does not operate at the pinned frequency must not silently simulate at
+    # the clamped one.
+    _pinned = pfd_cfg.get("simulation_frequency_ghz")
+    freq_filter_ghz = float(_pinned) if _pinned else freq_ghz
+    mask_assignment, mask_assignment_per_sat = _resolve_mask_lnk1_assignments(
+        config, pfd_cfg, freq_ghz=freq_filter_ghz,
+    )
+    emitter_filter = None
+    if bool(sim_cfg.get("restrict_emitters_to_sim_band", False)):
+        emitter_filter = _resolve_emitter_band_filter(config, freq_filter_ghz)
+        if (emitter_filter is not None and emitter_filter.has_data
+                and not emitter_filter.any_active):
+            # grp/mask_lnk1 data exists and NO transmitting group covers the
+            # simulation frequency: the notice does not operate there. Running
+            # the full constellation would fabricate co-frequency interference
+            # — fail loudly instead (restrict_emitters_to_sim_band=False is
+            # the explicit legacy escape hatch).
+            srs_sys = config.get("_srs_system")
+            ntc = getattr(srs_sys, "ntc_id", None) if srs_sys is not None else None
+            raise ValueError(
+                f"No transmitting group (SRS grp, emi_rcp='E') of notice "
+                f"{ntc or '?'} covers the simulation frequency "
+                f"{freq_filter_ghz:.6f} GHz — no satellite of this system "
+                "operates co-frequency there. Pick a frequency inside the "
+                "system's operating sub-bands, or disable "
+                "'Only satellites emitting in the sim band' "
+                "(restrict_emitters_to_sim_band) to force the legacy "
+                "full-constellation run."
+            )
+    return create_constellation_with_masks(
+        ngso_cfg,
+        mask_assignment,
+        mask_assignment_per_sat=mask_assignment_per_sat,
+        emitter_filter=emitter_filter,
+    )
 
 
 def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
@@ -1155,51 +1352,8 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     ngso_cfg.setdefault("min_angle_at_es_deg", min_angle_at_es_deg)
     ngso_cfg.setdefault("s1503_theta_adb_deg", theta_adb_default_deg)
 
-    # mask_lnk1 resolution (multi-mask S.1503-4).
-    mask_assignment, mask_assignment_per_sat = _resolve_mask_lnk1_assignments(
-        config, pfd_cfg,
-    )
-
-    # Optional: restrict the simulated constellation to satellites that actually
-    # emit at the simulation frequency, resolved from the SRS grp ⋈ mask_lnk1
-    # tables (grp band = operating-frequency authority). Opt-in; off → the full
-    # constellation is simulated (legacy behavior).
-    emitter_filter = None
-    if bool(sim_cfg.get("restrict_emitters_to_sim_band", False)):
-        srs_mdb_for_band = config.get("_srs_mdb_path") or pfd_cfg.get("srs_mdb")
-        srs_sys_for_band = config.get("_srs_system")
-        ntc_for_band = getattr(srs_sys_for_band, "ntc_id", None) if srs_sys_for_band is not None else None
-        if srs_mdb_for_band and ntc_for_band:
-            try:
-                from .srs_reader import read_emitters_in_band
-                emitter_filter = read_emitters_in_band(
-                    srs_mdb_for_band, ntc_id=ntc_for_band,
-                    freq_ghz=freq_ghz, emi_rcp="E",
-                )
-                if emitter_filter.has_data:
-                    logger.info(
-                        "Emitter band filter @ %.4f GHz: %d active grp(s), "
-                        "wildcard=%s, whole-orbits=%d, specific-sats=%d.",
-                        freq_ghz, emitter_filter.n_active_grps,
-                        emitter_filter.wildcard_all,
-                        len(emitter_filter.active_orbits),
-                        len(emitter_filter.active_sats),
-                    )
-                else:
-                    logger.info(
-                        "Emitter band filter requested but grp/mask_lnk1 data is "
-                        "unavailable; simulating the full constellation."
-                    )
-            except Exception as exc:  # noqa: BLE001 — never block the run
-                logger.warning(
-                    "Emitter band filter failed (%s); simulating full constellation.", exc,
-                )
-                emitter_filter = None
-
-    constellation, mask_id_per_sat = create_constellation_with_masks(
-        ngso_cfg, mask_assignment, mask_assignment_per_sat=mask_assignment_per_sat,
-        emitter_filter=emitter_filter,
-    )
+    # mask_lnk1 + optional emitter band filter (grp ⋈ mask_lnk1 @ freq).
+    constellation, mask_id_per_sat = create_constellation_for_config(config)
 
     _unique_mask_ids = sorted({int(m) for m in mask_id_per_sat if int(m) != -1})
     multi_mask_active = len(_unique_mask_ids) > 1
@@ -1504,16 +1658,10 @@ def run_wcg_downlink(config: dict) -> tuple[
     logger.info(f"  f = {freq_ghz:.2f} GHz")
     logger.info(f"  >>> SIMULATION FREQUENCY USED: {freq_ghz:.6f} GHz <<<")
 
-    # mask_lnk1 mapping resolution (S.1503-4 multi-mask).
-    mask_assignment, mask_assignment_per_sat = _resolve_mask_lnk1_assignments(
-        config, pfd_cfg,
-    )
-
-    constellation, mask_id_per_sat = create_constellation_with_masks(
-        ngso_cfg,
-        mask_assignment,
-        mask_assignment_per_sat=mask_assignment_per_sat,
-    )
+    # mask_lnk1 + optional emitter band filter (grp ⋈ mask_lnk1 @ freq).
+    # Honour simulation.restrict_emitters_to_sim_band so Single-entry /
+    # Aggregate method_1 only accumulate co-frequency emitters.
+    constellation, mask_id_per_sat = create_constellation_for_config(config)
     logger.info(f"  Constellation created: {len(constellation)} satellites ✓")
 
     # Auto-detect multi-mask: enabled when more than one distinct mask (excluding

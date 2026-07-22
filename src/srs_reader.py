@@ -978,14 +978,16 @@ def read_group_for_mask(
     ntc_id: str,
     mask_id: int,
     preferred_emi_rcp: str | None = "E",
+    prefer_freq_ghz: float | None = None,
 ) -> SRSGroupInfo | None:
     """Resolve the ``grp`` group applicable to a mask via ``mask_lnk1``.
 
     For epfd(down), the PFD mask normally links to the transmitting group
     (``emi_rcp='E'``). When there are multiple candidates, it prioritizes:
     1. preferred ``emi_rcp``
-    2. group with ``elev_min`` defined
-    3. lowest ``grp_id`` (stable)
+    2. group whose band contains ``prefer_freq_ghz`` (when provided)
+    3. group with ``elev_min`` defined
+    4. lowest ``grp_id`` (stable)
     """
     if not os.path.exists(mdb_path):
         raise FileNotFoundError(f"MDB file not found: {mdb_path}")
@@ -1038,9 +1040,19 @@ def read_group_for_mask(
         return None
 
     pref = str(preferred_emi_rcp or "").upper()
+
+    def _covers_freq(item: SRSGroupInfo) -> bool:
+        if prefer_freq_ghz is None:
+            return True
+        if item.freq_min_ghz is None or item.freq_max_ghz is None:
+            return False
+        lo, hi = sorted((float(item.freq_min_ghz), float(item.freq_max_ghz)))
+        return (lo - 1e-9) <= float(prefer_freq_ghz) <= (hi + 1e-9)
+
     candidates.sort(
         key=lambda item: (
             0 if pref and item.emi_rcp == pref else 1,
+            0 if _covers_freq(item) else 1,
             0 if item.elev_min_deg is not None else 1,
             item.grp_id,
         )
@@ -1074,6 +1086,7 @@ class EmitterBandSelection:
     active_orbits: frozenset                     # whole-orbit active (sat_orb_id blank/0)
     active_sats: frozenset                       # specific (orb_id, sat_orb_id) active
     n_active_grps: int = 0
+    active_grp_ids: frozenset = frozenset()      # grp_ids whose band contains the frequency
 
     def is_active(self, orb_id: int, sat_orb_id: int | None) -> bool:
         """True if the satellite emits in the queried band.
@@ -1172,6 +1185,7 @@ def read_emitters_in_band(
         active_orbits=frozenset(active_orbits),
         active_sats=frozenset(active_sats),
         n_active_grps=len(active_grps),
+        active_grp_ids=frozenset(active_grps),
     )
 
 
@@ -1182,6 +1196,7 @@ def read_mask_assignment_all(
     preferred_emi_rcp: str | None = "E",
     f_mask_filter: str | None = None,
     granularity: str = "orbit",
+    restrict_grp_ids: "frozenset[int] | set[int] | None" = None,
 ) -> dict[int, list[int]]:
     """Resolve ``orb_id → list[mask_id]`` reading ``mask_lnk1`` from the SRS MDB.
 
@@ -1203,6 +1218,11 @@ def read_mask_assignment_all(
       masks whose ``f_mask`` (``masks`` table) matches are kept. Essential
       for EPFD↓ — an orbit may declare mask 1 (S/inter-sat), mask 2 (E/UL)
       and mask 3 (P/DL) at the same time; the "correct" one depends on the calculation type.
+    * When ``restrict_grp_ids`` is provided, only ``mask_lnk1`` rows whose
+      ``grp_id`` is in the set are considered — used to keep only the masks
+      linked to groups operating at the simulation frequency (the caller is
+      responsible for falling back to an unrestricted call when this yields
+      nothing).
 
     The ``granularity`` parameter is reserved for a future internal migration;
     the current value is validated but the function always returns per orbit. For
@@ -1253,6 +1273,8 @@ def read_mask_assignment_all(
             continue
         if allowed_mask_ids is not None and mask_id not in allowed_mask_ids:
             continue
+        if restrict_grp_ids is not None and grp_id not in restrict_grp_ids:
+            continue
         emi = grp_emi.get((row_ntc, grp_id), "")
         priority_pref = 0 if pref and emi == pref else 1
         bucket.setdefault(orb_id, []).append((priority_pref, grp_id, seq_no, mask_id))
@@ -1277,6 +1299,7 @@ def read_mask_assignment_per_sat(
     ntc_id: str | int,
     preferred_emi_rcp: str | None = "E",
     f_mask_filter: str | None = None,
+    restrict_grp_ids: "frozenset[int] | set[int] | None" = None,
 ) -> dict[tuple[int, int | None], list[int]]:
     """Resolve ``(orb_id, sat_orb_id|None) → list[mask_id]`` per satellite.
 
@@ -1290,8 +1313,8 @@ def read_mask_assignment_per_sat(
 
     Returns the mapping ``dict[(orb_id, sat_orb_id_or_None), list[mask_id]]``.
     List order follows the priority ``preferred_emi_rcp`` → ``grp_id`` →
-    ``seq_no`` with de-dup by ``mask_id``. ``f_mask_filter`` operates as in
-    :func:`read_mask_assignment_all`.
+    ``seq_no`` with de-dup by ``mask_id``. ``f_mask_filter`` and
+    ``restrict_grp_ids`` operate as in :func:`read_mask_assignment_all`.
     """
     if not os.path.exists(mdb_path):
         raise FileNotFoundError(f"MDB file not found: {mdb_path}")
@@ -1339,6 +1362,8 @@ def read_mask_assignment_per_sat(
         if mask_id <= 0:
             continue
         if allowed_mask_ids is not None and mask_id not in allowed_mask_ids:
+            continue
+        if restrict_grp_ids is not None and grp_id not in restrict_grp_ids:
             continue
         emi = grp_emi.get((row_ntc, grp_id), "")
         priority_pref = 0 if pref and emi == pref else 1

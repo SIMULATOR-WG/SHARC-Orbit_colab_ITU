@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "SHARC-Orbit — Pages & Workflows",
+    "subtitle": "16 Streamlit pages: prepare data, author systems, launch simulations, monitor, analyse",
+    "output": "sharc-orbit-pages-workflow.html",
+    "quality_profile": "standard",
+    "views": [
+      {
+        "id": "reference-flow",
+        "label": "Reference run",
+        "focus": ["upload", "uploads", "single", "status", "results"],
+        "note": "Upload filing → pick system → Single-entry S.1503-4 → monitor → CCDF + compliance."
+      },
+      {
+        "id": "aggregate-flow",
+        "label": "Aggregate & campaign",
+        "focus": ["uploads", "aggregate", "launcher", "status", "campaign"],
+        "note": "≥2 systems via Aggregate (methods 1–4) or multi-method Launcher campaigns."
+      },
+      {
+        "id": "authoring-flow",
+        "label": "Author a system",
+        "focus": ["maskgen", "manual", "register", "uploads"],
+        "note": "Parametric mask + constellation template → register as real JET4 filing."
+      }
+    ]
+  },
+  "lanes": [
+    { "id": "author", "label": "Author systems" },
+    { "id": "prepare", "label": "Prepare data" },
+    { "id": "simulate", "label": "Configure & launch" },
+    { "id": "monitor", "label": "Run & monitor" },
+    { "id": "analyse", "label": "Analyse & export" }
+  ],
+  "mainPath": ["upload", "uploads", "single", "status", "results"],
+  "nodes": [
+    { "id": "upload", "lane": "prepare", "col": 0, "type": "frontend", "label": "Upload", "sublabel": ".mdb SRS+mask" },
+    { "id": "uploads", "lane": "prepare", "col": 1, "type": "database", "label": "Uploads", "sublabel": "systems·orbits", "tag": "registry" },
+    { "id": "inspect", "lane": "prepare", "col": 3, "type": "frontend", "label": "Inspectors", "sublabel": "Mask Viewer · Globe", "width": 112 },
+    { "id": "maskgen", "lane": "author", "col": 0, "type": "backend", "label": "Mask Gen", "sublabel": "§C beams→XML" },
+    { "id": "manual", "lane": "author", "col": 2, "type": "backend", "label": "Manual System", "sublabel": "templates·3D", "width": 100 },
+    { "id": "register", "lane": "author", "col": 4, "type": "database", "label": "Register", "sublabel": "JET4 Jackcess" },
+    { "id": "cluster", "lane": "simulate", "col": 0, "type": "messagebus", "label": "Cluster", "sublabel": "Ray on/off" },
+    { "id": "single", "lane": "simulate", "col": 1, "type": "security", "label": "Single-entry", "sublabel": "S.1503-4", "tag": "normative" },
+    { "id": "aggregate", "lane": "simulate", "col": 3, "type": "backend", "label": "Aggregate", "sublabel": "methods 1–4" },
+    { "id": "launcher", "lane": "simulate", "col": 5, "type": "backend", "label": "Launcher", "sublabel": "campaigns" },
+    { "id": "runs", "lane": "monitor", "col": 1, "type": "frontend", "label": "Runs", "sublabel": "history·delete" },
+    { "id": "status", "lane": "monitor", "col": 3, "type": "frontend", "label": "Status", "sublabel": "logs·CPU·cancel" },
+    { "id": "results", "lane": "analyse", "col": 3, "type": "frontend", "label": "Results", "sublabel": "CCDF·limits·globe" },
+    { "id": "campaign", "lane": "analyse", "col": 5, "type": "frontend", "label": "Campaign", "sublabel": "XLSX export" }
+  ],
+  "edges": [
+    { "id": "upload-to-uploads", "from": "upload", "to": "uploads" },
+    { "id": "uploads-to-inspect", "from": "uploads", "to": "inspect", "label": "no run needed", "variant": "dashed" },
+    { "id": "uploads-to-single", "from": "uploads", "to": "single", "label": "1 system", "variant": "emphasis", "route": "drop", "labelAt": [220, 291] },
+    { "id": "uploads-to-aggregate", "from": "uploads", "to": "aggregate", "label": "≥2 systems", "route": "drop" },
+    { "id": "uploads-to-launcher", "from": "uploads", "to": "launcher", "label": "campaign", "route": "drop" },
+    { "id": "single-to-status", "from": "single", "to": "status", "label": "spawn s1503", "variant": "emphasis", "route": "drop" },
+    { "id": "aggregate-to-status", "from": "aggregate", "to": "status", "label": "spawn s1588" },
+    { "id": "launcher-to-campaign", "from": "launcher", "to": "campaign", "label": "child runs" },
+    { "id": "status-to-results", "from": "status", "to": "results", "label": "artifacts", "variant": "emphasis" },
+    { "id": "runs-to-results", "from": "runs", "to": "results", "label": "reload run", "route": "drop" },
+    { "id": "maskgen-to-manual", "from": "maskgen", "to": "manual", "label": "mask XML" },
+    { "id": "manual-to-register", "from": "manual", "to": "register", "label": ".mdb pair" },
+    { "id": "register-to-uploads", "from": "register", "to": "uploads", "label": "as filing", "variant": "dashed", "fromSide": "top", "toSide": "bottom", "route": "drop" },
+    { "id": "cluster-arms-ray", "from": "cluster", "to": "single", "variant": "dashed" }
+  ],
+  "cards": [
+    { "dot": "cyan", "title": "Aggregate — 4 Res.76 Methods", "items": ["1: convolve CCDFs, each system at its own WCG", "2: ES×GSO grid, convolve per point, take envelope", "3: joint megaconstellation sim + post_sum comparison", "4: per-WCG sweep — all systems at each filing's WCG"] },
+    { "dot": "violet", "title": "Authoring Pages", "items": ["Templates: Walker Δ/star, ring, train, Molniya, tundra, IGSO, multi-shell", "Mask Gen: Option 1 (α×ΔLong) or 2 (az×el), GSO-arc mitigation", "Register: real _SRS.mdb + _Mask.mdb via Java/Jackcess (YAML fallback)", "Inspectors: PFD heatmap + slices; 3D globe per Art.22 scenario"] },
+    { "dot": "emerald", "title": "Monitor & Analyse", "items": ["Cluster: Ray head/worker control — arms any launched run", "Status: live log stream, host + per-node CPU/mem, cancel", "Results: CCDF vs Art.22/Res.76 limits, external .mdb overlay", "Campaign: dashboard + ITU-style XLSX; Help page: manual + tour"] }
+  ]
+}

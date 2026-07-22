@@ -6,6 +6,8 @@ import json
 import streamlit as st
 
 from lib import launcher, srs_inspect, storage, theme, tour
+from lib.band_chart import st_bands_chart
+from lib.art22_ui import merge_intervals as _merge_intervals
 from lib.state import (
     use_persisted_state, set_persisted_state,
     current_system_id, set_current_system_id,
@@ -217,6 +219,43 @@ if _selrow and _selrow.get("srs_path"):
                 f"Configuration(s) {', '.join(_missing)} of this notice are "
                 "not registered — upload their SRS db(s) to evaluate them."
             )
+
+# ── Band occupancy (ITU "Network Structure Navigation" style) ────────────
+# Tx / Rx group bands (SRS `grp`) + PFD mask band(s) of the selected system,
+# each row scaled to its own limits like the ITU panel. The Tx row is what
+# the emitting-satellite band filter keys on.
+_navrow = next((s for s in systems if s["id"] == sel_sys), None)
+if _navrow and _navrow.get("srs_path"):
+    try:
+        _fb = srs_inspect.frequency_bands(_navrow["srs_path"],
+                                          _navrow.get("ntc_id"))
+    except Exception:  # noqa: BLE001
+        _fb = {"masks": [], "groups": []}
+    def _grp_iv(prefixes: tuple[str, ...]) -> list[tuple[float, float]]:
+        return _merge_intervals([
+            (float(g["freq_min_ghz"]), float(g["freq_max_ghz"]))
+            for g in (_fb.get("groups") or [])
+            if str(g.get("emi_rcp", "")).upper().startswith(prefixes)
+            and g.get("freq_min_ghz") is not None
+            and g.get("freq_max_ghz") is not None
+        ])
+    _pfd_iv = _merge_intervals([
+        (float(m["freq_min_ghz"]), float(m["freq_max_ghz"]))
+        for m in (_fb.get("masks") or [])
+        if m.get("type") == "PFD" and m.get("freq_min_ghz") is not None
+    ])
+    st_bands_chart(
+        [
+            {"label": "Emission (Tx)", "bands": _grp_iv(("TX", "E")),
+             "kind": "tx", "sublabel": "SRS grp · emi_rcp='E'"},
+            {"label": "Reception (Rx)", "bands": _grp_iv(("RX", "R")),
+             "kind": "tx", "sublabel": "SRS grp · emi_rcp='R'"},
+            {"label": "PFD masks (downlink)", "bands": _pfd_iv,
+             "kind": "pfd", "sublabel": "mask_info · f_mask='P'"},
+        ],
+        title="Network band occupancy (SRS)",
+        shared_scale=False,
+    )
 
 # ── Article 22 downlink scenario (optional) ──────────────────────────────
 # Pick the normative EPFD↓ limit configuration to test against. A chosen
@@ -568,8 +607,10 @@ with st.form("s1503_form"):
                      "the satellites whose transmitting group (SRS `grp`, "
                      "emi_rcp='E') covers the simulation frequency, resolved via "
                      "`grp` ⋈ `mask_lnk1`. DEFAULT ON. Off = whole constellation "
-                     "(legacy). Falls back to the full constellation if no group "
-                     "matches.",
+                     "(legacy). When the filing declares grp bands and NONE "
+                     "covers the simulation frequency, the run aborts with a "
+                     "clear error instead of silently simulating the full "
+                     "constellation.",
             )
 
     with st.expander("7. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):

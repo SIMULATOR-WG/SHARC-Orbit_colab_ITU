@@ -52,6 +52,51 @@ def _system_bands_cached(srs_path: str, ntc_id: str | None, file_sig):
     return out
 
 
+def system_tx_subbands(srs_path: str, ntc_id: str | None):
+    """Distinct **transmitting** sub-bands of a system (SRS ``grp``, emi_rcp='E').
+
+    These are the frequency assignments the notice actually operates in —
+    the emitting-satellite band filter (``restrict_emitters_to_sim_band``)
+    keys on them. Each entry is one sub-band shared by a set of groups:
+    ``{"freq_min", "freq_max", "grp_ids": [...], "beams": [...]}``, sorted by
+    frequency. ``[]`` when the filing declares no Tx group band (the filter
+    is then inert and every satellite simulates).
+
+    Cached on (path, ntc_id, file signature) like :func:`system_bands`.
+    """
+    return _system_tx_subbands_cached(srs_path, ntc_id,
+                                       srs_inspect._file_sig(srs_path))
+
+
+@st.cache_data(show_spinner=False)
+def _system_tx_subbands_cached(srs_path: str, ntc_id: str | None, file_sig):
+    try:
+        bands = srs_inspect.frequency_bands(srs_path, ntc_id)
+    except Exception:  # noqa: BLE001
+        return []
+    groups: dict[tuple[float, float], dict] = {}
+    for g in bands.get("groups") or []:
+        # srs_inspect maps emi_rcp 'E' → "Tx (emit)"; raw value kept otherwise.
+        if not str(g.get("emi_rcp", "")).upper().startswith(("TX", "E")):
+            continue
+        if g.get("freq_min_ghz") is None or g.get("freq_max_ghz") is None:
+            continue
+        key = (round(float(g["freq_min_ghz"]), 4), round(float(g["freq_max_ghz"]), 4))
+        e = groups.setdefault(key, {"grp_ids": [], "beams": set()})
+        if g.get("grp_id") is not None:
+            e["grp_ids"].append(int(g["grp_id"]))
+        if g.get("beam_name") and g["beam_name"] != "—":
+            e["beams"].add(str(g["beam_name"]))
+    out = []
+    for (lo, hi), e in sorted(groups.items()):
+        out.append({
+            "freq_min": lo, "freq_max": hi,
+            "grp_ids": sorted(set(e["grp_ids"])),
+            "beams": sorted(e["beams"]),
+        })
+    return out
+
+
 def merge_intervals(ivs: list[tuple[float, float]]) -> list[tuple[float, float]]:
     """Union of possibly-overlapping [lo, hi] intervals → disjoint sorted list."""
     merged: list[tuple[float, float]] = []

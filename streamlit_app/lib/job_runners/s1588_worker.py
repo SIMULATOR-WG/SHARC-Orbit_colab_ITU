@@ -216,18 +216,31 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
     mask_id = filing.get("mask_id")
     ntc_id = filing.get("ntc_id")
     service = common.get("service", "FSS")
+    # Shared frequency run (Art. 22 scenario applied to every filing) — steers
+    # each filing's default mask / group resolution to the simulated sub-band.
+    try:
+        sim_freq_ghz = (float(common["simulation_frequency_ghz"])
+                        if common.get("simulation_frequency_ghz") is not None
+                        else None)
+    except (TypeError, ValueError):
+        sim_freq_ghz = None
 
     if mask_path and str(mask_path).lower().endswith(".xml"):
         cfg = load_from_srs(srs_path, xml_path=str(mask_path), mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
     elif mask_path:
         # mask_id None → resolved by load_from_srs via mask_lnk1 precedence
-        # (emi_rcp=E → grp_id → seq_no), first declared PFD as last resort.
+        # (emi_rcp=E → grp_id → seq_no), restricted to groups covering the
+        # shared frequency run when one is set; first declared PFD as last
+        # resort.
         cfg = load_from_srs(srs_path, pfd_mask_mdb=str(mask_path), mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
     else:
         cfg = load_from_srs(srs_path, xml_path=None, mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
 
     # The S.1503-4 §D5.1.4.2 track-duration variant is implemented only for the
     # single-system EPFD↓ engine (S.1503 single-entry). Aggregate/S.1588 studies
@@ -287,6 +300,13 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
         sim["use_precession_mdb"] = True
     if common.get("apply_station_keeping"):
         sim["apply_station_keeping_wdelta"] = True
+    # Co-frequency emitters only (SRS grp ⋈ mask_lnk1). Default ON — satellites
+    # whose transmitting group does not cover the simulation frequency do not
+    # contribute to EPFD↓. Explicit False keeps the legacy full constellation.
+    if "restrict_emitters_to_sim_band" in common:
+        sim["restrict_emitters_to_sim_band"] = bool(common["restrict_emitters_to_sim_band"])
+    else:
+        sim["restrict_emitters_to_sim_band"] = True
     # Table 8 εGSO gate. The Launcher toggle defaults to disabled (same as
     # Single-entry): drop the GSO-min-elevation (εGSO) gate so the WCGA/EPFD
     # do not exclude high-latitude victims (matches the ITU BR / S.1503-2
@@ -383,12 +403,13 @@ def _run_single_filing(filing: dict[str, Any], common: dict[str, Any]) -> dict[s
 
 def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[str, Any]:
     """Run S.1503 for one filing at a fixed geometry (no WCG search)."""
-    from src.main import create_constellation_from_config  # type: ignore[import]
+    from src.main import create_constellation_for_config  # type: ignore[import]
     from src.s1588_studies import run_epfd_at_geometry  # type: ignore[import]
 
     import math as _math
 
-    constellation = create_constellation_from_config(cfg["non_gso"])
+    # Honour restrict_emitters_to_sim_band (default ON in _load_cfg).
+    constellation, _mask_ids = create_constellation_for_config(cfg)
     mask = _build_mask(cfg)
     antenna = _build_antenna(cfg)
 
@@ -683,7 +704,7 @@ def _run_method_2(params: dict[str, Any]) -> dict[str, Any]:
 
 def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     """Joint simulation (Method 2B): fused megaconstellation, single sim run."""
-    from src.main import create_constellation_from_config  # type: ignore[import]
+    from src.main import create_constellation_for_config  # type: ignore[import]
     from src.pfd_mask import PFDMaskMulti  # type: ignore[import]
     from src.epfd_calculator import run_epfd_simulation  # type: ignore[import]
     from src.wcg_search import search_wcg_s1503  # type: ignore[import]
@@ -705,7 +726,8 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     masks_by_id: dict[int, Any] = {}
     mask_id_per_sat: list[int] = []
     for idx, cfg in enumerate(cfgs):
-        const = create_constellation_from_config(cfg["non_gso"])
+        # Per-filing emitter band filter (restrict_emitters_to_sim_band).
+        const, _ = create_constellation_for_config(cfg)
         if not const:
             continue
         combined.extend(const)

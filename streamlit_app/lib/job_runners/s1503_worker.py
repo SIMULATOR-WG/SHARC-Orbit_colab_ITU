@@ -83,6 +83,15 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     mask_id = params.get("mask_id")
     ntc_id = params.get("ntc_id")
     service = params.get("service", "FSS")
+    # User-selected frequency run (Art. 22 scenario / manual field). Passed to
+    # load_from_srs so the default mask / group resolution follows the
+    # sub-band being simulated instead of blind mask_lnk1 precedence.
+    try:
+        sim_freq_ghz = (float(params["simulation_frequency_ghz"])
+                        if params.get("simulation_frequency_ghz") is not None
+                        else None)
+    except (TypeError, ValueError):
+        sim_freq_ghz = None
     manual_cfg = params.get("manual_cfg")
     # Registered manual filing: the systems row points at a YAML SRS (written
     # by the Manual System page through the Upload flow) — load it as the
@@ -111,19 +120,23 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     elif mask_path and str(mask_path).lower().endswith(".xml"):
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, xml_path=str(mask_path), mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
     elif mask_path:
         # .mdb mask: when mask_id is not explicitly chosen, leave it None so
         # load_from_srs resolves it from mask_lnk1 precedence (emi_rcp=E →
-        # grp_id → seq_no), falling back to the first declared PFD only when
-        # the filing has no mask_lnk1 assignment.
+        # grp_id → seq_no) restricted to groups covering the simulation
+        # frequency (when one was selected), falling back to the first
+        # declared PFD only when the filing has no mask_lnk1 assignment.
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, pfd_mask_mdb=str(mask_path), mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
     else:
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, xml_path=None, mask_id=mask_id,
-                            ntc_id=ntc_id, service=service)
+                            ntc_id=ntc_id, service=service,
+                            simulation_frequency_ghz=sim_freq_ghz)
 
     sim = cfg.setdefault("simulation", {})
     ngso = cfg.setdefault("non_gso", {})

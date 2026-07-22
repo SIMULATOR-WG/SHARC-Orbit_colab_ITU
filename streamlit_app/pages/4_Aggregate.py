@@ -14,8 +14,10 @@ import pandas as pd
 import streamlit as st
 
 from lib import launcher, srs_inspect, storage, theme, tour
+from lib.band_chart import st_bands_chart
 from lib.art22_ui import (
     system_bands as _system_bands,
+    system_tx_subbands as _tx_subbands,
     merge_intervals as _merge_intervals,
     intersect_sets as _intersect_sets,
     art22_tree_for_bands as _art22_tree_for_bands,
@@ -205,6 +207,7 @@ sel_ids = st.multiselect(
 )
 art22_leaf = None  # Article 22 scenario leaf for the aggregate (set below)
 _carried_art22 = None  # Art.22 scenario carried from a reloaded run
+_common_op_chart = None  # common operating sub-bands (set in the band block)
 if sel_ids:
     st.caption(
         f"Selected **{len(sel_ids)} system(s)**, from "
@@ -217,9 +220,16 @@ if sel_ids:
     # that share a band are grouped onto one row (their mask_ids listed),
     # so a system with multiple distinct bands shows one row per band.
     band_rows = []
+    tx_rows = []
     per_system_intervals: list[list[tuple[float, float]]] = []
+    # PFD band ∩ Tx sub-bands per system — the sub-bands the system can
+    # actually be simulated in (the emitter band filter keys on the grp
+    # sub-bands). Systems without grp band data fall back to the PFD band.
+    per_system_op_intervals: list[list[tuple[float, float]]] = []
+    sys_tx_coverage: list[dict] = []  # per-system Tx intervals for the leaf check
     n_resolved = 0
     n_no_band = 0
+    n_no_tx = 0
     for i in sel_ids:
         s = storage.get_system(i)
         if not s:
@@ -228,6 +238,28 @@ if sel_ids:
         label = s.get("upload_label") or s["upload_id"]
         ntc = s.get("ntc_id") or "—"
         sb = _system_bands(s["srs_path"], s.get("ntc_id"))
+        tx = _tx_subbands(s["srs_path"], s.get("ntc_id"))
+        _tx_iv = (_merge_intervals([(b["freq_min"], b["freq_max"]) for b in tx])
+                  if tx else None)
+        _pfd_iv = (_merge_intervals([(b["freq_min"], b["freq_max"]) for b in sb])
+                   if sb else None)
+        sys_tx_coverage.append({"label": f"{label} · ntc {ntc}",
+                                "tx": _tx_iv, "pfd": _pfd_iv})
+        if tx:
+            for b in tx:
+                tx_rows.append({
+                    "system": label, "ntc": ntc,
+                    "Tx sub-band (GHz)": f"{b['freq_min']:.4f} – {b['freq_max']:.4f}",
+                    "bandwidth (MHz)": f"{(b['freq_max'] - b['freq_min']) * 1000:.1f}",
+                    "groups (grp_id)": ", ".join(str(x) for x in b["grp_ids"]) or "—",
+                    "beams": ", ".join(b["beams"]) or "—",
+                })
+        else:
+            n_no_tx += 1
+            tx_rows.append({
+                "system": label, "ntc": ntc, "Tx sub-band (GHz)": "—",
+                "bandwidth (MHz)": "—", "groups (grp_id)": "—", "beams": "—",
+            })
         if not sb:
             n_no_band += 1
             band_rows.append({
@@ -242,24 +274,57 @@ if sel_ids:
                 "bandwidth (MHz)": f"{(b['freq_max'] - b['freq_min']) * 1000:.1f}",
                 "PFD masks (mask_id)": ", ".join(str(x) for x in b["mask_ids"]) or "—",
             })
-        per_system_intervals.append(
-            _merge_intervals([(b["freq_min"], b["freq_max"]) for b in sb])
+        per_system_intervals.append(_pfd_iv)
+        per_system_op_intervals.append(
+            _intersect_sets(_pfd_iv, _tx_iv) if _tx_iv else _pfd_iv
         )
 
     st.markdown("**Downlink (PFD) frequency bands of selected systems** "
                 "(one row per distinct band; PFD masks sharing a band grouped)")
     st.dataframe(pd.DataFrame(band_rows), hide_index=True, width="stretch")
 
+    st.markdown("**Operating Tx sub-bands per system** (SRS `grp`, emi_rcp='E' "
+                "— the frequency assignments each system actually transmits "
+                "in; the emitting-satellite band filter keys on these)")
+    st.dataframe(pd.DataFrame(tx_rows), hide_index=True, width="stretch")
+    if n_no_tx:
+        st.caption(
+            f"{n_no_tx} system(s) declare no Tx group band — the emitter "
+            "band filter is inert for them (all satellites simulate)."
+        )
+
     if len(per_system_intervals) >= 2:
         common = per_system_intervals[0]
         for nxt in per_system_intervals[1:]:
             common = _intersect_sets(common, nxt)
+        common_op = per_system_op_intervals[0]
+        for nxt in per_system_op_intervals[1:]:
+            common_op = _intersect_sets(common_op, nxt)
+        _common_op_chart = common_op
         if common:
             txt = "; ".join(f"{lo:.3f}–{hi:.3f}" for lo, hi in common)
             st.success(
                 f"Common downlink band(s) across all resolved systems: "
                 f"**{txt} GHz**. Co-frequency EPFD↓ aggregation is meaningful."
             )
+            if common_op and common_op != common:
+                _txt_op = "; ".join(f"{lo:.4f}–{hi:.4f}" for lo, hi in common_op)
+                st.info(
+                    "Common **operating** sub-band(s) (PFD band ∩ Tx `grp` "
+                    f"sub-bands, all systems): **{_txt_op} GHz** — tighter "
+                    "than the PFD overlap. The Article 22 scenario below is "
+                    "built over these, so every system has satellites "
+                    "emitting at the chosen frequency run."
+                )
+            elif not common_op:
+                st.warning(
+                    "⚠️ The systems share a PFD band but **no common "
+                    "operating Tx sub-band** (`grp`, emi_rcp='E'): there is "
+                    "no single frequency at which every system emits. A "
+                    "pinned frequency run will abort at launch while "
+                    "**Only satellites emitting in the sim band** is ON "
+                    "(section on orbital dynamics)."
+                )
 
             # Article 22 scenario for the aggregate — one shared limit config
             # built from the common band(s). Picking a leaf overrides Service,
@@ -268,13 +333,14 @@ if sel_ids:
             with st.expander("Article 22 downlink scenario (limits) — optional",
                               expanded=False):
                 st.caption(
-                    "Normative EPFD↓ possibilities over the **common** band: "
+                    "Normative EPFD↓ possibilities over the **common "
+                    "operating** band (PFD ∩ Tx sub-bands when declared): "
                     "**service → frequency run → ES antenna / reference BW**. "
                     "A leaf **overrides** Service, ES antenna, reference BW and "
                     "simulation frequency below (applied to every filing). "
                     "Leave on **Auto** to let the engine resolve per filing."
                 )
-                _tree = _art22_tree_for_bands(tuple(common))
+                _tree = _art22_tree_for_bands(tuple(common_op or common))
                 _services = _tree.get("services") or []
                 if not _services:
                     st.caption("No Article 22 downlink possibility for the "
@@ -365,6 +431,78 @@ if _carried_art22 is not None:
         + ". Uncheck **Apply reloaded Article 22 scenario** (expander in "
         "section 1) to let the engine auto-resolve.",
         icon=":material/warning:",
+    )
+
+# Per-system Tx coverage of the pinned frequency run (leaf or reloaded):
+# every filing is simulated at this single frequency — systems whose `grp`
+# Tx sub-bands don't contain it have no co-frequency emitter there and the
+# launch aborts (strict emitter band filter) unless the filter is disabled.
+_pinned_freq_ghz = None
+if art22_leaf is not None and art22_leaf.get("frequency_run_ghz"):
+    _pinned_freq_ghz = float(art22_leaf["frequency_run_ghz"])
+elif _carried_art22 is not None and _carried_art22.get("simulation_frequency_ghz"):
+    _pinned_freq_ghz = float(_carried_art22["simulation_frequency_ghz"])
+if sel_ids and _pinned_freq_ghz is not None:
+    _cov_ok, _cov_missing, _cov_unknown = [], [], []
+    for _c in sys_tx_coverage:
+        if _c["tx"] is None:
+            _cov_unknown.append(_c["label"])
+        elif any(lo - 1e-9 <= _pinned_freq_ghz <= hi + 1e-9
+                 for lo, hi in _c["tx"]):
+            _cov_ok.append(_c["label"])
+        else:
+            _cov_missing.append(_c["label"])
+    if _cov_missing:
+        st.error(
+            f"System(s) with **no Tx group covering "
+            f"{_pinned_freq_ghz * 1000.0:.2f} MHz**: "
+            + "; ".join(f"`{x}`" for x in _cov_missing)
+            + " — no satellite of these systems emits at the pinned "
+            "frequency. The launch will abort while **Only satellites "
+            "emitting in the sim band** is ON. Pick a frequency run inside "
+            "the common operating sub-band(s), drop these systems, or "
+            "disable the filter (legacy full constellation).",
+            icon=":material/error:",
+        )
+    else:
+        _extra = (f" · {len(_cov_unknown)} system(s) without grp band data "
+                  "(filter inert)") if _cov_unknown else ""
+        st.caption(
+            f"✓ All {len(_cov_ok)} system(s) with grp data operate at "
+            f"{_pinned_freq_ghz * 1000.0:.2f} MHz — only their co-frequency "
+            f"satellites will be simulated{_extra}."
+        )
+
+# ITU-style band occupancy strips (shared frequency axis): one row per
+# system — Tx `grp` sub-bands, PFD mask band as labeled fallback — plus the
+# common operating overlap and the pinned frequency-run marker.
+if sel_ids and sys_tx_coverage:
+    _chart_rows = []
+    for _c in sys_tx_coverage:
+        if _c["tx"]:
+            _chart_rows.append(
+                {"label": _c["label"], "bands": _c["tx"], "kind": "tx"})
+        elif _c.get("pfd"):
+            _chart_rows.append(
+                {"label": _c["label"], "bands": _c["pfd"], "kind": "pfd",
+                 "sublabel": "PFD mask band — no grp data"})
+        else:
+            _chart_rows.append(
+                {"label": _c["label"], "bands": [], "kind": "tx",
+                 "sublabel": "no declared downlink band"})
+    if _common_op_chart is not None:
+        _chart_rows.append({
+            "label": "Common operating (all systems)",
+            "bands": _common_op_chart, "kind": "common",
+            "sublabel": "PFD ∩ Tx sub-bands",
+        })
+    st_bands_chart(
+        _chart_rows,
+        title="Band occupancy — downlink",
+        shared_scale=True,
+        marker_ghz=_pinned_freq_ghz,
+        marker_label=(f"{_pinned_freq_ghz * 1000.0:.2f} MHz (frequency run)"
+                      if _pinned_freq_ghz is not None else None),
     )
 
 st.subheader("2. Aggregation method")
@@ -655,6 +793,18 @@ with st.form("s1588_form"):
                      "RAAN offset ±Wdelta·(2t/T_run−1) over the run, per filing. "
                      "Reads ±Wdelta from each SRS when station keeping is declared.",
             )
+            restrict_emitters = st.checkbox(
+                "Only satellites emitting in the sim band",
+                value=bool(prev.get("restrict_emitters_to_sim_band", True)),
+                help="Engine key: `restrict_emitters_to_sim_band`. Per filing: "
+                     "simulate only satellites whose transmitting group "
+                     "(SRS `grp`, emi_rcp='E') covers the simulation frequency "
+                     "(`grp` ⋈ `mask_lnk1`). DEFAULT ON. Off = whole "
+                     "constellation (legacy). When the filing declares grp "
+                     "bands and NONE covers the frequency, the run aborts "
+                     "with a clear error (see the per-system sub-band table "
+                     "in section 1).",
+            )
 
     # Convolution tail truncation (S.1588 Annex 1 §1) — methods that convolve CCDFs.
     # NOTE: inside a form widgets don't rerun until submit, so the floor field
@@ -875,6 +1025,7 @@ if submit:
         params["artificial_precession"] = False
     params["use_precession_mdb"] = bool(use_prec_mdb)
     params["apply_station_keeping"] = bool(apply_sk)
+    params["restrict_emitters_to_sim_band"] = bool(restrict_emitters)
 
     # Convolution tail truncation (S.1588 Annex 1 §1) — convolving methods.
     params["truncate_tail"] = bool(truncate_tail)
@@ -920,6 +1071,7 @@ if submit:
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
+        "restrict_emitters_to_sim_band": bool(restrict_emitters),
         "truncate_tail": bool(truncate_tail),
         "truncate_tail_pct": truncate_tail_pct,
     })

@@ -356,6 +356,13 @@ with st.form("campaign_form"):
                 value=bool(prev.get("apply_station_keeping", True)),
                 help="Engine key: `apply_station_keeping_wdelta`.",
             )
+            restrict_emitters = st.checkbox(
+                "Only satellites emitting in the sim band",
+                value=bool(prev.get("restrict_emitters_to_sim_band", True)),
+                help="Engine key: `restrict_emitters_to_sim_band`. Per filing: "
+                     "only satellites whose transmitting group covers the "
+                     "simulation frequency. DEFAULT ON.",
+            )
 
     with st.expander("Grid params (S.1503-4 §D.6) — methods 2/5", expanded=False):
         col_g1, col_g2, col_g3 = st.columns(3)
@@ -429,6 +436,7 @@ if submit:
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
+        "restrict_emitters_to_sim_band": bool(restrict_emitters),
         "disable_gso_min_elevation": not bool(apply_table8_egso),
         "grid_step_deg": float(grid_step),
         "gso_pointing_step_deg": float(gso_pointing_step),
@@ -467,6 +475,7 @@ if submit:
         # Orbital dynamics
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
+        "restrict_emitters_to_sim_band": bool(restrict_emitters),
         # Table 8 εGSO gate (checkbox unchecked / default → disabled)
         "disable_gso_min_elevation": not bool(apply_table8_egso),
     }
