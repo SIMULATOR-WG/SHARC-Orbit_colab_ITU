@@ -1124,8 +1124,19 @@ def read_emitters_in_band(
     those groups. ``orb_id == -1`` is a wildcard (all orbits); a blank/zero
     ``sat_orb_id`` means the whole orbit.
 
-    Returns ``has_data=False`` (no filtering) when ``grp``/``mask_lnk1`` are
-    absent or unreadable — the caller must then keep the whole constellation.
+    Semantics of the returned selection:
+
+    * ``has_data=False`` (filter inert, keep everything) when ``grp`` /
+      ``mask_lnk1`` are absent/unreadable, or the notice declares **no**
+      transmitting group band at all — there is nothing to key on.
+    * Groups cover the frequency but the per-satellite mapping cannot be
+      resolved — the notice has no ``mask_lnk1`` rows, or the rows carry no
+      usable ``grp_id`` (e.g. the SNS v10.5 schema keys ``mask_lnk1`` by
+      ``scen_id`` instead) — → ``wildcard_all=True``: the system emits at the
+      frequency; which satellites is unknown, so all are kept.
+    * Groups are declared and **none** covers the frequency →
+      ``has_data=True`` with nothing active (``any_active=False``): the
+      system does not operate there (callers may abort).
     """
     if not os.path.exists(mdb_path):
         raise FileNotFoundError(f"MDB file not found: {mdb_path}")
@@ -1142,6 +1153,9 @@ def read_emitters_in_band(
     f = float(freq_ghz)
 
     # Transmitting groups whose declared band contains the queried frequency.
+    # n_grp_candidates counts the notice's Tx groups WITH a usable band —
+    # zero means the filing declares no Tx band data at all (filter inert).
+    n_grp_candidates = 0
     active_grps: set[int] = set()
     for row in rows_grp:
         if row.get("ntc_id", "").strip().strip('"') != ntc_s:
@@ -1155,19 +1169,30 @@ def read_emitters_in_band(
         fmax_mhz = _parse_float(row.get("freq_max", ""), default=0.0)
         if fmin_mhz <= 0.0 or fmax_mhz <= 0.0:
             continue
+        n_grp_candidates += 1
         fmin_g, fmax_g = fmin_mhz / 1000.0, fmax_mhz / 1000.0
         if fmin_g > fmax_g:
             fmin_g, fmax_g = fmax_g, fmin_g
         if (fmin_g - tol_ghz) <= f <= (fmax_g + tol_ghz):
             active_grps.add(gid)
 
+    if n_grp_candidates == 0:
+        # Notice declares no Tx group band — nothing to key the filter on.
+        return EmitterBandSelection(False, False, frozenset(), frozenset(), 0)
+
     wildcard_all = False
     active_orbits: set[int] = set()
     active_sats: set[tuple[int, int]] = set()
+    n_lnk_ntc = 0        # mask_lnk1 rows belonging to this notice
+    n_lnk_grp_keyed = 0  # ... of those, rows carrying a usable grp_id
     for row in rows_lnk:
         if row.get("ntc_id", "").strip().strip('"') != ntc_s:
             continue
-        if _parse_int(row.get("grp_id", "0")) not in active_grps:
+        n_lnk_ntc += 1
+        row_gid = _parse_int(row.get("grp_id", "0"))
+        if row_gid > 0:
+            n_lnk_grp_keyed += 1
+        if row_gid not in active_grps:
             continue
         orb_id = _parse_int(row.get("orb_id", "0"))
         sat_raw = str(row.get("sat_orb_id", "")).strip().strip('"')
@@ -1178,6 +1203,14 @@ def read_emitters_in_band(
             active_sats.add((orb_id, sat_id))
         else:
             active_orbits.add(orb_id)
+
+    # Groups DO cover the frequency but the per-satellite mapping cannot be
+    # resolved: the notice has no mask_lnk1 rows, or its rows are not keyed
+    # by grp_id (SNS v10.5 keys mask_lnk1 by scen_id). The system operates at
+    # the frequency — keep every satellite instead of (wrongly) reporting
+    # "nothing emits here".
+    if active_grps and (n_lnk_ntc == 0 or n_lnk_grp_keyed == 0):
+        wildcard_all = True
 
     return EmitterBandSelection(
         has_data=True,

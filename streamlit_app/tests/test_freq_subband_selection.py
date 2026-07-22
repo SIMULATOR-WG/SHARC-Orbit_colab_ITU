@@ -156,6 +156,74 @@ def test_gate_disabled_keeps_full_constellation() -> None:
     assert len(constellation) > 0  # legacy escape hatch: no filtering at all
 
 
+# ── 4b. schema-mismatch / missing-mapping semantics (synthetic) ─────────────
+
+def _fake_mdb(tmp_path):
+    p = tmp_path / "fake.mdb"
+    p.write_bytes(b"\x00")
+    return str(p)
+
+
+def _patch_tables(monkeypatch, grp_rows, lnk_rows):
+    import src.srs_reader as sr
+
+    def _fake_export(_path, table):
+        return {"grp": grp_rows, "mask_lnk1": lnk_rows}[table]
+
+    monkeypatch.setattr(sr, "_run_mdb_export", _fake_export)
+
+
+_GRP_COVERS = [{"ntc_id": "9", "grp_id": "10", "emi_rcp": "E",
+                "freq_min": "17800.0", "freq_max": "18600.0"}]
+
+
+def test_v105_schema_lnk_without_grp_id_is_wildcard(tmp_path, monkeypatch):
+    """SNS v10.5 keys mask_lnk1 by scen_id — groups cover f ⇒ keep all sats."""
+    _patch_tables(monkeypatch, _GRP_COVERS, [
+        {"ntc_id": "9", "scen_id": "1", "orb_id": "1", "sat_orb_id": "",
+         "mask_id": "3", "seq_no": "1"},  # no grp_id column
+    ])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=18.0)
+    assert sel.has_data is True
+    assert sel.wildcard_all is True          # inert-keep, NOT "nothing emits"
+    assert sel.is_active(5, 2) is True
+
+
+def test_no_lnk_rows_for_notice_is_wildcard(tmp_path, monkeypatch):
+    """Groups cover f but the notice has no mask_lnk1 rows ⇒ keep all sats."""
+    _patch_tables(monkeypatch, _GRP_COVERS, [
+        {"ntc_id": "OTHER", "grp_id": "77", "orb_id": "1", "sat_orb_id": "",
+         "mask_id": "1", "seq_no": "1"},
+    ])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=18.0)
+    assert sel.has_data is True
+    assert sel.wildcard_all is True
+
+
+def test_notice_without_tx_groups_is_inert(tmp_path, monkeypatch):
+    """Notice declares no Tx (E) group band at all ⇒ filter has no data."""
+    _patch_tables(monkeypatch, [
+        {"ntc_id": "9", "grp_id": "10", "emi_rcp": "R",
+         "freq_min": "27500.0", "freq_max": "30000.0"},
+    ], [
+        {"ntc_id": "9", "grp_id": "10", "orb_id": "1", "sat_orb_id": "",
+         "mask_id": "1", "seq_no": "1"},
+    ])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=18.0)
+    assert sel.has_data is False             # inert — everything simulates
+
+
+def test_tx_groups_declared_but_none_covers_stays_abortable(tmp_path, monkeypatch):
+    """Tx bands declared, none covers f, mapping present ⇒ nothing active."""
+    _patch_tables(monkeypatch, _GRP_COVERS, [
+        {"ntc_id": "9", "grp_id": "10", "orb_id": "1", "sat_orb_id": "",
+         "mask_id": "1", "seq_no": "1"},
+    ])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=12.0)
+    assert sel.has_data is True
+    assert sel.any_active is False           # strict gate may abort
+
+
 # ── 5. UI helper: Tx sub-bands per system ────────────────────────────────────
 
 @_needs_mcsat
