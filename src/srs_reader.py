@@ -1143,11 +1143,16 @@ def read_emitters_in_band(
     ntc_s = str(ntc_id).strip().strip('"')
     try:
         rows_grp = _run_mdb_export(mdb_path, "grp")
-        rows_lnk = _run_mdb_export(mdb_path, "mask_lnk1")
-    except Exception:  # noqa: BLE001 — missing tables ⇒ no filtering
-        rows_grp = rows_lnk = None
-    if not rows_grp or not rows_lnk:
+    except Exception:  # noqa: BLE001 — unreadable grp ⇒ no filtering
+        rows_grp = None
+    if not rows_grp:
         return EmitterBandSelection(False, False, frozenset(), frozenset(), 0)
+    # grp is the band authority; an absent/empty mask_lnk1 only means the
+    # per-satellite mapping is unknown (handled below), NOT "no band data".
+    try:
+        rows_lnk = _run_mdb_export(mdb_path, "mask_lnk1") or []
+    except Exception:  # noqa: BLE001
+        rows_lnk = []
 
     pref = str(emi_rcp or "").strip().upper()
     f = float(freq_ghz)

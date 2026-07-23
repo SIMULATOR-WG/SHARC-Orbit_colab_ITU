@@ -213,6 +213,22 @@ def test_notice_without_tx_groups_is_inert(tmp_path, monkeypatch):
     assert sel.has_data is False             # inert — everything simulates
 
 
+def test_empty_lnk_table_covering_freq_is_wildcard(tmp_path, monkeypatch):
+    """Old-era dbs (2018–2019) ship an EMPTY mask_lnk1 ⇒ keep all sats."""
+    _patch_tables(monkeypatch, _GRP_COVERS, [])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=18.0)
+    assert sel.has_data is True
+    assert sel.wildcard_all is True
+
+
+def test_empty_lnk_table_out_of_band_stays_abortable(tmp_path, monkeypatch):
+    """grp is the band authority even when mask_lnk1 is empty."""
+    _patch_tables(monkeypatch, _GRP_COVERS, [])
+    sel = read_emitters_in_band(_fake_mdb(tmp_path), ntc_id="9", freq_ghz=12.0)
+    assert sel.has_data is True
+    assert sel.any_active is False
+
+
 def test_tx_groups_declared_but_none_covers_stays_abortable(tmp_path, monkeypatch):
     """Tx bands declared, none covers f, mapping present ⇒ nothing active."""
     _patch_tables(monkeypatch, _GRP_COVERS, [

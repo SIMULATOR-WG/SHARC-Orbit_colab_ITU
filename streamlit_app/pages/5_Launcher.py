@@ -4,7 +4,10 @@ from __future__ import annotations
 import streamlit as st
 
 from lib import launcher, storage, theme, tour
-from lib.art22_ui import system_bands, merge_intervals, intersect_sets, art22_tree_for_bands
+from lib.art22_ui import (
+    system_bands, system_tx_subbands, merge_intervals, intersect_sets,
+    art22_tree_for_bands,
+)
 from lib.manual import help_expander
 from lib.state import use_persisted_state, set_persisted_state
 from lib.widgets import select_described
@@ -116,6 +119,10 @@ sel_ids = st.multiselect(
 # filing keeps its own PFD mask). Auto = engine resolves per filing.
 art22_leaf = None
 _carried_art22 = None
+# Per-system OPERATING intervals: PFD mask bands ∩ Tx `grp` sub-bands.
+# Sliced BR extracts carry orphan masks of other bands — clipping to the
+# grp sub-bands keeps the shared scenario inside bands every filing can
+# actually run (systems without grp band data fall back to the PFD band).
 _per_sys_intervals: list[list[tuple[float, float]]] = []
 for _i in sel_ids:
     _s = storage.get_system(_i)
@@ -123,9 +130,13 @@ for _i in sel_ids:
         continue
     _sb = system_bands(_s["srs_path"], _s.get("ntc_id"))
     if _sb:
-        _per_sys_intervals.append(
-            merge_intervals([(b["freq_min"], b["freq_max"]) for b in _sb])
-        )
+        _pfd_iv = merge_intervals([(b["freq_min"], b["freq_max"]) for b in _sb])
+        _tx = system_tx_subbands(_s["srs_path"], _s.get("ntc_id"))
+        if _tx:
+            _tx_iv = merge_intervals([(b["freq_min"], b["freq_max"]) for b in _tx])
+            _pfd_iv = intersect_sets(_pfd_iv, _tx_iv)
+        if _pfd_iv:
+            _per_sys_intervals.append(_pfd_iv)
 _common: list[tuple[float, float]] = []
 if len(_per_sys_intervals) >= 2:
     _common = _per_sys_intervals[0]
@@ -139,7 +150,7 @@ with st.expander("Article 22 downlink scenario (limits) — optional", expanded=
                    "Article 22 limits per filing.")
     else:
         st.caption(
-            f"Common downlink band(s): "
+            f"Common **operating** band(s) (PFD ∩ Tx `grp` sub-bands): "
             f"**{'; '.join(f'{lo:.3f}–{hi:.3f}' for lo, hi in _common)} GHz**. "
             "A leaf overrides Service / ES antenna / reference BW / simulation "
             "frequency for **all methods**. Auto = engine resolves per filing."

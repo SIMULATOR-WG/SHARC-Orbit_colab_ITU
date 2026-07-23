@@ -7,7 +7,11 @@ import streamlit as st
 
 from lib import launcher, srs_inspect, storage, theme, tour
 from lib.band_chart import st_bands_chart
-from lib.art22_ui import merge_intervals as _merge_intervals
+from lib.art22_ui import (
+    merge_intervals as _merge_intervals,
+    intersect_sets as _intersect_sets,
+    system_tx_subbands as _tx_subbands,
+)
 from lib.state import (
     use_persisted_state, set_persisted_state,
     current_system_id, set_current_system_id,
@@ -19,13 +23,16 @@ from lib.manual import help_expander
 
 @st.cache_data(show_spinner=False)
 def _art22_tree(srs_path: str, ntc_id: str | None):
-    """Article 22 EPFD↓ possibility tree for a filing's PFD (downlink) bands.
+    """Article 22 EPFD↓ possibility tree over the filing's OPERATING bands.
 
-    Enumerates the normative
-    Art. 22 tables intersecting each PFD mask band → service → frequency run →
-    option (ES antenna diameter, reference BW, pattern, limit curve). Each leaf
-    carries its ``mask_ref`` (which PFD mask it belongs to). Cached on the SRS
-    path + notice. Returns ``{"services": [...]}`` (empty when no PFD band).
+    Enumerates the normative Art. 22 tables intersecting each PFD mask band
+    **clipped to the transmitting `grp` sub-bands** → service → frequency run
+    → option (ES antenna diameter, reference BW, pattern, limit curve). The
+    clip drops orphan masks — sliced BR extracts carry the whole mask_info
+    but only the run band's grp/mask_lnk1, and a frequency picked on an
+    orphan mask would abort at launch (no co-frequency emitter). A filing
+    without Tx grp band data keeps the plain mask bands (filter inert).
+    Each leaf carries its ``mask_ref``. Cached on the SRS path + notice.
     """
     try:
         from src.article22_tables import (  # type: ignore[import]
@@ -34,16 +41,27 @@ def _art22_tree(srs_path: str, ntc_id: str | None):
     except Exception:  # noqa: BLE001
         return {"services": []}
     bands = srs_inspect.frequency_bands(srs_path, ntc_id)
-    masks = [
-        {
-            "mask_id": m["mask_id"],
-            "label": f"mask {m['mask_id']}",
-            "freq_min_ghz": m["freq_min_ghz"],
-            "freq_max_ghz": m["freq_max_ghz"],
-        }
-        for m in (bands.get("masks") or [])
-        if m.get("type") == "PFD" and m.get("freq_min_ghz") is not None
-    ]
+    tx_iv = _merge_intervals([
+        (float(g["freq_min_ghz"]), float(g["freq_max_ghz"]))
+        for g in (bands.get("groups") or [])
+        if str(g.get("emi_rcp", "")).upper().startswith(("TX", "E"))
+        and g.get("freq_min_ghz") is not None
+        and g.get("freq_max_ghz") is not None
+    ])
+    masks = []
+    for m in (bands.get("masks") or []):
+        if m.get("type") != "PFD" or m.get("freq_min_ghz") is None:
+            continue
+        iv = [(float(m["freq_min_ghz"]), float(m["freq_max_ghz"]))]
+        if tx_iv:
+            iv = _intersect_sets(iv, tx_iv)
+        for lo, hi in iv:
+            masks.append({
+                "mask_id": m["mask_id"],
+                "label": f"mask {m['mask_id']}",
+                "freq_min_ghz": lo,
+                "freq_max_ghz": hi,
+            })
     if not masks:
         return {"services": []}
     try:
@@ -266,11 +284,13 @@ _carried_art22 = None  # Art.22 scenario carried from a reloaded run
 _sysrow = storage.get_system(sel_sys)
 with st.expander("Article 22 downlink scenario (limits) — optional", expanded=False):
     st.caption(
-        "Normative EPFD↓ possibilities for this filing's PFD band(s): "
-        "**service → frequency run → ES antenna / reference BW**. Picking a "
-        "leaf **overrides** Service, ES antenna, reference BW and simulation "
-        "frequency below, and pins the corresponding PFD `mask_id`. Leave on "
-        "**Auto** to let the engine resolve from the filing band."
+        "Normative EPFD↓ possibilities for this filing's **operating** "
+        "band(s) (PFD mask ∩ Tx `grp` sub-bands — orphan masks of sliced "
+        "extracts are dropped): **service → frequency run → ES antenna / "
+        "reference BW**. Picking a leaf **overrides** Service, ES antenna, "
+        "reference BW and simulation frequency below, and pins the "
+        "corresponding PFD `mask_id`. Leave on **Auto** to let the engine "
+        "resolve from the filing band."
     )
     _tree = _art22_tree(_sysrow["srs_path"], _sysrow.get("ntc_id")) if _sysrow else {"services": []}
     _services = _tree.get("services") or []
@@ -827,6 +847,32 @@ if submit:
         _mf = _f(sim_freq)
         if _mf is not None and _mf > 0:
             params["simulation_frequency_ghz"] = _mf
+
+    # Pre-launch guard: a pinned frequency outside every Tx `grp` sub-band
+    # would abort in the engine (strict emitter band filter) — catch it here
+    # before a run is even created. Inert when the filing declares no Tx grp
+    # band (the engine filter is inert there too).
+    _pin = params.get("simulation_frequency_ghz")
+    if _pin is not None and params.get("restrict_emitters_to_sim_band"):
+        _sys_check = storage.get_system(sel_sys) or {}
+        _tx = _tx_subbands(_sys_check.get("srs_path", ""),
+                           _sys_check.get("ntc_id"))
+        if _tx and not any(
+            b["freq_min"] - 1e-9 <= float(_pin) <= b["freq_max"] + 1e-9
+            for b in _tx
+        ):
+            _txt = "; ".join(f"{b['freq_min']:.4f}–{b['freq_max']:.4f}"
+                             for b in _tx)
+            st.error(
+                f"No transmitting group of this filing covers "
+                f"**{float(_pin) * 1000.0:.2f} MHz** — this db's operating "
+                f"Tx sub-band(s): **{_txt} GHz**. Pick a frequency inside "
+                "them (see the band chart above), use the sibling extract "
+                "that carries this band, or disable **Only satellites "
+                "emitting in the sim band**. Run not launched.",
+                icon=":material/error:",
+            )
+            st.stop()
 
     set_persisted_state("s1503.form", {
         "reference_bandwidth_khz": params.get("reference_bandwidth_khz"),
