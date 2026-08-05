@@ -171,9 +171,11 @@ if len(systems) < 2:
 prev = use_persisted_state("s1588.form", {
     "system_ids": [],
     "method": "method_1",
-    "num_time_steps": 3600,
-    "time_step_s": 1.0,
-    "min_elevation_deg": 10.0,
+    # None = auto per filing (S.1503-4 §D4), same as an independent Single-entry.
+    "num_time_steps": None,
+    "time_step_s": None,
+    # None = ε₀ from each filing (SRS grp.elev_min), same as Single-entry.
+    "min_elevation_deg": None,
     "service": "FSS",
     "es_antenna_diameter_m": 1.2,
     "grid_step_deg": 30.0,
@@ -193,6 +195,22 @@ prev = use_persisted_state("s1588.form", {
     "truncate_tail": False,
     "truncate_tail_pct": "",
 })
+# One-shot migrations from legacy form defaults → auto per filing.
+if not prev.get("_auto_timebase_migrated"):
+    prev = dict(prev)
+    if (prev.get("num_time_steps") in (3600, "3600")
+            and prev.get("time_step_s") in (1.0, 1, "1.0", "1")):
+        prev["num_time_steps"] = None
+        prev["time_step_s"] = None
+    prev["_auto_timebase_migrated"] = True
+    set_persisted_state("s1588.form", prev)
+if not prev.get("_auto_elev_migrated"):
+    prev = dict(prev)
+    # Old Aggregate default forced ε₀=10° on every system.
+    if prev.get("min_elevation_deg") in (10.0, 10, "10.0", "10"):
+        prev["min_elevation_deg"] = None
+    prev["_auto_elev_migrated"] = True
+    set_persisted_state("s1588.form", prev)
 
 st.subheader("1. Systems")
 sel_ids = st.multiselect(
@@ -546,29 +564,38 @@ _forced_diam_m = float(art22_leaf["rf_diam_m"]) if art22_leaf is not None else N
 
 with st.form("s1588_form"):
     st.subheader("3. Simulation parameters")
-    st.caption("Empty fields = engine defaults (auto).")
+    st.caption(
+        "Empty **N** / **Δt** = auto **per filing** (S.1503-4 §D4), "
+        "identical to an independent Single-entry run of that system."
+    )
     col1, col2 = st.columns(2)
     with col1:
         num_steps = st.text_input(
             "Number of time steps",
             value=str(prev.get("num_time_steps") or ""),
-            placeholder="auto (Obs2 ref. 518 400)",
-            help="Engine key: `num_time_steps`. Lower for quick tests; "
-                 "empty = engine default.",
+            placeholder="auto (per filing, S.1503-4 §D4)",
+            help="Engine key: `num_time_steps`. Empty = **auto per filing**: "
+                 "each system is dimensioned by its own §D4 rule, exactly as "
+                 "on an independent Single-entry run. A value here pins the "
+                 "same N on every system (useful for quick tests).",
         )
         dt = st.text_input(
             "Coarse time step (s)",
             value=str(prev.get("time_step_s") or ""),
-            placeholder="auto",
+            placeholder="auto (per filing, S.1503-4 §D4.2)",
             help="Engine key: `time_step_s`. Sampling period of the EPFD↓ "
-                 "time series. Empty = engine default (1 s).",
+                 "time series. Empty = **auto per filing** (§D4.2 fine step "
+                 "from its own orbit + ES antenna).",
         )
         min_elev = st.text_input(
             "Minimum ES elevation (°)",
             value=str(prev.get("min_elevation_deg") or ""),
-            placeholder="auto",
-            help="Engine key: `min_elevation_deg`. Cut-off elevation for the "
-                 "earth station. Empty = engine default (10°).",
+            placeholder="auto (from each filing)",
+            help="Engine key: `min_elevation_deg` = S.1503-4 ε₀ (min elevation "
+                 "of the non-GSO satellite, Step 18 bullet ①). Empty = auto: "
+                 "each filing keeps its own value (SRS `grp.elev_min`); "
+                 "falls back to 5° if a filing declares none. Enter a value "
+                 "only to OVERRIDE every system with the same ε₀.",
         )
     with col2:
         _svc_default = (_forced_service or str(prev.get("service", "FSS"))).upper()
@@ -857,7 +884,7 @@ with st.form("s1588_form"):
     _gp = _f(gpts) if isinstance(gpts, str) else (
         float(gpts) if isinstance(gpts, (int, float)) else _gs
     )
-    _melev = _f(min_elev) if isinstance(min_elev, str) else 10.0
+    _melev = _f(min_elev)  # None = auto from filing (estimator uses 5° fallback)
     _n_sys = max(1, len(sel_ids))
     # Real N_sat per filing — list from MDB
     _sat_counts: list[int] = []
@@ -906,7 +933,7 @@ with st.form("s1588_form"):
             nhit=int(prev.get("s1503_nhit", 16) or 16),
             phi_coarse_deg=float(prev.get("s1503_phi_coarse_deg", 1.5) or 1.5),
             artificial_precession=(artificial_prec_mode == "on"),
-            min_elevation_deg=_melev or 10.0,
+            min_elevation_deg=_melev if _melev is not None else 5.0,
             num_steps_override=_i(num_steps),
             fine_step_override=_f(fine_dt),
             coarse_step_override=_f(dt),
@@ -1074,6 +1101,8 @@ if submit:
         "restrict_emitters_to_sim_band": bool(restrict_emitters),
         "truncate_tail": bool(truncate_tail),
         "truncate_tail_pct": truncate_tail_pct,
+        "_auto_timebase_migrated": True,
+        "_auto_elev_migrated": True,
     })
 
     run_id = launcher.launch_s1588(method=method, system_ids=sel_ids, params=params)

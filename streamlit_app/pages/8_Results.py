@@ -344,8 +344,41 @@ def _render_time_step(data: dict[str, Any]) -> None:
 
     Reads the single-entry worker's ``dual_time_step`` block, falling back to
     the ``config`` block emitted by the visualization export for other run
-    kinds (the key names differ between the two).
+    kinds (the key names differ between the two). Aggregate runs expose one
+    block per filing under ``per_system[].dual_time_step``.
     """
+    per_sys_dts = [
+        (i, p.get("dual_time_step"))
+        for i, p in enumerate(data.get("per_system") or [])
+        if isinstance(p.get("dual_time_step"), dict)
+        and (p["dual_time_step"].get("fine_step_s") is not None
+             or p["dual_time_step"].get("num_time_steps") is not None)
+    ]
+    if per_sys_dts:
+        with st.container(border=True):
+            st.subheader("Temporal sampling (S.1503-4 §D4 / §D4.7) — per system")
+            rows = []
+            for i, dts in per_sys_dts:
+                rows.append({
+                    "system": i,
+                    "mode": dts.get("mode"),
+                    "Δt fine [s]": dts.get("fine_step_s"),
+                    "Δt coarse [s]": dts.get("coarse_step_s"),
+                    "Ncoarse": dts.get("ncoarse"),
+                    "N (fine-eq)": dts.get("num_time_steps"),
+                    "fine exec": dts.get("n_fine_steps_executed"),
+                    "coarse exec": dts.get("n_coarse_steps_executed"),
+                    "iterations": dts.get("n_exec_steps"),
+                })
+            st.dataframe(rows, hide_index=True, width="stretch")
+            st.caption(
+                "Also written to ``timebase.csv`` in the run artifacts. "
+                "N (fine-eq) = S.1503-4 NSTEPS; iterations = actual fine+coarse loop."
+            )
+        # Joint / headline block may still exist (method_3).
+        if not isinstance(data.get("dual_time_step"), dict):
+            return
+
     dts = data.get("dual_time_step")
     if dts:
         mode = str(dts.get("mode") or "—")
@@ -370,7 +403,10 @@ def _render_time_step(data: dict[str, Any]) -> None:
         return
 
     with st.container(border=True):
-        st.subheader("Temporal sampling (S.1503-4 §D4.7 dual time step)")
+        st.subheader(
+            "Temporal sampling (S.1503-4 §D4.7 dual time step)"
+            + (" — joint" if per_sys_dts else "")
+        )
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Mode", "dual (fine+coarse)" if mode == "s1503" else mode)
         c2.metric("Δt fine (§D4.2)", _fmt_dt(fine))

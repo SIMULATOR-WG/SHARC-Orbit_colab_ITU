@@ -74,9 +74,10 @@ prev = use_persisted_state("launcher.form", {
     "label": "campaign-1",
     "system_ids": [],
     "methods": ["method_1", "method_3"],
-    "num_time_steps": 3600,
-    "time_step_s": 1.0,
-    "min_elevation_deg": 10.0,
+    # None = auto per filing (S.1503-4 §D4 / ε₀ from SRS), same as Single-entry.
+    "num_time_steps": None,
+    "time_step_s": None,
+    "min_elevation_deg": None,
     "service": "FSS",
     "es_antenna_diameter_m": 1.2,
     "wcga_s1503": True,
@@ -95,6 +96,21 @@ prev = use_persisted_state("launcher.form", {
     "n_geom_max": 50000,
     "country_codes": [],
 })
+# One-shot migrations from legacy form defaults → auto per filing.
+if not prev.get("_auto_timebase_migrated"):
+    prev = dict(prev)
+    if (prev.get("num_time_steps") in (3600, "3600")
+            and prev.get("time_step_s") in (1.0, 1, "1.0", "1")):
+        prev["num_time_steps"] = None
+        prev["time_step_s"] = None
+    prev["_auto_timebase_migrated"] = True
+    set_persisted_state("launcher.form", prev)
+if not prev.get("_auto_elev_migrated"):
+    prev = dict(prev)
+    if prev.get("min_elevation_deg") in (10.0, 10, "10.0", "10"):
+        prev["min_elevation_deg"] = None
+    prev["_auto_elev_migrated"] = True
+    set_persisted_state("launcher.form", prev)
 _opt_ids = [s["id"] for s in systems]
 _methods_all = ["method_1", "method_2", "method_3", "method_4"]
 
@@ -238,25 +254,30 @@ with st.form("campaign_form"):
         or ["method_1", "method_3"],
     )
 
+    st.caption("Empty N / Δt / ε₀ = **auto per filing**, as on independent "
+               "Single-entry runs.")
     col1, col2 = st.columns(2)
     with col1:
-        num_steps = st.number_input(
-            "Number of time steps", 1, 10_000_000,
-            int(prev.get("num_time_steps", 3600)), step=100,
-            help="Engine key: `num_time_steps`. Normative Obs2 reference = "
-                 "518 400; 3 600 is a fast smoke test (1 h @ 1 s).",
+        num_steps = st.text_input(
+            "Number of time steps",
+            value=str(prev.get("num_time_steps") or ""),
+            placeholder="auto (per filing, S.1503-4 §D4)",
+            help="Engine key: `num_time_steps`. Empty = auto per filing. "
+                 "A value pins the same N on every system.",
         )
-        dt = st.number_input(
-            "Coarse time step (s)", 0.001, 600.0,
-            float(prev.get("time_step_s", 1.0)), step=0.1, format="%.3f",
-            help="Engine key: `time_step_s`. Sampling period of the EPFD↓ "
-                 "time series.",
+        dt = st.text_input(
+            "Coarse time step (s)",
+            value=str(prev.get("time_step_s") or ""),
+            placeholder="auto (per filing, S.1503-4 §D4.2)",
+            help="Engine key: `time_step_s`. Empty = auto per filing.",
         )
-        min_elev = st.number_input(
-            "Minimum ES elevation (°)", 0.0, 89.0,
-            float(prev.get("min_elevation_deg", 10.0)), step=0.5,
-            help="Engine key: `min_elevation_deg`. Cut-off elevation for the "
-                 "earth station.",
+        min_elev = st.text_input(
+            "Minimum ES elevation (°)",
+            value=str(prev.get("min_elevation_deg") or ""),
+            placeholder="auto (from each filing)",
+            help="Engine key: `min_elevation_deg` = S.1503-4 ε₀. Empty = "
+                 "each filing keeps SRS `grp.elev_min`. A value overrides "
+                 "every system.",
         )
     with col2:
         _svc_default = (_forced_service or str(prev.get("service", "FSS"))).upper()
@@ -421,6 +442,22 @@ if submit:
         st.error("Pick at least 1 method.")
         st.stop()
 
+    def _i(s):
+        try:
+            return int(float((s or "").strip()))
+        except (ValueError, TypeError):
+            return None
+
+    def _f(s):
+        try:
+            return float((s or "").strip())
+        except (ValueError, TypeError):
+            return None
+
+    _n_steps = _i(num_steps)
+    _dt = _f(dt)
+    _min_elev = _f(min_elev)
+
     set_persisted_state("launcher.form", {
         "reference_bandwidth_khz": (
             float(art22_leaf["reference_bandwidth_khz"]) if art22_leaf is not None
@@ -431,9 +468,9 @@ if submit:
         "label": label,
         "system_ids": list(sel_ids),
         "methods": list(methods),
-        "num_time_steps": int(num_steps),
-        "time_step_s": float(dt),
-        "min_elevation_deg": float(min_elev),
+        "num_time_steps": _n_steps,
+        "time_step_s": _dt,
+        "min_elevation_deg": _min_elev,
         "service": service,
         "es_antenna_diameter_m": float(diam),
         "wcga_s1503": bool(wcga_s1503),
@@ -453,13 +490,16 @@ if submit:
         "gso_pointing_step_deg": float(gso_pointing_step),
         "n_geom_max": int(n_geom),
         "country_codes": list(country_codes),
+        "_auto_timebase_migrated": True,
+        "_auto_elev_migrated": True,
     })
 
-    cm_id = storage.create_campaign(
-        label=label,
-        params={"system_ids": sel_ids, "methods": methods,
-                 "num_time_steps": int(num_steps), "time_step_s": float(dt)},
-    )
+    _camp_params: dict = {"system_ids": sel_ids, "methods": methods}
+    if _n_steps is not None:
+        _camp_params["num_time_steps"] = _n_steps
+    if _dt is not None:
+        _camp_params["time_step_s"] = _dt
+    cm_id = storage.create_campaign(label=label, params=_camp_params)
 
     # Shared options applied to every method (worker uses each where relevant).
     def _fine() -> float | None:
@@ -469,9 +509,6 @@ if submit:
             return None
 
     base: dict = {
-        "num_time_steps": int(num_steps),
-        "time_step_s": float(dt),
-        "min_elevation_deg": float(min_elev),
         "service": service,
         "es_antenna_diameter_m": float(diam) if diam > 0 else None,
         # WCG search
@@ -490,6 +527,13 @@ if submit:
         # Table 8 εGSO gate (checkbox unchecked / default → disabled)
         "disable_gso_min_elevation": not bool(apply_table8_egso),
     }
+    # Omit N / Δt / ε₀ when empty → worker resolves auto per filing.
+    if _n_steps is not None:
+        base["num_time_steps"] = _n_steps
+    if _dt is not None:
+        base["time_step_s"] = _dt
+    if _min_elev is not None:
+        base["min_elevation_deg"] = _min_elev
     if _fine() is not None:
         base["fine_time_step_s"] = _fine()
     if artificial_prec_mode == "on":

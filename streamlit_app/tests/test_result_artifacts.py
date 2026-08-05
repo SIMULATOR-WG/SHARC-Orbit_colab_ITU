@@ -148,6 +148,69 @@ def test_geometries_from_single_wcg(tmp_path):
     assert len(rows) == 1 and float(rows[0]["max_epfd_db"]) == -155.9
 
 
+def test_timebase_csv_from_per_system(tmp_path):
+    from streamlit_app.lib.result_artifacts import write_timebase_csv
+    sim = _sim_data()
+    sim["method"] = "method_1"
+    sim["per_system"] = [
+        {"dual_time_step": {
+            "mode": "s1503", "fine_step_s": 0.94, "coarse_step_s": 5.64,
+            "ncoarse": 6, "num_time_steps": 654638,
+            "n_fine_steps_executed": 470304, "n_coarse_steps_executed": 30736,
+            "n_exec_steps": 501040,
+        }},
+        {"dual_time_step": {
+            "mode": "s1503", "fine_step_s": 26.978, "coarse_step_s": 161.868,
+            "ncoarse": 6, "num_time_steps": 1518516,
+            "n_fine_steps_executed": 172151, "n_coarse_steps_executed": 224407,
+            "n_exec_steps": 396558,
+        }},
+    ]
+    assert write_timebase_csv(tmp_path, sim) == "timebase.csv"
+    text = (tmp_path / "timebase.csv").read_text()
+    assert "system_0" in text and "0.94" in text and "1518516" in text
+
+
+def test_timebase_csv_from_single_entry_top_level(tmp_path):
+    """Single-entry stores dual_time_step at the sim_data root."""
+    from streamlit_app.lib.result_artifacts import write_timebase_csv
+    sim = _sim_data()
+    sim["kind"] = "single"
+    sim["dual_time_step"] = {
+        "mode": "s1503", "fine_step_s": 1.0, "coarse_step_s": 6.0,
+        "ncoarse": 6, "num_time_steps": 518400,
+        "n_fine_steps_executed": 100000, "n_coarse_steps_executed": 20000,
+        "n_exec_steps": 120000,
+    }
+    assert write_timebase_csv(tmp_path, sim) == "timebase.csv"
+    text = (tmp_path / "timebase.csv").read_text()
+    assert "scope,mode" in text and "run," in text and "518400" in text
+
+
+def test_geometries_from_method1_per_system_wcgs(tmp_path):
+    """method_1 stores one WCG per filing under per_system[].wcg — map.png
+    must pick those up (previously only per_point / top-level wcg worked)."""
+    from streamlit_app.lib.result_artifacts import (
+        write_geometries_csv, write_geometry_map_png,
+    )
+    sim = _sim_data()
+    sim["method"] = "method_1"
+    sim["per_system"] = [
+        {"wcg": {"es_lat_deg": -12.0, "es_lon_deg": -48.0, "gso_lon_deg": -45.0},
+         "max_epfd_dbw": -161.0},
+        {"wcg": {"es_lat_deg": 35.0, "es_lon_deg": 10.0, "gso_lon_deg": 8.0},
+         "max_epfd_dbw": -159.5},
+        {"wcg": None, "max_epfd_dbw": None},  # no-geometry filing — skipped
+    ]
+    assert write_geometries_csv(tmp_path, sim) == "geometries.csv"
+    rows = _rows(tmp_path / "geometries.csv")
+    assert len(rows) == 2
+    assert float(rows[0]["es_lat_deg"]) == -12.0
+    assert float(rows[1]["max_epfd_db"]) == -159.5
+    assert write_geometry_map_png(tmp_path, sim) == "map.png"
+    assert (tmp_path / "map.png").stat().st_size > 1000
+
+
 def test_timeseries_gz_for_long_traces(tmp_path):
     import gzip
     from streamlit_app.lib.result_artifacts import write_timeseries_csv

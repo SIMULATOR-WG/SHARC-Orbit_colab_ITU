@@ -1289,6 +1289,133 @@ def create_constellation_for_config(
     )
 
 
+def _resolve_artificial_precession(config: dict) -> bool:
+    """``simulation.artificial_precession``, auto-detected when unset.
+
+    Same rule as :func:`run_wcg_downlink`: absent + SRS repeat/precession
+    fields present → ON for small non-precessing constellations. An admin
+    precession override (Case 3) disables it (§D6.3.6, mutually exclusive).
+    """
+    ngso_cfg = config.get("non_gso") or {}
+    sim_cfg = config.get("simulation") or {}
+    value = sim_cfg.get("artificial_precession")
+    if value is None and "artificial_precession" not in sim_cfg:
+        if "_rpt_period_s" in ngso_cfg or "_f_precess" in ngso_cfg:
+            rpt = ngso_cfg.get("_rpt_period_s", 0) or 0
+            num_planes = int(ngso_cfg.get("num_planes", 0) or 0)
+            if rpt <= 0 and num_planes < 12 and not ngso_cfg.get("_f_precess", False):
+                value = True
+    value = bool(value)
+    if value and sim_cfg.get("use_precession_mdb", False):
+        if float(ngso_cfg.get("_precession_deg_day", 0.0) or 0.0) != 0.0:
+            value = False
+    return value
+
+
+def compute_s1503_time_reference(
+    config: dict,
+    *,
+    es_antenna: EarthStationAntenna | None = None,
+    artificial_precession: bool | None = None,
+) -> tuple[float, int]:
+    """S.1503-4 §D4 temporal sampling reference ``(Δt_fine_s, NSTEPS)``.
+
+    Dimensions each sub-constellation with its own (a, e, i) and applies the
+    §D4.1 rule (smallest Δt, longest run). Used both by the engine assembly
+    and by callers that must reproduce the *auto* time base a filing would
+    get on an independent single-entry run. Falls back to ``(1.0, 1000)``.
+    """
+    ngso_cfg = config["non_gso"]
+    sim_cfg = config.get("simulation") or {}
+    art22_cfg = config.get("article22_limits") or {}
+    gso_es_cfg = config.get("gso_es") or {}
+
+    if es_antenna is None:
+        es_antenna = create_gso_es_antenna(
+            float(gso_es_cfg.get("antenna_diameter_m", 1.2) or 1.2),
+            float(ngso_cfg["frequency_ghz"]),
+            float(gso_es_cfg.get("antenna_efficiency", 0.99) or 0.99),
+            service=str(gso_es_cfg.get("service", "FSS")).upper(),
+        )
+    if artificial_precession is None:
+        artificial_precession = _resolve_artificial_precession(config)
+
+    # §D4.6.1 repeat-track detection keys on the SRS station-keeping flag.
+    repeating = bool(sim_cfg.get("repeating_ground_track", False))
+    repeat_days = float(sim_cfg.get("repeat_period_days", 1.0) or 1.0)
+    if not repeating and (ngso_cfg.get("_rpt_period_s", 0) or 0) > 0:
+        rpt_s = ngso_cfg["_rpt_period_s"]
+        if rpt_s >= 3600 and bool(ngso_cfg.get("_f_stn_keep", False)):
+            repeat_days = rpt_s / 86400.0
+            repeating = True
+
+    # Nmin (§D4.6, Table 13): limits are stored as EXCEEDANCE percentages,
+    # so the rarest event is the smallest strictly positive one.
+    min_exc_pct = None
+    try:
+        cands = [
+            float(it[1]) for it in (art22_cfg.get("limits") or [])
+            if isinstance(it, (list, tuple)) and len(it) >= 2 and float(it[1]) > 0.0
+        ]
+        if cands:
+            min_exc_pct = min(cands)
+    except Exception:  # noqa: BLE001
+        min_exc_pct = None
+
+    n_sat_total = sum(
+        int(p.get("sats_per_plane", 0) or 0)
+        for p in (ngso_cfg.get("_planes") or [])
+    ) or None
+    itu_sw = str(sim_cfg.get("itu_software", "itu_epfd") or "itu_epfd").lower()
+    subs = group_sub_constellations(ngso_cfg.get("_planes") or []) or [{
+        "a_km": float(ngso_cfg["semi_major_axis_km"]),
+        "e": float(ngso_cfg["eccentricity"]),
+        "i_deg": float(ngso_cfg["inclination_deg"]),
+        "num_planes": int(ngso_cfg.get("num_planes", 0) or 0),
+        "sats_per_plane": int(ngso_cfg.get("sats_per_plane", 0) or 0),
+        "min_operating_height_km": float(ngso_cfg.get("min_operating_height_km", 0.0) or 0.0),
+    }]
+    nhit = int(sim_cfg.get("s1503_nhit", 16) or 16)
+    try:
+        ref = compute_time_step_and_count_multi(
+            subs,
+            min_elevation_deg=float(ngso_cfg["min_elevation_deg"]),
+            artificial_precession=bool(artificial_precession),
+            repeating_ground_track=repeating, repeat_period_days=repeat_days,
+            theta_3db_deg=es_antenna.theta_3db_deg, nhit=nhit,
+            literal_s1503_d42=bool(sim_cfg.get("s1503_literal_time_step", True)),
+            min_exceedance_pct=min_exc_pct, ntracks=nhit,
+            phi_coarse_deg=float(sim_cfg.get("s1503_phi_coarse_deg", 1.5) or 1.5),
+            n_sat_total=n_sat_total,
+            reduce_ntracks_1e8=itu_sw.startswith(("transfinite", "itu")),
+        )
+    except Exception as exc:  # noqa: BLE001 — conservative fallback
+        logger.warning("Failed computing S.1503 time reference (%s).", exc)
+        return 1.0, 1000
+    return float(ref.tstep_s), int(ref.nsteps)
+
+
+def resolve_time_base(config: dict) -> tuple[float, int]:
+    """``(Δt_s, NSTEPS)`` for a fixed-geometry run of one filing.
+
+    User overrides win: an explicit ``num_time_steps`` and an explicit coarse
+    step (``_coarse_step_overridden``) are honoured; whatever is left unset
+    falls back to the filing's own S.1503-4 §D4 reference — i.e. the same
+    time base the filing would get on an independent single-entry run.
+    """
+    sim_cfg = config.get("simulation") or {}
+    nsteps = int(sim_cfg.get("num_time_steps", 0) or 0)
+    tstep = (
+        float(sim_cfg.get("coarse_time_step_s", 0.0) or 0.0)
+        if sim_cfg.get("_coarse_step_overridden") else 0.0
+    )
+    if nsteps > 0 and tstep > 0.0:
+        return tstep, nsteps
+    ref_tstep, ref_nsteps = compute_s1503_time_reference(config)
+    return (tstep if tstep > 0.0 else ref_tstep,
+            nsteps if nsteps > 0 else ref_nsteps)
+
+
 def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     """Build the EPFD↓ engine inputs from the cfg, without the WCG search.
 
@@ -1429,7 +1556,6 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     f_stn_keep = ngso_cfg.get("_f_stn_keep", False)
     wdelta_deg_requested = float(ngso_cfg.get("_keep_range_deg", 0.0) or 0.0) if f_stn_keep else 0.0
 
-    # Temporal sampling reference S.1503-4 §D4.2 (fine step + N).
     # §D4.6.1 applies when station keeping maintains the declared repeat track
     # (SRS orbit.f_stn_keep) — the BR software keys on this flag, not on the
     # unperturbed geometric closure of the track (validated against the
@@ -1437,11 +1563,8 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     # 5.56 orbits/repeat; Boeing ntc102 N→non-repeating despite a declared
     # 1-day period).
     repeating = bool(sim_cfg.get("repeating_ground_track", False))
-    repeat_days = float(sim_cfg.get("repeat_period_days", 1.0) or 1.0)
     if not repeating and (ngso_cfg.get("_rpt_period_s", 0) or 0) > 0:
-        rpt_s = ngso_cfg["_rpt_period_s"]
-        if rpt_s >= 3600 and bool(ngso_cfg.get("_f_stn_keep", False)):
-            repeat_days = rpt_s / 86400.0
+        if ngso_cfg["_rpt_period_s"] >= 3600 and bool(ngso_cfg.get("_f_stn_keep", False)):
             repeating = True
     _orbit_case = classify_orbit_case(
         repeating_ground_track=repeating,
@@ -1449,62 +1572,12 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
         inclination_deg=i_deg,
     )
     logger.info(f"Orbit propagation model (D6.3.6): Case {_orbit_case}")
-    nhit_s1503 = int(sim_cfg.get("s1503_nhit", 16) or 16)
-    literal_s1503_d42 = bool(sim_cfg.get("s1503_literal_time_step", True))
-    _limits = art22_cfg.get("limits", []) if isinstance(art22_cfg, dict) else []
-    # Nmin (D4.6, Table 13): the limits are stored in EXCEEDANCE (CCDF)
-    # convention, so the rarest event is the SMALLEST strictly positive
-    # exceedance percentage (0.3% ↔ "not exceeded for 99.7% of the time").
-    _min_exc_pct = None
-    try:
-        _cands = [
-            float(it[1]) for it in _limits
-            if isinstance(it, (list, tuple)) and len(it) >= 2 and float(it[1]) > 0.0
-        ]
-        if _cands:
-            _min_exc_pct = min(_cands)
-    except Exception:
-        _min_exc_pct = None
-    # §D4.1 √Nsatellites needs the REAL fleet size — heterogeneous filings
-    # (e.g. CRC STEAM-2: planes of 1/20/43/58 sats) undercount badly via
-    # num_planes × sats_per_plane(plane 0).
-    _n_sat_total = sum(
-        int(p.get("sats_per_plane", 0) or 0)
-        for p in (ngso_cfg.get("_planes") or [])
-    ) or None
-    # §D4 reading (itu_software) — S.1503-4 is ambiguous on whether Ntracks
-    # follows N'hit in the §D4.1 recalc. "itu_epfd" (default; legacy
-    # "transfinite" maps here) = reading B: N'track = N'hit, as in the current
-    # ITU 'T' v5.45 runs; "s1503_4" (legacy agenium/br_space) = reading A:
-    # Ntracks kept at 16. θ3dB = 70λ/D in both (all official runs).
-    _itu_sw = str(sim_cfg.get("itu_software", "itu_epfd") or "itu_epfd").lower()
-    _reading_b = _itu_sw.startswith(("transfinite", "itu"))
-    # §D4.1 multi-sub rule: dimension each sub-constellation with its own
-    # (a, e, i); smallest Δt + longest run win. Fall back to the top-level
-    # single-orbit parameters when per-plane data is unavailable.
-    _subs = group_sub_constellations(ngso_cfg.get("_planes") or []) or [{
-        "a_km": a_km, "e": ecc, "i_deg": i_deg,
-        "num_planes": num_planes, "sats_per_plane": sats_per_plane,
-        "min_operating_height_km": min_operating_height_km,
-    }]
-    try:
-        _ts_ref = compute_time_step_and_count_multi(
-            _subs,
-            min_elevation_deg=min_elev_deg,
-            artificial_precession=artificial_precession,
-            repeating_ground_track=repeating, repeat_period_days=repeat_days,
-            theta_3db_deg=es_antenna.theta_3db_deg, nhit=nhit_s1503,
-            literal_s1503_d42=literal_s1503_d42,
-            min_exceedance_pct=_min_exc_pct, ntracks=nhit_s1503,
-            n_sat_total=_n_sat_total,
-            reduce_ntracks_1e8=_reading_b,
-        )
-        s1503_ref_tstep_s = float(_ts_ref.tstep_s)
-        s1503_ref_nsteps = int(_ts_ref.nsteps)
-    except Exception as exc:  # noqa: BLE001 — conservative fallback
-        logger.warning("Failed computing S.1503 time reference (%s).", exc)
-        s1503_ref_tstep_s = 1.0
-        s1503_ref_nsteps = 1000
+
+    # Temporal sampling reference S.1503-4 §D4.2 (fine step + N).
+    s1503_ref_tstep_s, s1503_ref_nsteps = compute_s1503_time_reference(
+        config, es_antenna=es_antenna,
+        artificial_precession=artificial_precession,
+    )
 
     return DownlinkEngineInputs(
         constellation=constellation,

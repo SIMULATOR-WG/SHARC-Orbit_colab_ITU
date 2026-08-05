@@ -7,9 +7,9 @@ params.json fields:
     result_path           — directory to write artifacts into
     method                — "method_1" | "method_2" | "method_3"
     filings               — list of {srs_path, mask_path?, mask_id?, ntc_id?}
-    num_time_steps        — default 3 600 (1 h @ 1 s — conservative for runtime)
-    time_step_s           — default 1.0
-    min_elevation_deg     — default 10.0
+    num_time_steps        — omit/0 = auto (each filing's own S.1503-4 §D4 N)
+    time_step_s           — omit = auto (each filing's own §D4.2 fine step)
+    min_elevation_deg     — omit = keep each filing's SRS grp.elev_min (ε₀)
     service               — default "FSS"
     es_antenna_diameter_m — optional
     # method_2 only:
@@ -256,7 +256,9 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
 
     sim = cfg.setdefault("simulation", {})
     sim["run_static_es"] = bool(common.get("run_static_es", False))
-    sim["num_time_steps"] = int(common.get("num_time_steps", 3_600))
+    # 0 = auto: each filing gets its own S.1503-4 §D4 time base, exactly as on
+    # an independent single-entry run. Only an explicit value pins a shared N.
+    sim["num_time_steps"] = int(common.get("num_time_steps") or 0)
     if "time_step_s" in common:
         sim["coarse_time_step_s"] = float(common["time_step_s"])
         sim["_coarse_step_overridden"] = True
@@ -269,7 +271,9 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
         )
     if common.get("itu_software"):
         sim["itu_software"] = str(common["itu_software"]).lower()
-    if "min_elevation_deg" in common:
+    # ε₀ override: only when the user supplied a value. Absent/None = keep
+    # each filing's ε₀ (SRS grp.elev_min), same as Single-entry.
+    if common.get("min_elevation_deg") is not None:
         cfg.setdefault("non_gso", {})["min_elevation_deg"] = float(common["min_elevation_deg"])
     if common.get("es_antenna_diameter_m"):
         cfg.setdefault("gso_es", {})["antenna_diameter_m"] = float(common["es_antenna_diameter_m"])
@@ -359,6 +363,64 @@ def _build_antenna(cfg: dict[str, Any]):
     )
 
 
+def _dual_time_step_block(
+    sim_cfg: dict[str, Any],
+    acc: Any | None = None,
+    *,
+    fine_step_s: float | None = None,
+    coarse_step_s: float | None = None,
+    ncoarse: int | None = None,
+    num_time_steps: int | None = None,
+) -> dict[str, Any]:
+    """Same contract as the Single-entry ``sim_data["dual_time_step"]`` block.
+
+    Prefer values already resolved on ``sim_cfg`` by ``run_wcg_downlink``;
+    optional kwargs fill gaps for fixed-geometry paths that never touch the
+    dual-step machinery.
+    """
+    mode = str(sim_cfg.get("dual_time_step_mode") or "s1503")
+    fine = sim_cfg.get("_resolved_dual_fine_step_s")
+    if fine is None:
+        fine = fine_step_s if fine_step_s is not None else sim_cfg.get("_resolved_time_step_s")
+    coarse = sim_cfg.get("_resolved_dual_coarse_step_s")
+    if coarse is None:
+        coarse = coarse_step_s if coarse_step_s is not None else fine
+    nc = sim_cfg.get("_resolved_dual_ncoarse")
+    if nc is None:
+        nc = ncoarse if ncoarse is not None else (1 if fine and coarse and fine == coarse else None)
+    ntot = sim_cfg.get("_resolved_num_time_steps")
+    if ntot is None:
+        ntot = num_time_steps if num_time_steps is not None else sim_cfg.get("num_time_steps")
+
+    n_fine = sim_cfg.get("_resolved_n_fine_steps")
+    n_coarse = sim_cfg.get("_resolved_n_coarse_steps")
+    n_exec = sim_cfg.get("_resolved_n_exec_steps")
+    if acc is not None:
+        if n_fine is None:
+            n_fine = getattr(acc, "n_fine_steps", None)
+        if n_coarse is None:
+            n_coarse = getattr(acc, "n_coarse_steps", None)
+        if n_exec is None:
+            n_exec = getattr(acc, "n_steps", None)
+
+    out: dict[str, Any] = {
+        "mode": mode,
+        "fine_step_s": float(fine) if fine is not None else None,
+        "coarse_step_s": float(coarse) if coarse is not None else None,
+        "ncoarse": int(nc) if nc is not None else None,
+        "num_time_steps": int(ntot) if ntot is not None else None,
+        "n_fine_steps_executed": int(n_fine) if n_fine is not None else None,
+        "n_coarse_steps_executed": int(n_coarse) if n_coarse is not None else None,
+        "n_exec_steps": int(n_exec) if n_exec is not None else None,
+    }
+    # Drop unused helper noise — keep reference §D4 values when present.
+    if sim_cfg.get("_s1503_reference_num_time_steps") is not None:
+        out["s1503_reference_num_time_steps"] = int(sim_cfg["_s1503_reference_num_time_steps"])
+    if sim_cfg.get("_s1503_reference_time_step_s") is not None:
+        out["s1503_reference_time_step_s"] = float(sim_cfg["_s1503_reference_time_step_s"])
+    return out
+
+
 def _run_single_filing(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, Any]:
     """Run a complete single-system S.1503 pipeline (WCGA + EPFD↓ + compliance)."""
     from src.main import run_wcg_downlink  # type: ignore[import]
@@ -383,6 +445,7 @@ def _run_single_filing(filing: dict[str, Any], common: dict[str, Any]) -> dict[s
             sim_dl.build_cdf()
         except Exception:  # noqa: BLE001
             pass
+    acc = getattr(sim_dl, "acc", None) if sim_dl is not None else None
     return {
         "wcg": {
             "es_lat_deg": float(wcg_dl.es_lat_deg),
@@ -398,12 +461,15 @@ def _run_single_filing(filing: dict[str, Any], common: dict[str, Any]) -> dict[s
             "fail" if comp_dl else "unknown"
         ),
         "n_satellites": int(len(constellation)) if constellation else 0,
+        # Per-filing §D4 / §D4.7 time base (auto or overridden) — same keys as
+        # Single-entry sim_data["dual_time_step"].
+        "dual_time_step": _dual_time_step_block(cfg.get("simulation") or {}, acc),
     }
 
 
 def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[str, Any]:
     """Run S.1503 for one filing at a fixed geometry (no WCG search)."""
-    from src.main import create_constellation_for_config  # type: ignore[import]
+    from src.main import create_constellation_for_config, resolve_time_base  # type: ignore[import]
     from src.s1588_studies import run_epfd_at_geometry  # type: ignore[import]
 
     import math as _math
@@ -415,8 +481,8 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
 
     sim = cfg["simulation"]
     ngso = cfg["non_gso"]
-    nsteps = int(sim["num_time_steps"])
-    tstep = float(sim.get("coarse_time_step_s", 1.0))
+    # Unset N / Δt fall back to this filing's own §D4 reference (auto).
+    tstep, nsteps = resolve_time_base(cfg)
     t_run_s = nsteps * tstep
 
     # Orbital dynamics (S.1503-4 §D6.3) — same semantics as run_wcg_downlink's
@@ -442,8 +508,7 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
         num_time_steps=nsteps,
         time_step_s=tstep,
         alpha0_deg=float(cfg["non_gso"].get("alpha0_deg", 0.0)),
-        min_elevation_deg=float(cfg["non_gso"].get("min_elevation_deg",
-                                                     common.get("min_elevation_deg", 10.0))),
+        min_elevation_deg=float(cfg["non_gso"].get("min_elevation_deg", 5.0)),
         n_jobs=int(cfg["simulation"].get("n_jobs", 1)),
         raan_dot_artificial_rad_s=raan_dot_artificial,
         raan_dot_override_rad_s=raan_dot_override,
@@ -454,11 +519,18 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
         sim_dl.build_cdf()
     except Exception:  # noqa: BLE001
         pass
+    acc = getattr(sim_dl, "acc", None)
     return {
         "ccdf_bins_db": list(map(float, sim_dl.cdf_epfd_dBW)),
         "ccdf_pct": list(map(float, sim_dl.cdf_percentage)),
         "max_epfd_dbw": float(sim_dl.cdf_epfd_dBW[0]) if len(sim_dl.cdf_epfd_dBW) else None,
         "n_satellites": int(len(constellation) or 0),
+        # Fixed-geometry path: usually single Δt (no dual). Still record N / Δt.
+        "dual_time_step": _dual_time_step_block(
+            sim, acc,
+            fine_step_s=tstep, coarse_step_s=tstep, ncoarse=1,
+            num_time_steps=nsteps,
+        ),
     }
 
 
@@ -592,8 +664,19 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
     common = {k: v for k, v in params.items() if k not in ("filings", "method", "result_path")}
     grid_step = float(params.get("grid_step_deg", 30.0))
     gso_step = float(params.get("gso_pointing_step_deg", 30.0))
-    min_elev = float(params.get("min_elevation_deg", 10.0))
     country_codes = list(params.get("country_codes") or []) or None
+
+    # Grid GSO-visibility cut-off. Explicit UI override wins; otherwise use the
+    # least restrictive filing ε₀ (min) so the grid stays usable for every
+    # system while each filing's EPFD↓ still uses its own ε₀ from cfg.
+    if params.get("min_elevation_deg") is not None:
+        min_elev = float(params["min_elevation_deg"])
+    else:
+        _elevs = [
+            float(_load_cfg(f, common)["non_gso"].get("min_elevation_deg", 5.0))
+            for f in filings
+        ]
+        min_elev = min(_elevs) if _elevs else 5.0
 
     grid_points = list(iter_geometry_grid(
         grid_step_deg=grid_step,
@@ -633,6 +716,9 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
 
     # Per grid point: keep BOTH the per-system raw CCDFs and their convolution.
     per_point: list[dict[str, Any]] = []
+    # One §D4 time base per filing (identical across grid points for that filing).
+    filing_dts: dict[int, dict[str, Any]] = {}
+    filing_nsat: dict[int, int] = {}
     for pi, gp in enumerate(grid_points):
         rows = sorted(by_pi.get(pi, []), key=lambda x: x[0])
         per_sys = [
@@ -643,6 +729,11 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
             }
             for fi, r in rows
         ]
+        for fi, r in rows:
+            if fi not in filing_dts and isinstance(r.get("dual_time_step"), dict):
+                filing_dts[fi] = r["dual_time_step"]
+            if fi not in filing_nsat and r.get("n_satellites") is not None:
+                filing_nsat[fi] = int(r["n_satellites"])
         per_sys_ccdfs = [
             (r["ccdf_bins_db"], r["ccdf_pct"]) for _fi, r in rows if r["ccdf_bins_db"]
         ]
@@ -674,6 +765,15 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
         [(p["ccdf_bins_db"], p["ccdf_pct"]) for p in conv_points], pct_lo,
     )
 
+    per_system_tb = [
+        {
+            "system_index": fi,
+            "n_satellites": filing_nsat.get(fi),
+            "dual_time_step": filing_dts[fi],
+        }
+        for fi in sorted(filing_dts)
+    ]
+
     out = {
         "method": method_label,
         "grid_step_deg": grid_step,
@@ -686,6 +786,7 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
         "max_epfd_dbw_m2_40khz": env_bins[0] if env_bins else None,
         "percentiles": _percentiles(env_bins, env_pct, env_floor) if env_bins else {},
         "per_point": per_point,
+        "per_system": per_system_tb,
     }
     if env_floor is not None:
         out["truncation_floor_pct"] = float(env_floor)
@@ -704,7 +805,7 @@ def _run_method_2(params: dict[str, Any]) -> dict[str, Any]:
 
 def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     """Joint simulation (Method 2B): fused megaconstellation, single sim run."""
-    from src.main import create_constellation_for_config  # type: ignore[import]
+    from src.main import create_constellation_for_config, resolve_time_base  # type: ignore[import]
     from src.pfd_mask import PFDMaskMulti  # type: ignore[import]
     from src.epfd_calculator import run_epfd_simulation  # type: ignore[import]
     from src.wcg_search import search_wcg_s1503  # type: ignore[import]
@@ -713,11 +814,29 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
 
     filings = params["filings"]
     common = {k: v for k, v in params.items() if k not in ("filings", "method", "result_path")}
-    num_steps = int(common.get("num_time_steps", 3_600))
-    dt = float(common.get("time_step_s", 1.0))
-    min_elev = float(common.get("min_elevation_deg", 10.0))
 
     cfgs = [_load_cfg(f, common) for f in filings]
+
+    # Joint megaconstellation needs one ε₀. Explicit UI override wins; otherwise
+    # the least restrictive filing value (min) — more visible sats ⇒ more
+    # conservative aggregate EPFD↓. Each filing's cfg still keeps its own ε₀
+    # for any per-system side paths.
+    if common.get("min_elevation_deg") is not None:
+        min_elev = float(common["min_elevation_deg"])
+    else:
+        min_elev = min(
+            float(c["non_gso"].get("min_elevation_deg", 5.0)) for c in cfgs
+        ) if cfgs else 5.0
+
+    # One fused constellation ⇒ one timeline. With N / Δt left on auto, apply
+    # the §D4.1 rule across filings just as it is applied across a filing's own
+    # sub-constellations: smallest Δt, longest run time.
+    _bases = [resolve_time_base(c) for c in cfgs]
+    dt = min(b[0] for b in _bases)
+    num_steps = max(int(round(b[0] * b[1] / dt)) for b in _bases)
+    if len(cfgs) > 1:
+        _emit(f"[method_3] joint time base (§D4.1 across filings): "
+              f"Δt={dt:.4f}s · N={num_steps:,}")
 
     _emit("[method_3] fusing constellations into megaconstellation")
     _emit_progress(10)
@@ -856,6 +975,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     if post_floor is not None and post_bins:
         post_sum["truncation_floor_pct"] = float(post_floor)
 
+    acc = getattr(sim_res, "acc", None)
     return {
         "method": "method_3",
         "geometry": {
@@ -870,6 +990,12 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         "post_sum": post_sum,
         "per_system": per_system,
         "n_systems": len(filings),
+        # Joint megaconstellation timeline (one shared N / Δt).
+        "dual_time_step": _dual_time_step_block(
+            cfgs[0].get("simulation") or {}, acc,
+            fine_step_s=dt, coarse_step_s=dt, ncoarse=1,
+            num_time_steps=num_steps,
+        ),
     }
 
 
@@ -894,6 +1020,18 @@ def _run_method_4(params: dict[str, Any]) -> dict[str, Any]:
         costs=wcg_costs,
     )
     wcgs = [{"index": i, **(r.get("wcg") or {})} for i, r in enumerate(wcg_results)]
+    # Per-filing §D4 time base from the WCG phase (full single-entry pipeline).
+    per_system_tb = [
+        {
+            "system_index": i,
+            "wcg": r.get("wcg"),
+            "n_satellites": r.get("n_satellites"),
+            "dual_time_step": r.get("dual_time_step"),
+            "max_epfd_dbw": r.get("max_epfd_dbw"),
+        }
+        for i, r in enumerate(wcg_results)
+        if isinstance(r.get("dual_time_step"), dict) or r.get("wcg")
+    ]
 
     # 2) Build cross (WCG g_i × filing j) task list
     sim_fc = plan.filing_costs(filings, common, sim=True, wcga=False)
@@ -957,6 +1095,7 @@ def _run_method_4(params: dict[str, Any]) -> dict[str, Any]:
     out = {
         "method": "method_4",
         "n_systems": len(filings),
+        "per_system": per_system_tb,
         "per_wcg": per_wcg,
         "ccdf_bins_db": bins,
         "ccdf_pct": pct,

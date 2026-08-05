@@ -232,8 +232,15 @@ def write_histogram_png(result_path: Path, sim_data: dict[str, Any],
 
 
 def _geometry_rows(sim_data: dict[str, Any]) -> list[dict[str, Any]]:
-    """Tested geometries: s1588 aggregate ``per_point`` sweep, or the single
-    WCG of an s1503 run (§D3). ``measure_id`` = per_point index (R10)."""
+    """Tested geometries for ``geometries.csv`` / ``map.png`` (R10).
+
+    Sources, in priority order:
+      * ``per_point`` — method_2 / method_5 ES×GSO grid
+      * ``per_wcg`` — method_4 per-WCG convolution sweep
+      * ``per_system[].wcg`` — method_1 (each filing's own WCG)
+      * ``geometry`` — method_3 joint WCG
+      * top-level ``wcg`` — single-entry S.1503
+    """
     pts = sim_data.get("per_point") or []
     if pts:
         return [
@@ -243,6 +250,52 @@ def _geometry_rows(sim_data: dict[str, Any]) -> list[dict[str, Any]]:
              "max_epfd_db": p.get("max_epfd_dbw")}
             for k, p in enumerate(pts)
         ]
+
+    per_wcg = sim_data.get("per_wcg") or []
+    if per_wcg:
+        rows = []
+        for k, w in enumerate(per_wcg):
+            wc = w.get("wcg") or w
+            if wc.get("es_lat_deg") is None:
+                continue
+            rows.append({
+                "measure_id": int(w.get("wcg_index", k)),
+                "es_lat_deg": wc.get("es_lat_deg"),
+                "es_lon_deg": wc.get("es_lon_deg"),
+                "gso_lon_deg": wc.get("gso_lon_deg"),
+                "max_epfd_db": w.get("max_epfd_dbw"),
+            })
+        if rows:
+            return rows
+
+    # method_1: one WCG per filing (stored under per_system[].wcg). Skip when
+    # method_3 also carries per_system — its headline geometry is the joint
+    # WCG in ``geometry`` (handled below).
+    if str(sim_data.get("method") or "") != "method_3":
+        per_sys = sim_data.get("per_system") or []
+        rows = []
+        for i, p in enumerate(per_sys):
+            w = p.get("wcg") or {}
+            if w.get("es_lat_deg") is None:
+                continue
+            rows.append({
+                "measure_id": i,
+                "es_lat_deg": w.get("es_lat_deg"),
+                "es_lon_deg": w.get("es_lon_deg"),
+                "gso_lon_deg": w.get("gso_lon_deg"),
+                "max_epfd_db": p.get("max_epfd_dbw"),
+            })
+        if rows:
+            return rows
+
+    geo = sim_data.get("geometry") or {}
+    if geo.get("es_lat_deg") is not None:
+        return [{"measure_id": 0,
+                 "es_lat_deg": geo.get("es_lat_deg"),
+                 "es_lon_deg": geo.get("es_lon_deg"),
+                 "gso_lon_deg": geo.get("gso_lon_deg"),
+                 "max_epfd_db": sim_data.get("max_epfd_dbw_m2_40khz")}]
+
     wcg = sim_data.get("wcg") or {}
     if wcg.get("es_lat_deg") is not None:
         return [{"measure_id": 0,
@@ -381,6 +434,57 @@ def write_table17_csv(result_path: Path, sim_data: dict[str, Any]) -> str | None
     return out.name
 
 
+def _timebase_rows(sim_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Resolved §D4 / §D4.7 time base rows — one per system, or one joint."""
+    rows: list[dict[str, Any]] = []
+    for i, p in enumerate(sim_data.get("per_system") or []):
+        dts = p.get("dual_time_step")
+        if not isinstance(dts, dict):
+            continue
+        rows.append({"scope": f"system_{i}", **dts})
+    if rows:
+        return rows
+    dts = sim_data.get("dual_time_step")
+    if isinstance(dts, dict) and (
+        dts.get("fine_step_s") is not None or dts.get("num_time_steps") is not None
+    ):
+        return [{"scope": "run", **dts}]
+    return []
+
+
+def write_timebase_csv(result_path: Path, sim_data: dict[str, Any]) -> str | None:
+    """``timebase.csv`` — N / Δt fine / Δt coarse used per system (or joint)."""
+    rows = _timebase_rows(sim_data)
+    if not rows:
+        return None
+    cols = [
+        "scope", "mode", "fine_step_s", "coarse_step_s", "ncoarse",
+        "num_time_steps", "n_fine_steps_executed", "n_coarse_steps_executed",
+        "n_exec_steps", "s1503_reference_time_step_s",
+        "s1503_reference_num_time_steps",
+    ]
+    lines = [
+        "# SHARC-Orbit temporal sampling (S.1503-4 §D4 / §D4.7 dual time step)",
+        "# units: *_step_s [s] · num_time_steps = fine-equivalent NSTEPS · "
+        "n_*_executed = actual loop iterations",
+        ",".join(cols),
+    ]
+    for r in rows:
+        cells = []
+        for c in cols:
+            v = r.get(c)
+            if v is None:
+                cells.append("")
+            elif isinstance(v, float):
+                cells.append(f"{v:.6g}")
+            else:
+                cells.append(str(v))
+        lines.append(",".join(cells))
+    out = result_path / "timebase.csv"
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out.name
+
+
 def write_run_artifacts(result_path: Path, sim_data: dict[str, Any],
                         acc: Any | None = None) -> list[str]:
     """Write every artifact that has data available; returns the file names.
@@ -395,6 +499,7 @@ def write_run_artifacts(result_path: Path, sim_data: dict[str, Any],
         lambda: write_timeseries_csv(result_path, sim_data, acc),
         lambda: write_table17_csv(result_path, sim_data),
         lambda: write_geometries_csv(result_path, sim_data),
+        lambda: write_timebase_csv(result_path, sim_data),
         lambda: write_geometry_map_png(result_path, sim_data),
         lambda: write_ccdf_png(result_path, sim_data),
         lambda: write_histogram_png(result_path, sim_data, acc),

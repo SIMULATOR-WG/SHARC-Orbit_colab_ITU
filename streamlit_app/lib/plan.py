@@ -61,7 +61,9 @@ def filing_costs(
     task has no WCGA term; a WCGA-only step has no sim term). Filings
     whose satellite count can't be resolved get cost ``1.0``.
     """
-    n_steps = int(common.get("num_time_steps", 3_600) or 3_600)
+    # Scheduling proxy only. On auto (no explicit N) the run resolves a
+    # per-filing §D4 count; this constant just keeps LPT ordering usable.
+    n_steps = int(common.get("num_time_steps") or 3_600)
     step_deg = float(common.get("s1503_step_deg") or 1.0)
 
     out: list[float] = []
