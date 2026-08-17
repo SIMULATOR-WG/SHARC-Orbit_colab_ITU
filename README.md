@@ -11,8 +11,8 @@ studies, methods under review).
 
 ## About this version
 
-This is an **academic version**, written in Python to make collaboration
-between administrations easier. It is **not a commercial solution** and is not
+This is an **academic version**, written in Python to facilitate collaboration
+between ITU Members. It is **not a commercial solution** and is not
 intended to be one.
 
 The software is **still under active development**: features, methods, and
