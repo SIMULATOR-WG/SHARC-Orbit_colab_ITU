@@ -67,6 +67,12 @@ streamlit_app/data/cluster.json
 docs/test_data/NGSO_CRC_filings/
 docs/test_data/STEAM_2-CRC-Notice_ID-121520026-IFIC-2985/
 
+# Local-only filing archives / scraper / bulk-import tooling — not tracked
+/Fillings/
+/Fillings_ITU/
+/scrapper/
+/tools/
+
 # Logs
 *.log
 logs/

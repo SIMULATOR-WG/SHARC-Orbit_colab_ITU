@@ -140,6 +140,11 @@ def spawn(
     """
     proc_env = os.environ.copy()
     proc_env.setdefault("PYTHONPATH", str(REPO_ROOT))
+    # Windows children inherit the legacy console codepage (e.g. cp1252) for
+    # stdout, so log lines with non-ANSI glyphs (e.g. "EPFD↓") raise
+    # UnicodeEncodeError inside the worker. _reader() always decodes UTF-8,
+    # so pin the child's stdio to match.
+    proc_env["PYTHONIOENCODING"] = "utf-8"
     if env:
         proc_env.update(env)
     # Isolate the worker (and the engine's multiprocessing.Pool children)
