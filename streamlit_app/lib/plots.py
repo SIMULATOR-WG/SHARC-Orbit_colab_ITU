@@ -145,6 +145,37 @@ def epfd_timeline_chart(
     return fig
 
 
+def epfd_timeline_multi_chart(
+    series: Sequence[dict[str, Any]],
+    *,
+    title: str = "EPFD↓ time series — per system",
+    height: int = 380,
+) -> go.Figure:
+    """Overlay several decimated EPFD-vs-time traces on one chart.
+
+    ``series``: ``[{name, t_s, epfd_db, color?}, ...]`` — e.g. one line per
+    system in a method_3 per-system decomposition, all sharing the same
+    joint time base so they line up sample-for-sample.
+    """
+    fig = go.Figure()
+    for s in series:
+        fig.add_trace(go.Scatter(
+            x=list(s.get("t_s") or []), y=list(s.get("epfd_db") or []),
+            mode="lines", name=str(s.get("name") or "system"),
+            line=dict(width=1.2, color=s.get("color")),
+        ))
+    fig.update_layout(
+        title=title,
+        xaxis_title="time (s)",
+        yaxis_title="EPFD↓ (dBW/m²/40 kHz)",
+        height=height,
+        template="plotly_dark",
+        margin=dict(l=60, r=20, t=50, b=50),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+    )
+    return fig
+
+
 # ─── Percentiles bar ────────────────────────────────────────────────────────
 
 

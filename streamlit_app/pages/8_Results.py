@@ -137,13 +137,28 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
             "color": "#fbbf24", "dash": "dash", "width": 1.5,
         })
 
-    # per-system overlays (light) for method_1/3
+    # per-system overlays (light) for method_1/3 — each system's OWN
+    # independent WCG (used for post_sum's convolution complement above).
     for i, p in enumerate(data.get("per_system") or []):
         if p.get("ccdf_bins_db") and p.get("ccdf_pct"):
             series.append({
                 "name": f"single-entry [{i}]",
                 "epfd": p["ccdf_bins_db"], "percent": p["ccdf_pct"],
                 "color": "#94a3b8", "width": 1.0, "dash": "dot",
+            })
+
+    # Per-system decomposition AT THE JOINT WCG (method_3): each system's own
+    # contribution with the SAME geometry/time base/antenna as the headline
+    # curve — their linear-power sum reproduces it. Not the same as the
+    # "single-entry [i]" curves above (those use each system's own WCG).
+    _sys_palette = ["#38bdf8", "#f472b6", "#facc15", "#4ade80", "#c084fc",
+                    "#fb923c", "#2dd4bf", "#f87171"]
+    for i, p in enumerate(data.get("per_system_at_wcg") or []):
+        if p.get("ccdf_bins_db") and p.get("ccdf_pct"):
+            series.append({
+                "name": f"{p.get('label') or f'system {i}'} @ joint WCG",
+                "epfd": p["ccdf_bins_db"], "percent": p["ccdf_pct"],
+                "color": _sys_palette[i % len(_sys_palette)], "width": 1.4, "dash": "dot",
             })
 
     # Overlay external reference curves from uploaded results MDB(s).
@@ -896,6 +911,35 @@ def _render_percentiles_bar(data: dict[str, Any]) -> None:
         )
 
 
+def _render_per_system_timeseries(data: dict[str, Any]) -> None:
+    """method_3 only: each system's decimated EPFD-vs-time trace, evaluated
+    at the SAME joint WCG/time base as the headline — same data as
+    ``epfd_timeseries_per_system.csv``, shown in-app."""
+    rows = data.get("per_system_at_wcg") or []
+    _sys_palette = ["#38bdf8", "#f472b6", "#facc15", "#4ade80", "#c084fc",
+                    "#fb923c", "#2dd4bf", "#f87171"]
+    series = [
+        {
+            "name": r.get("label") or f"system {i}",
+            "t_s": r["timeseries_t_s"], "epfd_db": r["timeseries_epfd_db"],
+            "color": _sys_palette[i % len(_sys_palette)],
+        }
+        for i, r in enumerate(rows)
+        if r.get("timeseries_t_s") and r.get("timeseries_epfd_db")
+    ]
+    if not series:
+        return
+    with st.container(border=True):
+        st.subheader("Per-system EPFD time series (at the joint WCG)")
+        st.caption(
+            "Each system's own contribution, sampled on the SAME joint time "
+            "base as the aggregate headline — also written to "
+            "`epfd_timeseries_per_system.csv`."
+        )
+        fig = plots.epfd_timeline_multi_chart(series)
+        st.plotly_chart(fig, width='stretch')
+
+
 # ─── page body ───────────────────────────────────────────────────────────────
 
 qp = st.query_params
@@ -956,6 +1000,8 @@ if run_id:
                 step=1, key="ccdf_xrange",
             )
         _plot_ccdf(data)
+
+    _render_per_system_timeseries(data)
 
     with st.container(border=True):
         st.subheader("Normative percentiles")

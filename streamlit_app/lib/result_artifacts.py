@@ -131,6 +131,82 @@ def write_timeseries_csv(result_path: Path, sim_data: dict[str, Any],
     return out.name
 
 
+def write_per_system_ccdf_csv(result_path: Path, sim_data: dict[str, Any]) -> str | None:
+    """``ccdf_per_system.csv`` — method_3 only: each system's own CCDF,
+    evaluated at the SAME joint WCG geometry as the aggregate headline (i.e.
+    a decomposition of it, unlike ``post_sum`` which uses each system's own
+    independent WCG). One row per (system, CCDF point)."""
+    rows = sim_data.get("per_system_at_wcg") or []
+    if not rows:
+        return None
+    unit = _epfd_unit(sim_data)
+    lines = [
+        "# SHARC-Orbit per-system CCDF decomposition (method_3): each system's "
+        "EPFD contribution at the SAME joint WCG geometry as the aggregate "
+        "headline — NOT each system's own independent WCG (see post_sum for "
+        "that view). Linear-power sum of all systems reproduces the joint CCDF.",
+        f"# units: epfd_db [{unit}] · pct_time_exceeded [% of simulated time]",
+        "system_index,system_label,epfd_db,pct_time_exceeded",
+    ]
+    any_rows = False
+    for r in rows:
+        bins = r.get("ccdf_bins_db") or []
+        pct = r.get("ccdf_pct") or []
+        if not bins or len(bins) != len(pct):
+            continue
+        label = str(r.get("label") or f"system_{r.get('system_index')}").replace(",", ";")
+        for b, p in zip(bins, pct):
+            any_rows = True
+            lines.append(f"{r['system_index']},{label},{float(b):.1f},{float(p):.10g}")
+    if not any_rows:
+        return None
+    out = result_path / "ccdf_per_system.csv"
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out.name
+
+
+def write_per_system_timeseries_csv(result_path: Path, sim_data: dict[str, Any]) -> str | None:
+    """``epfd_timeseries_per_system.csv`` — method_3 only: each system's
+    decimated EPFD-vs-time trace, at the SAME joint WCG geometry as the
+    aggregate headline. One row per (system, time sample)."""
+    rows = sim_data.get("per_system_at_wcg") or []
+    if not rows:
+        return None
+    unit = _epfd_unit(sim_data)
+    lines = [
+        "# SHARC-Orbit per-system EPFD time series (method_3 decomposition; "
+        "decimated trace, adaptive stride), each at the SAME joint WCG "
+        "geometry as the aggregate headline",
+        f"# units: t_s [s] · epfd_db [{unit}] · duration_s [s]",
+        "system_index,system_label,t_s,epfd_db,duration_s",
+    ]
+    n_rows = 0
+    for r in rows:
+        t = r.get("timeseries_t_s") or []
+        e = r.get("timeseries_epfd_db") or []
+        d = r.get("timeseries_duration_s") or []
+        if not t or len(t) != len(e):
+            continue
+        if len(d) != len(t):
+            d = [float("nan")] * len(t)
+        label = str(r.get("label") or f"system_{r.get('system_index')}").replace(",", ";")
+        for ti, ei, di in zip(t, e, d):
+            n_rows += 1
+            lines.append(f"{r['system_index']},{label},{float(ti):.6g},{float(ei):.4f},{float(di):.6g}")
+    if n_rows == 0:
+        return None
+    payload = "\n".join(lines) + "\n"
+    # R16-style — compressed container for long traces (many systems × ~10k pts).
+    if n_rows > 50_000:
+        import gzip
+        out = result_path / "epfd_timeseries_per_system.csv.gz"
+        out.write_bytes(gzip.compress(payload.encode("utf-8")))
+        return out.name
+    out = result_path / "epfd_timeseries_per_system.csv"
+    out.write_text(payload, encoding="utf-8")
+    return out.name
+
+
 def _mpl():
     import matplotlib
     matplotlib.use("Agg")
@@ -497,6 +573,8 @@ def write_run_artifacts(result_path: Path, sim_data: dict[str, Any],
         lambda: write_ccdf_csv(result_path, sim_data),
         lambda: write_histogram_csv(result_path, sim_data, acc),
         lambda: write_timeseries_csv(result_path, sim_data, acc),
+        lambda: write_per_system_ccdf_csv(result_path, sim_data),
+        lambda: write_per_system_timeseries_csv(result_path, sim_data),
         lambda: write_table17_csv(result_path, sim_data),
         lambda: write_geometries_csv(result_path, sim_data),
         lambda: write_timebase_csv(result_path, sim_data),
