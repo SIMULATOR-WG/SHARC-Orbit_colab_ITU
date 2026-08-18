@@ -313,6 +313,36 @@ def status() -> dict[str, Any]:
 # ─── Parallel dispatch ──────────────────────────────────────────────────────
 
 
+def _numba_capped(fn: Callable, num_cpus: float) -> Callable:
+    """Wrap ``fn`` so it pins Numba's thread pool to its OWN Ray CPU
+    reservation before running.
+
+    The engine's own oversubscription guard (``_compute_epfd_numba_threads``
+    in epfd_calculator.py) only accounts for ITS OWN internal multiprocessing
+    (``n_jobs``) — it has no idea Ray is *also* running many other tasks
+    concurrently. Every task in this module calls the engine with
+    ``n_jobs<=1``, which makes Numba grab ALL cores per task (correct for
+    the sequential fallback below, where nothing else runs at the same
+    time) — but under Ray, with ``num_cpus`` slots advertised, up to
+    ``total_cpus / num_cpus`` of these tasks run at once, each ALSO trying
+    to grab every core: e.g. 32 concurrent tasks x 32 Numba threads = 1024
+    threads fighting over 32 physical cores. Ray's own scheduling already
+    provides the "N tasks in parallel" parallelism (one per reserved CPU
+    slot); each task should therefore use only the threads IT reserved.
+    """
+    cap = max(1, int(num_cpus))
+
+    def _wrapped(*args, **kwargs):
+        try:
+            import numba
+            numba.set_num_threads(cap)
+        except Exception:  # noqa: BLE001 — never fail the task over this
+            pass
+        return fn(*args, **kwargs)
+
+    return _wrapped
+
+
 def parallel_starmap_progress(
     fn: Callable,
     items: list,
@@ -362,7 +392,11 @@ def parallel_starmap_progress(
     info = ensure_init(runtime_env=runtime_env)
     if info.get("active"):
         import ray
-        rfn = ray.remote(fn)
+        # Cap Numba threads to this task's OWN CPU reservation — see
+        # _numba_capped. Sequential fallback below deliberately skips this
+        # (nothing else runs concurrently there, so full-core Numba is
+        # correct as-is).
+        rfn = ray.remote(_numba_capped(fn, num_cpus))
         results: list = [None] * n
         # SPREAD across nodes. Without it, ``ray.put`` shared args (see
         # broadcast_shared_in_tuples) live on the driver's node and Ray's
