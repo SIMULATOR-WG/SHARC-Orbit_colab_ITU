@@ -340,7 +340,48 @@ def _numba_capped(fn: Callable, num_cpus: float) -> Callable:
             pass
         return fn(*args, **kwargs)
 
+    # Preserve the original name/docstring for the Ray dashboard — otherwise
+    # every task shows up as the generic "_wrapped", making a stalled or
+    # failed task impossible to identify at a glance.
+    try:
+        import functools
+        functools.update_wrapper(_wrapped, fn)
+    except Exception:  # noqa: BLE001
+        pass
     return _wrapped
+
+
+def _costs_to_num_cpus(
+    costs: list[float] | None, *, base_num_cpus: float, cpu_cap: float,
+) -> list[float] | None:
+    """Scale each task's Ray CPU reservation (and so its Numba thread
+    budget, via ``_numba_capped``) to its relative ``costs`` weight.
+
+    One flat ``num_cpus`` for every task is wrong when a batch mixes wildly
+    different sizes — e.g. a grid sweep over 3 filings where one has 30
+    satellites and another has 30,000: pinning both to 1 Numba thread
+    makes the heavy filing's tasks take ~30x longer than they need to,
+    while Ray happily runs many of the cheap filing's tasks concurrently
+    (they don't need the extra threads). Scaling by cost fixes both: the
+    cheapest task in the batch keeps ``base_num_cpus`` (unchanged
+    behaviour when every task is similar), heavier ones reserve
+    proportionally more.
+
+    ``cpu_cap`` bounds any single task's reservation so it can't claim the
+    whole node and serialize every other task (including other instances
+    of the same heavy filing) behind it — callers pick a fraction of the
+    node's total so at least a few tasks always fit concurrently.
+
+    Returns ``None`` (caller keeps the flat ``base_num_cpus``) when
+    ``costs`` is missing or degenerate (all zero/negative).
+    """
+    if not costs or not any(c > 0 for c in costs):
+        return None
+    min_cost = min(c for c in costs if c > 0)
+    return [
+        min(cpu_cap, max(base_num_cpus, base_num_cpus * (c / min_cost)))
+        for c in costs
+    ]
 
 
 def parallel_starmap_progress(
@@ -363,14 +404,21 @@ def parallel_starmap_progress(
     ``runtime_env`` is passed to ``ray.init`` so the job's working_dir
     (containing the SRS/mask MDBs) is shipped to every Ray node.
 
-    ``costs`` (optional, aligned to ``items``) enables LPT scheduling
-    (longest-processing-time-first): tasks are *dispatched* heaviest
-    first so the slowest unit starts earliest, which minimises makespan
-    under heterogeneous task weights. Results are always returned in
-    input order regardless of dispatch order. ``costs`` is purely an
-    optimisation hint — a wrong estimate only changes ordering, never
-    correctness; when ``None`` (or mis-sized), dispatch falls back to
-    plain input order.
+    ``costs`` (optional, aligned to ``items``) drives two scheduling
+    decisions, both purely optimisation hints — a wrong estimate only
+    changes ordering/CPU shares, never correctness — and both fall back to
+    plain behaviour (input order / flat ``num_cpus``) when ``None`` or
+    mis-sized:
+
+    * **LPT dispatch order**: tasks are *dispatched* heaviest-first so the
+      slowest unit starts earliest, minimising makespan under
+      heterogeneous task weights. Results are always returned in input
+      order regardless of dispatch order.
+    * **Per-task CPU/Numba-thread reservation** (Ray-active only, see
+      ``_costs_to_num_cpus``): the cheapest task in the batch keeps
+      ``num_cpus``; heavier ones reserve proportionally more (and so get
+      proportionally more Numba threads via ``_numba_capped``), capped so
+      one task can't claim the whole node.
 
     ``stall_timeout_s``: abort (TimeoutError) when **no** task completes
     for that long — a hung remote task must not block the job forever.
@@ -392,11 +440,26 @@ def parallel_starmap_progress(
     info = ensure_init(runtime_env=runtime_env)
     if info.get("active"):
         import ray
-        # Cap Numba threads to this task's OWN CPU reservation — see
+        # Cap Numba threads to each task's OWN CPU reservation — see
         # _numba_capped. Sequential fallback below deliberately skips this
         # (nothing else runs concurrently there, so full-core Numba is
         # correct as-is).
-        rfn = ray.remote(_numba_capped(fn, num_cpus))
+        #
+        # Per-item reservation from `costs`: a flat num_cpus is wrong when
+        # the batch mixes wildly different task sizes (e.g. one filing
+        # with 30 satellites next to one with 30,000 in the same grid
+        # sweep) — see _costs_to_num_cpus. Capped at 1/4 of the node's
+        # advertised CPUs so the heaviest task still leaves room for a
+        # few tasks (including other instances of the same heavy filing)
+        # to run concurrently, rather than serializing everything behind
+        # a single giant reservation.
+        try:
+            total_cpus = float(ray.cluster_resources().get("CPU", 0)) or None
+        except Exception:  # noqa: BLE001
+            total_cpus = None
+        cpu_cap = max(num_cpus, (total_cpus or float(os.cpu_count() or 1)) / 4.0)
+        per_item_cpus = _costs_to_num_cpus(costs, base_num_cpus=num_cpus, cpu_cap=cpu_cap)
+
         results: list = [None] * n
         # SPREAD across nodes. Without it, ``ray.put`` shared args (see
         # broadcast_shared_in_tuples) live on the driver's node and Ray's
@@ -404,9 +467,11 @@ def parallel_starmap_progress(
         # workers. SPREAD overrides locality; the shared object is fetched
         # peer-to-peer to each node once (object store, not the client
         # channel). Submit heaviest-first for LPT.
-        opts = {"num_cpus": num_cpus, "scheduling_strategy": "SPREAD"}
         fut_to_idx: dict[Any, int] = {}
         for i in order:
+            item_cpus = per_item_cpus[i] if per_item_cpus is not None else num_cpus
+            rfn = ray.remote(_numba_capped(fn, item_cpus))
+            opts = {"num_cpus": item_cpus, "scheduling_strategy": "SPREAD"}
             fut_to_idx[rfn.options(**opts).remote(*items[i])] = i
         pending = list(fut_to_idx.keys())
         done_count = 0
