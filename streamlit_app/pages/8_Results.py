@@ -46,7 +46,9 @@ def _limit_curves(data: dict[str, Any]) -> list[dict[str, Any]]:
     def _split(pts):
         return [float(p[0]) for p in pts], [float(p[1]) for p in pts]
 
-    is_single_entry = method is None or data.get("kind") in ("s1503", "single")
+    is_single_entry = method is None or data.get("kind") in (
+        "s1503", "single", "country_constrained_s1503",
+    )
     if a22_pts:
         bins_db, pct = _split(a22_pts)
         out.append({
@@ -316,13 +318,23 @@ def _render_metrics(data: dict[str, Any]) -> None:
     # Multi-configuration labelling (R2): results are PER configuration.
     _mc = data.get("multi_config") or {}
     if _mc.get("type") == "M":
-        st.info(
-            f"Mutually-exclusive configuration **{_mc.get('config_label') or '?'}"
-            f"** of **{_mc.get('nbr_config') or '?'}** for this notice "
-            f"(label via {_mc.get('label_source') or '—'}). Do not aggregate "
-            "EPFD with the sibling configurations (S.1503-4 §D2.1).",
-            icon=":material/call_split:",
-        )
+        _oid = _mc.get("orbit_set_id")
+        _lbl = _mc.get("config_label")
+        if _oid is not None:
+            st.info(
+                f"**orbit_set_id = {_oid}** "
+                f"({_oid} of {_mc.get('nbr_config') or '?'}). Do not aggregate "
+                "EPFD with sibling configurations (S.1503-4 §D2.1).",
+                icon=":material/call_split:",
+            )
+        else:
+            st.info(
+                f"**orbit_set_id** not in this SRS — configuration "
+                f"**{_lbl or '?'}** of **{_mc.get('nbr_config') or '?'}**. "
+                "Do not aggregate EPFD with sibling configurations "
+                "(S.1503-4 §D2.1).",
+                icon=":material/call_split:",
+            )
     cols = st.columns(5)
     me = data.get("max_epfd_dbw_m2_40khz")
     with cols[0]:
@@ -543,9 +555,9 @@ def _collect_geometry_points(data: dict[str, Any]) -> dict[str, Any]:
     grid_gso_lons: list[float] = []
     geometries: list[dict[str, Any]] = []  # for click-to-modal CCDF picker
 
-    if kind in ("single", "s1503") or method == "method_1":
+    if kind in ("single", "s1503", "country_constrained_s1503") or method == "method_1":
         # single-entry: from data["wcg"]; or method_1 per_system
-        if kind in ("single", "s1503"):
+        if kind in ("single", "s1503", "country_constrained_s1503"):
             wcg = data.get("wcg") or {}
             if wcg:
                 color = _PALETTE[0]
@@ -671,6 +683,78 @@ def _show_geometry_ccdf(geom: dict[str, Any],
         ))
 
 
+def _render_country_constrained_wcg(data: dict[str, Any]) -> None:
+    """Show metadata from the country-constrained (non-normative) search."""
+    meta = data.get("country_constrained_wcg")
+    if not meta:
+        return
+    codes = meta.get("country_codes") or []
+    with st.expander(
+        "Country-constrained WCGA (ES domain filter)",
+        expanded=True,
+    ):
+        c1, c2, c3 = st.columns(3)
+        if meta.get("es_lat_deg") is not None:
+            c1.metric("ES lat", f"{float(meta['es_lat_deg']):.3f}°")
+        if meta.get("es_lon_deg") is not None:
+            c2.metric("ES lon", f"{float(meta['es_lon_deg']):.3f}°")
+        if meta.get("gso_lon_deg") is not None:
+            c3.metric("GSO lon", f"{float(meta['gso_lon_deg']):.3f}°")
+        _bits = [
+            f"Countries: {', '.join(codes) or '—'}",
+            meta.get("search_note")
+            or "S.1503-4 WCGA with ES restricted to selected countries",
+        ]
+        if meta.get("s1503_step_deg") is not None:
+            _bits.insert(1, f"WCGA step {meta['s1503_step_deg']}°")
+        _pol = meta.get("raan_sweep_policy") or meta.get("raan_sweep_mode")
+        if _pol in ("per_orbit", "auto") or meta.get("filing_mixed_repeating"):
+            _n_off = meta.get("n_repeating_planes")
+            _n_on = meta.get("n_non_repeating_planes")
+            if _n_off is not None and _n_on is not None:
+                _bits.append(
+                    f"RAAN (Ω) sweep per orbit "
+                    f"({_n_off} repeating OFF / {_n_on} non-repeating ON)"
+                )
+            else:
+                _bits.append("RAAN (Ω) sweep per orbit (auto)")
+        elif meta.get("raan_sweep"):
+            _bits.append("RAAN (Ω) sweep ON")
+        else:
+            _bits.append("RAAN (Ω) sweep OFF")
+        if meta.get("raan_sweep_mode"):
+            _bits.append(f"mode={meta['raan_sweep_mode']}")
+        if meta.get("filing_repeating_ground_track") is not None:
+            _bits.append(
+                "filing repeating"
+                if meta.get("filing_repeating_ground_track")
+                else "filing non-repeating"
+            )
+        _align = (
+            data.get("country_wcg_alignment")
+            or (data.get("config") or {}).get("_country_wcg_alignment")
+            or {}
+        )
+        if _align.get("delta_raan_deg") is not None:
+            _dlt = f"ΔΩ = {float(_align['delta_raan_deg']):+.2f}°"
+            if _align.get("n_sats_aligned") is not None:
+                _dlt += f" ({int(_align['n_sats_aligned'])} sat(s) on ON orbits)"
+            if _align.get("n_sats_kept_filed_raan"):
+                _dlt += f", {int(_align['n_sats_kept_filed_raan'])} OFF kept"
+            _bits.append(_dlt)
+        if meta.get("epfd_peak_sat_dBW") is not None:
+            _bits.append(f"single-entry EPFD {float(meta['epfd_peak_sat_dBW']):.2f} dBW")
+        st.caption(" · ".join(_bits))
+        if meta.get("no_geometry") or data.get("compliance") == "no_geometry":
+            st.warning(
+                meta.get("no_geometry_message")
+                or data.get("message")
+                or "No θ/φ sample produced an Earth station inside the "
+                   "selected country domain.",
+                icon=":material/warning:",
+            )
+
+
 def _render_wcg_explanation(data: dict[str, Any]) -> None:
     """Explain WHY the single-entry WCG sits where it does (S.1503-4 §D3.1.2).
 
@@ -678,6 +762,7 @@ def _render_wcg_explanation(data: dict[str, Any]) -> None:
     geometry won as an isolated EPFD peak or via the angular-velocity tie-break
     over a flat plateau, with the per-latitude profile from the WCGA.
     """
+    _render_country_constrained_wcg(data)
     e = data.get("wcg_explanation")
     if not e:
         return

@@ -183,12 +183,258 @@ def _wcga_pool_initializer(
     gmst0_deg: str,
     main_pid: str,
     gso_lon_mode: str,
+    country_codes: str = "",
+    es_lat_min: str = "",
+    es_lat_max: str = "",
+    es_lon_min: str = "",
+    es_lon_max: str = "",
+    country_raan_sweep: str = "",
 ) -> None:
     """Initializer for Pool workers: Numba, GMST0 and GSO/α mode (spawn resets globals)."""
     os.environ["WCG_GMST0_DEG"] = gmst0_deg
     os.environ["WCG_MAIN_PID"] = main_pid
+    if country_codes:
+        os.environ["WCG_COUNTRY_CODES"] = country_codes
+    else:
+        os.environ.pop("WCG_COUNTRY_CODES", None)
+    for key, val in (
+        ("WCG_ES_LAT_MIN", es_lat_min),
+        ("WCG_ES_LAT_MAX", es_lat_max),
+        ("WCG_ES_LON_MIN", es_lon_min),
+        ("WCG_ES_LON_MAX", es_lon_max),
+        ("WCG_COUNTRY_RAAN_SWEEP", country_raan_sweep),
+    ):
+        if val:
+            os.environ[key] = val
+        else:
+            os.environ.pop(key, None)
     set_numba_num_threads(numba_threads)
     set_gso_longitude_mode(gso_lon_mode)
+
+
+def _clear_wcga_country_env() -> None:
+    for key in (
+        "WCG_COUNTRY_CODES",
+        "WCG_COUNTRY_RAAN_SWEEP",
+        "WCG_ES_LAT_MIN", "WCG_ES_LAT_MAX",
+        "WCG_ES_LON_MIN", "WCG_ES_LON_MAX",
+    ):
+        os.environ.pop(key, None)
+
+
+def set_wcga_country_codes(
+    codes: list[str] | tuple[str, ...] | None,
+    *,
+    raan_sweep: bool | str = True,
+) -> None:
+    """Restrict WCGA ES candidates to selected countries (ISO alpha-3).
+
+    When set, ``search_wcg_s1503`` keeps the same θ/φ algorithm as Single-entry
+    but only stores geometries whose ES falls inside the polygons.
+
+    ``raan_sweep``:
+
+    * ``True`` / ``"on"`` — force Ω sweep for every orbit
+    * ``False`` / ``"off"`` — never sweep (filed RAAN)
+    * ``"auto"`` — per orbit from OE ``f_stn_keep`` + ``rpt_period_s`` (§D4.6.1)
+
+    Pass ``None`` or ``[]`` to clear (default — full normative domain).
+    Aggregate / Single-entry leave this unset.
+    """
+    if not codes:
+        _clear_wcga_country_env()
+        return
+    from .s1588_studies.countries import (  # noqa: PLC0415
+        country_bounds, filter_country_codes,
+    )
+    codes_n = filter_country_codes(list(codes))
+    if not codes_n:
+        _clear_wcga_country_env()
+        return
+    os.environ["WCG_COUNTRY_CODES"] = ",".join(codes_n)
+    if raan_sweep is True or (isinstance(raan_sweep, str)
+                              and raan_sweep.strip().lower() in ("on", "true", "1")):
+        os.environ["WCG_COUNTRY_RAAN_SWEEP"] = "1"
+    elif raan_sweep is False or (isinstance(raan_sweep, str)
+                                 and raan_sweep.strip().lower() in ("off", "false", "0")):
+        os.environ["WCG_COUNTRY_RAAN_SWEEP"] = "0"
+    else:
+        os.environ["WCG_COUNTRY_RAAN_SWEEP"] = "auto"
+    bounds = country_bounds(codes_n)
+    if bounds is not None:
+        (la0, la1), (lo0, lo1) = bounds
+        os.environ["WCG_ES_LAT_MIN"] = f"{la0:.6f}"
+        os.environ["WCG_ES_LAT_MAX"] = f"{la1:.6f}"
+        os.environ["WCG_ES_LON_MIN"] = f"{lo0:.6f}"
+        os.environ["WCG_ES_LON_MAX"] = f"{lo1:.6f}"
+    else:
+        os.environ.pop("WCG_ES_LAT_MIN", None)
+        os.environ.pop("WCG_ES_LAT_MAX", None)
+        os.environ.pop("WCG_ES_LON_MIN", None)
+        os.environ.pop("WCG_ES_LON_MAX", None)
+
+
+def clear_wcga_country_codes() -> None:
+    """Clear any country restriction on the WCGA (restore normative domain)."""
+    set_wcga_country_codes(None)
+
+
+def _wcga_country_codes_from_env() -> list[str]:
+    raw = os.environ.get("WCG_COUNTRY_CODES", "").strip()
+    if not raw:
+        return []
+    return [c.strip().upper() for c in raw.split(",") if c.strip()]
+
+
+def _wcga_country_raan_sweep_policy() -> str:
+    """Return ``"on"``, ``"off"``, or ``"auto"`` from the country-WCGA env."""
+    if not _wcga_country_codes_from_env():
+        return "off"
+    raw = os.environ.get("WCG_COUNTRY_RAAN_SWEEP", "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return "off"
+    if raw in ("auto", "per_orbit"):
+        return "auto"
+    return "on"
+
+
+def country_raan_sweep_for_oe(oe: "OrbitalElements | None" = None) -> bool:
+    """Whether Ω sweep / post-search ΔΩ applies for this orbit under current policy.
+
+    * force ON → True
+    * force OFF → False
+    * auto → False when OE has repeating ground track (§D4.6.1), else True
+    """
+    if not _wcga_country_codes_from_env():
+        return False
+    policy = _wcga_country_raan_sweep_policy()
+    if policy == "off":
+        return False
+    if policy == "on":
+        return True
+    # auto / per-orbit
+    if oe is None:
+        return True  # conservative when OE unknown
+    f_sk = bool(getattr(oe, "f_stn_keep", False))
+    rpt = float(getattr(oe, "rpt_period_s", 0.0) or 0.0)
+    repeating = bool(f_sk and rpt >= 3600.0)
+    return not repeating
+
+
+def _wcga_country_raan_sweep_enabled() -> bool:
+    """True when country filter may use Ω sweep (force ON or auto).
+
+    For per-orbit decisions use :func:`country_raan_sweep_for_oe`.
+    """
+    return _wcga_country_raan_sweep_policy() in ("on", "auto")
+
+
+def _normalize_lon_deg(lon_deg: float) -> float:
+    return ((float(lon_deg) + 180.0) % 360.0) - 180.0
+
+
+def _country_raan_candidates(
+    oe: "OrbitalElements",
+    lat_deg: float,
+    t_s: float,
+    step_deg: float,
+) -> list[float]:
+    """RAAN values (rad) to try so the sat ground track can cover the country.
+
+    Without a country filter, or with country filter but RAAN sweep disabled
+    for this orbit (repeating / fixed ground track or force OFF): returns
+    ``[oe.raan]`` only.
+
+    With country filter + RAAN sweep for this orbit: samples target
+    sub-satellite longitudes across the country longitude bbox (plus a
+    visibility pad from φ₀) and converts each into a RAAN offset relative
+    to the filing RAAN.
+    """
+    codes = _wcga_country_codes_from_env()
+    if not codes or not country_raan_sweep_for_oe(oe):
+        return [float(oe.raan)]
+
+    lon_min_s = os.environ.get("WCG_ES_LON_MIN")
+    lon_max_s = os.environ.get("WCG_ES_LON_MAX")
+    if lon_min_s is None or lon_max_s is None or lon_min_s == "" or lon_max_s == "":
+        return [float(oe.raan)]
+    try:
+        lon_min = float(lon_min_s)
+        lon_max = float(lon_max_s)
+    except ValueError:
+        return [float(oe.raan)]
+
+    sat = _place_sat_at_lat(oe, lat_deg)
+    if sat is None:
+        return []
+    sat_eci, _ = sat
+    sat_ecef = eci_to_ecef(sat_eci, t_s)
+    _, lon0 = sub_satellite_point(sat_eci, t_s)
+    r_sat = float(np.linalg.norm(sat_ecef))
+    # Off-nadir ES can sit away from the sub-satellite point — pad the lon
+    # sweep by ~φ₀ (nadir angle at ε₀≈0 as a generous Earth-footprint proxy).
+    try:
+        pad_deg = max(10.0, float(_calc_phi0(r_sat, 0.0)))
+    except (ValueError, ZeroDivisionError):
+        pad_deg = 20.0
+
+    step = max(float(step_deg), 0.5)
+    lo0 = lon_min - pad_deg
+    lo1 = lon_max + pad_deg
+    n = max(1, int(math.ceil((lo1 - lo0) / step)) + 1)
+    # Cap to keep country WCGA tractable (full 360° already covered by pad+bbox).
+    n = min(n, int(math.ceil(360.0 / step)) + 1)
+
+    raans: list[float] = []
+    seen: set[int] = set()
+    quant = max(step, 0.25)
+
+    def _add(raan_rad: float) -> None:
+        key = int(round((raan_rad % (2.0 * math.pi)) / math.radians(quant)))
+        if key in seen:
+            return
+        seen.add(key)
+        raans.append(float(raan_rad % (2.0 * math.pi)))
+
+    _add(float(oe.raan))  # filing RAAN first
+    for i in range(n):
+        tgt = lo0 + i * step
+        dlon = _normalize_lon_deg(tgt - lon0)
+        _add(float(oe.raan) + math.radians(dlon))
+    return raans
+
+
+def _oe_with_raan(oe: "OrbitalElements", raan_rad: float) -> "OrbitalElements":
+    """Copy orbital elements with a different RAAN (preserves H_min / §D4.6.1 flags)."""
+    from .orbit_propagator import OrbitalElements as OE  # noqa: PLC0415
+    return OE(
+        a=oe.a, e=oe.e, i=oe.i,
+        raan=float(raan_rad),
+        omega=oe.omega, M=oe.M,
+        min_operating_height_km=float(getattr(oe, "min_operating_height_km", 0.0) or 0.0),
+        f_stn_keep=bool(getattr(oe, "f_stn_keep", False)),
+        rpt_period_s=float(getattr(oe, "rpt_period_s", 0.0) or 0.0),
+    )
+
+
+def _wcga_es_in_domain(
+    lat_p: float,
+    lon_p: float,
+    es_lat_min: float,
+    es_lat_max: float,
+) -> bool:
+    """ES latitude band + optional country polygon filter."""
+    if abs(lat_p) > 81.2 + WCG_LAT_BOUNDARY_TOL_DEG:
+        return False
+    if lat_p < es_lat_min - WCG_LAT_BOUNDARY_TOL_DEG:
+        return False
+    if lat_p > es_lat_max + WCG_LAT_BOUNDARY_TOL_DEG:
+        return False
+    codes = _wcga_country_codes_from_env()
+    if not codes:
+        return True
+    from .s1588_studies.countries import point_in_countries  # noqa: PLC0415
+    return bool(point_in_countries(lat_p, lon_p, codes))
 
 
 def _wcga_pool_worker(args: tuple) -> "_WCGState":
@@ -1835,7 +2081,7 @@ def _wcgd_check_case(
     if es_ecef is None:
         state.add_point(theta_deg, phi_deg, 0.0, 0.0, 0.0, 0.0, -999.0, "invalid")
         return
-    if abs(lat_p) > 81.2 or lat_p < es_lat_min or lat_p > es_lat_max:
+    if not _wcga_es_in_domain(lat_p, lon_p, es_lat_min, es_lat_max):
         state.add_point(theta_deg, phi_deg, lat_p, lon_p, 0.0, 0.0, -999.0, "invalid")
         return
 
@@ -2041,7 +2287,7 @@ def _wcgd_check_case_batch(
     for i in range(len(theta_idx)):
         lat_p = float(lat_all[i])
         lon_p = float(lon_all[i])
-        if abs(lat_p) <= 81.2 and es_lat_min <= lat_p <= es_lat_max:
+        if _wcga_es_in_domain(lat_p, lon_p, es_lat_min, es_lat_max):
             keep_geo[i] = True
         elif state.collect_all_points:
             state.add_point(
@@ -2452,9 +2698,11 @@ def _wcgd_calc_at_lat(
     strict_exclusion_zone: bool = False,
     epfd_threshold_by_lat_fn: "Callable[[float], float] | None" = None,
 ) -> _WCGState:
-    """WCGD_CalcAtLat: sweeps all (θ, φ) points for the satellite at the given latitude.
+    """WCGD_CalcAtLat: θ/φ sweep at one satellite latitude.
 
-    Returns a local _WCGState (no shared state → can run in parallel).
+    When a country filter is active, also sweeps RAAN (Ω) so the ground-track
+    longitude can reach the selected countries. Without a country filter this
+    is a single call at the filing RAAN (identical to the normative path).
     """
     gmst0_env = os.environ.get("WCG_GMST0_DEG")
     if gmst0_env is not None:
@@ -2463,6 +2711,56 @@ def _wcgd_calc_at_lat(
         except ValueError:
             pass
 
+    raans = _country_raan_candidates(oe, lat_deg, t_s, step_size_deg)
+    if not raans:
+        return _WCGState(collect_all_points=collect_all_points, search_lat_deg=lat_deg)
+
+    if len(raans) == 1:
+        return _wcgd_calc_at_lat_fixed_raan(
+            _oe_with_raan(oe, raans[0]) if abs(raans[0] - oe.raan) > 1e-15 else oe,
+            lat_deg, t_s, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+            gso_min_elevation_deg, pfd_bw_correction_db, step_size_deg,
+            symmetric_mask, es_lat_min, es_lat_max,
+            collect_all_points=collect_all_points,
+            strict_exclusion_zone=strict_exclusion_zone,
+            epfd_threshold_by_lat_fn=epfd_threshold_by_lat_fn,
+        )
+
+    state = _WCGState(collect_all_points=collect_all_points, search_lat_deg=lat_deg)
+    for raan in raans:
+        ps = _wcgd_calc_at_lat_fixed_raan(
+            _oe_with_raan(oe, raan),
+            lat_deg, t_s, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+            gso_min_elevation_deg, pfd_bw_correction_db, step_size_deg,
+            symmetric_mask, es_lat_min, es_lat_max,
+            collect_all_points=collect_all_points,
+            strict_exclusion_zone=strict_exclusion_zone,
+            epfd_threshold_by_lat_fn=epfd_threshold_by_lat_fn,
+        )
+        state.merge(ps)
+    state.search_lat_deg = lat_deg
+    return state
+
+
+def _wcgd_calc_at_lat_fixed_raan(
+    oe: "OrbitalElements",
+    lat_deg: float,
+    t_s: float,
+    pfd_mask: "PFDMask",
+    es_antenna: "EarthStationAntenna",
+    alpha0_deg: float,
+    min_elevation_deg: float,
+    gso_min_elevation_deg: float,
+    pfd_bw_correction_db: float,
+    step_size_deg: float,
+    symmetric_mask: bool,
+    es_lat_min: float,
+    es_lat_max: float,
+    collect_all_points: bool = False,
+    strict_exclusion_zone: bool = False,
+    epfd_threshold_by_lat_fn: "Callable[[float], float] | None" = None,
+) -> _WCGState:
+    """θ/φ WCGA sweep at one satellite latitude with a fixed RAAN."""
     state = _WCGState(collect_all_points=collect_all_points, search_lat_deg=lat_deg)
 
     sat = _place_sat_at_lat(oe, lat_deg)
@@ -2610,7 +2908,62 @@ def _wcgd_check_extreme_case(
     strict_exclusion_zone: bool = False,
     epfd_threshold_by_lat_fn: "Callable[[float], float] | None" = None,
 ) -> _WCGState:
-    """WCGD_CheckExtremeCase: bisection in latitude for α=sign·α₀ at the maximum elevation."""
+    """WCGD_CheckExtremeCase: bisection in latitude for α=sign·α₀ at max elevation.
+
+    With a country filter, repeats across RAAN candidates so the ES can land
+    inside the selected countries.
+    """
+    lat_ref = math.degrees(0.5 * abs(float(oe.i)))
+    raans = _country_raan_candidates(oe, lat_ref, t_s, step_deg=1.0)
+    if not raans:
+        return _WCGState(collect_all_points=collect_all_points)
+    if len(raans) == 1:
+        oe_one = (
+            _oe_with_raan(oe, raans[0])
+            if abs(raans[0] - oe.raan) > 1e-15
+            else oe
+        )
+        return _wcgd_check_extreme_case_fixed_raan(
+            oe_one, t_s, sign, theta_val, alpha0_deg, min_elevation_deg,
+            gso_min_elevation_deg, pfd_mask, es_antenna, pfd_bw_correction_db,
+            es_lat_min, es_lat_max,
+            collect_all_points=collect_all_points, tol=tol,
+            strict_exclusion_zone=strict_exclusion_zone,
+            epfd_threshold_by_lat_fn=epfd_threshold_by_lat_fn,
+        )
+    state = _WCGState(collect_all_points=collect_all_points)
+    for raan in raans:
+        state.merge(_wcgd_check_extreme_case_fixed_raan(
+            _oe_with_raan(oe, raan),
+            t_s, sign, theta_val, alpha0_deg, min_elevation_deg,
+            gso_min_elevation_deg, pfd_mask, es_antenna, pfd_bw_correction_db,
+            es_lat_min, es_lat_max,
+            collect_all_points=collect_all_points, tol=tol,
+            strict_exclusion_zone=strict_exclusion_zone,
+            epfd_threshold_by_lat_fn=epfd_threshold_by_lat_fn,
+        ))
+    return state
+
+
+def _wcgd_check_extreme_case_fixed_raan(
+    oe: "OrbitalElements",
+    t_s: float,
+    sign: int,
+    theta_val: float,       # +π/2 or −π/2
+    alpha0_deg: float,
+    min_elevation_deg: float,
+    gso_min_elevation_deg: float,
+    pfd_mask: "PFDMask",
+    es_antenna: "EarthStationAntenna",
+    pfd_bw_correction_db: float,
+    es_lat_min: float,
+    es_lat_max: float,
+    collect_all_points: bool = False,
+    tol: float = 1e-5,
+    strict_exclusion_zone: bool = False,
+    epfd_threshold_by_lat_fn: "Callable[[float], float] | None" = None,
+) -> _WCGState:
+    """Extreme-case bisection at one fixed RAAN."""
     state = _WCGState(collect_all_points=collect_all_points)
     incl_rad = abs(float(oe.i))
     # Latitude bracket(s) per contour: sign=+1 → α=+α₀ in the north half,
@@ -2787,12 +3140,49 @@ def search_wcg_s1503(
     os.environ.setdefault("WCG_MAIN_PID", str(os.getpid()))
     os.environ["WCG_GMST0_DEG"] = str(get_earth_rotation_initial_deg())
 
+    # Optional country-constrained ES domain (env set by set_wcga_country_codes).
+    # When unset, es_lat_min/max keep the caller defaults (−81.2…81.2).
+    _env_lat_min = os.environ.get("WCG_ES_LAT_MIN")
+    _env_lat_max = os.environ.get("WCG_ES_LAT_MAX")
+    if _env_lat_min is not None and _env_lat_min != "":
+        try:
+            es_lat_min = max(float(es_lat_min), float(_env_lat_min))
+        except ValueError:
+            pass
+    if _env_lat_max is not None and _env_lat_max != "":
+        try:
+            es_lat_max = min(float(es_lat_max), float(_env_lat_max))
+        except ValueError:
+            pass
+    _country_codes_env = os.environ.get("WCG_COUNTRY_CODES", "")
+
     incl_deg = math.degrees(oe_ref.i)
 
     logger.info(
         f"WCGA S.1503-4: i={incl_deg:.1f}°, step={step_size_deg}°, "
         f"α₀={alpha0_deg:.1f}°, ε₀={min_elevation_deg:.1f}°, εGSO={gso_min_elevation_deg:.1f}°"
     )
+    if _country_codes_env:
+        _policy = _wcga_country_raan_sweep_policy()
+        _sweep_oe = country_raan_sweep_for_oe(oe_ref)
+        if _policy == "auto":
+            _sweep_txt = (
+                "ON for this orbit (auto / non-repeating)" if _sweep_oe
+                else "OFF for this orbit (auto / repeating track preserved)"
+            )
+        else:
+            _sweep_txt = (
+                "ON (ground track can reach the country)" if _sweep_oe
+                else "OFF (filed RAAN / repeating track preserved)"
+            )
+        logger.info(
+            "  Country-constrained ES domain: %s · ES lat ∈ [%.2f°, %.2f°] · "
+            "RAAN (Ω) sweep %s (policy=%s, f_stn_keep=%s, rpt_period_s=%.1f)",
+            _country_codes_env, es_lat_min, es_lat_max,
+            _sweep_txt, _policy,
+            bool(getattr(oe_ref, "f_stn_keep", False)),
+            float(getattr(oe_ref, "rpt_period_s", 0.0) or 0.0),
+        )
     if epfd_threshold_by_lat_fn is not None and getattr(epfd_threshold_by_lat_fn, "latitude_dependent", False):
         logger.info(
             "  EPFDThreshold[lat] active (note %s): WCGA ranking by margin "
@@ -2868,6 +3258,12 @@ def search_wcg_s1503(
             # default "sweep" instead of the configured method (e.g. analytical).
             "alpha_method": get_alpha_method(),
             "numba_threads": 1,
+            "country_codes": _country_codes_env,
+            "es_lat_min": os.environ.get("WCG_ES_LAT_MIN", ""),
+            "es_lat_max": os.environ.get("WCG_ES_LAT_MAX", ""),
+            "es_lon_min": os.environ.get("WCG_ES_LON_MIN", ""),
+            "es_lon_max": os.environ.get("WCG_ES_LON_MAX", ""),
+            "country_raan_sweep": os.environ.get("WCG_COUNTRY_RAAN_SWEEP", ""),
         }
         logger.info(
             f"  WCGA dispatch via injected executor ({total_lats} latitudes)"
@@ -2895,7 +3291,15 @@ def search_wcg_s1503(
         with _mp.Pool(
             processes=P_procs,
             initializer=_wcga_pool_initializer,
-            initargs=(T_threads, gmst0_str, main_pid_str, gso_mode),
+            initargs=(
+                T_threads, gmst0_str, main_pid_str, gso_mode,
+                _country_codes_env,
+                os.environ.get("WCG_ES_LAT_MIN", ""),
+                os.environ.get("WCG_ES_LAT_MAX", ""),
+                os.environ.get("WCG_ES_LON_MIN", ""),
+                os.environ.get("WCG_ES_LON_MAX", ""),
+                os.environ.get("WCG_COUNTRY_RAAN_SWEEP", ""),
+            ),
         ) as pool:
             for ps in pool.imap_unordered(_wcga_pool_worker, pool_args):
                 partial_states.append(ps)

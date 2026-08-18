@@ -145,3 +145,51 @@ def filter_country_codes(codes: Sequence[str] | None) -> list[str]:
         if s in valid and s not in out:
             out.append(s)
     return out
+
+
+def country_bounds(
+    codes: Sequence[str],
+    *,
+    pad_deg: float = 0.5,
+) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """Axis-aligned lat/lon bbox covering the selected countries.
+
+    Returns ``((lat_min, lat_max), (lon_min, lon_max))`` in degrees, padded by
+    ``pad_deg``, or ``None`` when no geometry is found. Lon is reported in
+    ``[-180, 180]`` (no antimeridian wrapping — countries spanning ±180° get
+    the full longitude range).
+    """
+    codes_n = filter_country_codes(codes)
+    if not codes_n:
+        return None
+    code_set = set(codes_n)
+    lat_min, lat_max = 90.0, -90.0
+    lon_min, lon_max = 180.0, -180.0
+    n_pts = 0
+    for feat in _load().get("features", []):
+        if str(feat.get("id") or "").upper() not in code_set:
+            continue
+        geom = feat.get("geometry") or {}
+        gtype = geom.get("type")
+        coords = geom.get("coordinates") or []
+        polys = []
+        if gtype == "Polygon":
+            polys = [coords]
+        elif gtype == "MultiPolygon":
+            polys = coords
+        for poly in polys:
+            if not poly:
+                continue
+            for lon, lat in poly[0]:  # exterior ring only
+                lat_min = min(lat_min, float(lat))
+                lat_max = max(lat_max, float(lat))
+                lon_min = min(lon_min, float(lon))
+                lon_max = max(lon_max, float(lon))
+                n_pts += 1
+    if n_pts == 0:
+        return None
+    lat_min = max(-90.0, lat_min - pad_deg)
+    lat_max = min(90.0, lat_max + pad_deg)
+    lon_min = max(-180.0, lon_min - pad_deg)
+    lon_max = min(180.0, lon_max + pad_deg)
+    return (lat_min, lat_max), (lon_min, lon_max)

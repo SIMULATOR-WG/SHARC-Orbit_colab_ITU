@@ -339,15 +339,18 @@ def multi_config_info(mdb_path: str, ntc_id: str | None) -> dict[str, Any]:
 
     Light-weight (raw table export, no full SRS parse). Returns::
 
-        {"type": "S"|"M"|"", "nbr_config": int,
-         "config_label": int|None, "source": str|None, "is_multi": bool}
+        {"type": "S"|"M"|"", "nbr_config": int, "config_label": int|None,
+         "orbit_set_id": int|None, "source": str|None, "is_multi": bool}
     """
     return _multi_config_info(str(mdb_path), ntc_id, _file_sig(mdb_path))
 
 
 @functools.lru_cache(maxsize=128)
 def _multi_config_info(mdb_path: str, ntc_id: str | None, _sig) -> dict[str, Any]:
-    from src.srs_reader import _run_mdb_export, detect_orbit_config_raw  # noqa: PLC0415
+    from src.srs_reader import (  # noqa: PLC0415
+        _orbit_set_table_ids, _row_orbit_set_id, _run_mdb_export,
+        detect_orbit_config_raw,
+    )
 
     def _clean(v: Any) -> str:
         return str(v or "").strip().strip('"')
@@ -363,7 +366,7 @@ def _multi_config_info(mdb_path: str, ntc_id: str | None, _sig) -> dict[str, Any
             break
     if row is None:
         return {"type": "", "nbr_config": 0, "config_label": None,
-                "source": None, "is_multi": False}
+                "orbit_set_id": None, "source": None, "is_multi": False}
 
     mct = _clean(row.get("multi_config_type")).upper()
     try:
@@ -377,12 +380,44 @@ def _multi_config_info(mdb_path: str, ntc_id: str | None, _sig) -> dict[str, Any
             if ntc_id is not None and _clean(orb.get("ntc_id")) not in ("", str(ntc_id)):
                 continue
             try:
-                set_ids.add(int(_clean(orb.get("orbit_set_id")) or 0))
-            except ValueError:
+                set_ids.add(_row_orbit_set_id(orb))
+            except (TypeError, ValueError):
                 pass
     except Exception:  # noqa: BLE001
         pass
+    if not any(s > 0 for s in set_ids):
+        set_ids |= _orbit_set_table_ids(mdb_path, ntc_id)
 
     out = detect_orbit_config_raw(mdb_path, mct, nbr, set_ids)
     out["type"] = mct
     return out
+
+
+def format_multi_config_notice(info: dict[str, Any]) -> str:
+    """User-facing banner: prefer AP4 ``orbit_set_id``, never disguise a fallback."""
+    nbr = int(info.get("nbr_config") or 0) or "?"
+    oid = info.get("orbit_set_id")
+    lbl = info.get("config_label")
+    src = info.get("source")
+    tail = (
+        "EPFD must be evaluated **per configuration** — results of sibling "
+        "configurations must not be aggregated (S.1503-4 §D2.1)."
+    )
+    if oid is not None:
+        return (
+            f"Multi-configuration notice: **orbit_set_id = {oid}** "
+            f"({oid} of {nbr}). {tail}"
+        )
+    via = {"filename": "the filename", "folder": "the folder name"}.get(
+        src or "", src or "the path",
+    )
+    if lbl is not None:
+        body = (
+            f"Configuration **{lbl}** of **{nbr}** inferred from {via}."
+        )
+    else:
+        body = f"This notice declares **{nbr}** configurations."
+    return (
+        f"Multi-configuration notice: **orbit_set_id** is not declared in this "
+        f"SRS. {body} {tail}"
+    )

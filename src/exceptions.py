@@ -5,13 +5,16 @@ from __future__ import annotations
 class NoValidGeometry(RuntimeError):
     """Raised when the WCG search completes but finds no geometry satisfying the
     S.1503-4 store criteria (minimum elevation ε₀, GSO-arc elevation εGSO,
-    exclusion angle α₀, PFD mask).
+    exclusion angle α₀, PFD mask) — or, when a country-constrained WCGA is
+    active, no θ/φ sample lands an Earth station inside the selected countries.
 
     This is a *legitimate outcome*, not a bug: under the given filing and knobs
     the search space may contain no worst-case co-frequency GSO geometry above
-    ε₀. Subclasses ``RuntimeError`` so existing ``except Exception`` handlers
-    still catch it, while carrying structured ``diagnostics`` (the config knobs
-    that gate the criteria) so the UI/log can explain *why* and what to change.
+    ε₀ (or none inside the national ES domain). Subclasses ``RuntimeError`` so
+    existing ``except Exception`` handlers still catch it, while carrying
+    structured ``diagnostics`` (the config knobs that gate the criteria,
+    including ``country_codes`` / ``country_raan_sweep`` when relevant) so the
+    UI/log can explain *why* and what to change.
     """
 
     def __init__(self, message: str, *, diagnostics: dict | None = None) -> None:

@@ -50,6 +50,7 @@ from .epfd_calculator import (
 from .time_step import compute_track_duration_windows
 from .coordinates import (
     lla_to_ecef, gso_position_ecef, eci_to_ecef, eci_vel_to_ecef,
+    sub_satellite_point,
     set_earth_rotation_initial_deg, get_earth_rotation_initial_deg,
 )
 from .geometry import (
@@ -827,6 +828,13 @@ def create_constellation_from_config(ngso_cfg: dict) -> list[OrbitalElements]:
             h_min_plane_km = float(
                 plane_info.get("min_operating_height_km", min_operating_height_km) or 0.0
             )
+            # Per-plane §D4.6.1 flags; fall back to filing-level when absent.
+            f_sk_plane = bool(plane_info.get(
+                "f_stn_keep", ngso_cfg.get("_f_stn_keep", False),
+            ))
+            rpt_plane = float(plane_info.get(
+                "rpt_period_s", ngso_cfg.get("_rpt_period_s", 0.0),
+            ) or 0.0)
             phase_angles = plane_info.get("phase_angles_deg")
             has_official_phase = isinstance(phase_angles, list) and len(phase_angles) > 0
 
@@ -851,6 +859,8 @@ def create_constellation_from_config(ngso_cfg: dict) -> list[OrbitalElements]:
                     raan_deg=raan_deg, omega_deg=omega_plane,
                     M_deg=M_deg,
                     min_operating_height_km=h_min_plane_km,
+                    f_stn_keep=f_sk_plane,
+                    rpt_period_s=rpt_plane,
                 )
                 constellation.append(oe)
 
@@ -859,7 +869,7 @@ def create_constellation_from_config(ngso_cfg: dict) -> list[OrbitalElements]:
         # Standard Walker Delta. raan0/ω from the config now reach the
         # generator (they were silently fixed at 0 before — R4).
         phasing = ngso_cfg.get("inter_plane_phasing_factor", 1)
-        return create_walker_constellation(
+        constellation = create_walker_constellation(
             a=a_km, e=e, i_deg=i_deg,
             num_planes=num_planes,
             sats_per_plane=sats_per_plane,
@@ -868,6 +878,12 @@ def create_constellation_from_config(ngso_cfg: dict) -> list[OrbitalElements]:
             omega_deg=float(omega_deg or 0.0),
             min_operating_height_km=min_operating_height_km,
         )
+        f_sk = bool(ngso_cfg.get("_f_stn_keep", False))
+        rpt = float(ngso_cfg.get("_rpt_period_s", 0.0) or 0.0)
+        for oe in constellation:
+            oe.f_stn_keep = f_sk
+            oe.rpt_period_s = rpt
+        return constellation
 
 
 def _normalize_lon_deg(lon_deg: float) -> float:
@@ -1862,7 +1878,13 @@ def run_wcg_downlink(config: dict) -> tuple[
         when the search finds no valid geometry (attached to NoValidGeometry).
         Only reads scalars assigned before the search branch split, so it is safe
         from every no-geometry return site."""
-        return {
+        from .wcg_search import (  # noqa: PLC0415
+            _wcga_country_codes_from_env,
+            _wcga_country_raan_sweep_policy,
+            _wcga_country_raan_sweep_enabled,
+        )
+        country_codes = _wcga_country_codes_from_env()
+        out = {
             "alpha0_deg": float(alpha0_deg),
             "min_elevation_deg": float(min_elev_deg),
             "gso_min_elevation_deg": float(gso_min_elev_deg),
@@ -1872,6 +1894,62 @@ def run_wcg_downlink(config: dict) -> tuple[
             "frequency_ghz": float(freq_ghz),
             "n_satellites": int(total_sats_real),
         }
+        if country_codes:
+            out["country_codes"] = list(country_codes)
+            out["country_raan_sweep_policy"] = _wcga_country_raan_sweep_policy()
+            out["country_raan_sweep"] = bool(_wcga_country_raan_sweep_enabled())
+        return out
+
+    def _no_geometry_message(*, mode: str = "search") -> str:
+        """English explanation for NoValidGeometry (country filter aware)."""
+        from .wcg_search import (  # noqa: PLC0415
+            _wcga_country_codes_from_env,
+            _wcga_country_raan_sweep_policy,
+            _wcga_country_raan_sweep_enabled,
+        )
+        country_codes = _wcga_country_codes_from_env()
+        if mode == "manual":
+            return (
+                "Manual ES/GSO geometry is invalid for the elevation/exclusion "
+                "criteria (minimum elevation ε₀, GSO-arc elevation εGSO, "
+                "exclusion angle α₀)."
+            )
+        base = (
+            "No valid geometry found in the WCG search. Check the exclusion "
+            "angle α₀, the minimum elevation ε₀, the GSO-arc minimum elevation "
+            "εGSO (Table 8), and the PFD mask."
+        )
+        if not country_codes:
+            return base
+        codes_txt = ", ".join(country_codes)
+        _pol = _wcga_country_raan_sweep_policy()
+        if _pol == "auto":
+            country_note = (
+                f" Country-constrained WCGA was active for [{codes_txt}] with "
+                "RAAN (Ω) sweep per orbit (auto: repeating shells OFF, others "
+                "ON), but no θ/φ sample produced an Earth station inside the "
+                "selected country polygons (possible causes: coarse WCGA step, "
+                "small territory, or orbital geometry whose footprint never "
+                "reaches the country)."
+            )
+        elif _wcga_country_raan_sweep_enabled():
+            country_note = (
+                f" Country-constrained WCGA was active for [{codes_txt}] with "
+                "RAAN (Ω) sweep ON, but no θ/φ sample produced an Earth station "
+                "inside the selected country polygons (possible causes: coarse "
+                "WCGA step, small territory, or orbital geometry whose footprint "
+                "never reaches the country)."
+            )
+        else:
+            country_note = (
+                f" Country-constrained WCGA was active for [{codes_txt}] with "
+                "RAAN (Ω) sweep OFF (filed ground track preserved), and no θ/φ "
+                "sample produced an Earth station inside the selected country "
+                "polygons. Try enabling Ω sweep (if the filing is not a locked "
+                "repeating track), refining the WCGA step, or choosing a larger "
+                "country set."
+            )
+        return base + country_note
 
     use_s1503_algo = wcg_cfg.get("use_s1503_algo", False)
     manual_cfg = wcg_cfg.get("manual_wcg", {}) if isinstance(wcg_cfg.get("manual_wcg", {}), dict) else {}
@@ -1929,9 +2007,7 @@ def run_wcg_downlink(config: dict) -> tuple[
         if wcg_result is None:
             logger.error("FAILURE: manual ES/GSO geometry invalid for the elevation/exclusion criteria.")
             raise NoValidGeometry(
-                "Manual ES/GSO geometry is invalid for the elevation/exclusion "
-                "criteria (minimum elevation ε₀, GSO-arc elevation εGSO, "
-                "exclusion angle α₀).",
+                _no_geometry_message(mode="manual"),
                 diagnostics={
                     **_no_geometry_diagnostics(),
                     "mode": "manual",
@@ -2150,6 +2226,49 @@ def run_wcg_downlink(config: dict) -> tuple[
         if wcg_result is not None and best_overall_idx is not None and np.linalg.norm(wcg_result.ref_sat_eci) > 1e-6:
             wcg_ref_sat_idx = best_overall_idx
             ref_sat = constellation[best_overall_idx]
+            # Country-constrained WCGA: the search may have used a rotated RAAN
+            # so the ES lands in-country. Apply the same ΔΩ to the constellation
+            # before ΔM, otherwise Fig. 13 / temporal sim stay on the filing
+            # ground track and pull the ES back out of the country.
+            from .wcg_search import (  # noqa: PLC0415
+                _place_sat_at_lat,
+                _wcga_country_codes_from_env,
+                country_raan_sweep_for_oe,
+            )
+            # Only apply ΔΩ when the winning orbit actually swept Ω.
+            # Rotate *all* sweep-ON satellites by the same ΔΩ (keeps relative
+            # RAAN among free shells, aligns the winner to the WCG). Sweep-OFF
+            # / repeating shells keep the filed RAAN.
+            if _wcga_country_codes_from_env() and country_raan_sweep_for_oe(ref_sat):
+                lat_pm, lon_pm = sub_satellite_point(
+                    np.asarray(wcg_result.ref_sat_eci, dtype=float).ravel()[:3], 0.0,
+                )
+                placed = _place_sat_at_lat(ref_sat, lat_pm)
+                if placed is not None:
+                    _, lon_fil = sub_satellite_point(placed[0], 0.0)
+                    dlon = ((lon_pm - lon_fil + 180.0) % 360.0) - 180.0
+                    if abs(dlon) > 1e-6:
+                        draan = math.radians(dlon)
+                        n_aligned = 0
+                        n_kept = 0
+                        for oe in constellation:
+                            if country_raan_sweep_for_oe(oe):
+                                oe.raan = (oe.raan + draan) % (2.0 * math.pi)
+                                n_aligned += 1
+                            else:
+                                n_kept += 1
+                        logger.info(
+                            f"  Country WCGA: ΔΩ = {dlon:+.2f}° applied to "
+                            f"{n_aligned} sat(s) on sweep-ON orbits "
+                            f"(relative RAAN preserved vs winner); "
+                            f"{n_kept} sat(s) on sweep-OFF / repeating "
+                            f"shells keep filed RAAN"
+                        )
+                        sim_cfg.setdefault("_country_wcg_alignment", {}).update({
+                            "delta_raan_deg": float(dlon),
+                            "n_sats_aligned": int(n_aligned),
+                            "n_sats_kept_filed_raan": int(n_kept),
+                        })
             M_orig_0 = ref_sat.M
             M_wcg_rad = eci_to_mean_anomaly(ref_sat, wcg_result.ref_sat_eci)
             delta_M = (M_wcg_rad - M_orig_0) % (2.0 * math.pi)
@@ -2228,12 +2347,11 @@ def run_wcg_downlink(config: dict) -> tuple[
             logger.info(f"  Best WCG found with satellite at M={best_M:.0f}° (EPFD={best_overall_epfd:.2f} dB)")
 
     if wcg_result is None:
+        _msg = _no_geometry_message(mode="search")
         logger.error("FAILURE: No valid geometry found in the WCG search!")
-        logger.error("Check: exclusion angle α₀, minimum elevation, PFD mask.")
+        logger.error("  %s", _msg)
         raise NoValidGeometry(
-            "No valid geometry found in the WCG search. Check the exclusion "
-            "angle α₀, the minimum elevation ε₀, the GSO-arc minimum elevation "
-            "εGSO (Table 8), and the PFD mask.",
+            _msg,
             diagnostics={**_no_geometry_diagnostics(), "mode": "search"},
         )
     wcg_search_elapsed_s = time.perf_counter() - wcg_search_t0

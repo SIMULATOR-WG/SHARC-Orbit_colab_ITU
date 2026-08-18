@@ -35,7 +35,7 @@ def _system(mct: str = "M", nbr: int = 2, planes=None) -> SRSNonGeoSystem:
 def test_orbit_set_id_wins():
     sysm = _system(planes=[_plane(orbit_set_id=3), _plane(orbit_set_id=3, orb_id=2)])
     out = detect_orbit_config("/data/Config1/whatever_SRS.mdb", sysm)
-    assert out == {"config_label": 3, "source": "orbit_set_id",
+    assert out == {"config_label": 3, "orbit_set_id": 3, "source": "orbit_set_id",
                    "is_multi": True, "nbr_config": 2}
 
 
@@ -43,12 +43,14 @@ def test_folder_fallback():
     sysm = _system()  # planes without orbit_set_id
     out = detect_orbit_config("/data/ntc/Config2/x_SRS.mdb", sysm)
     assert (out["config_label"], out["source"]) == (2, "folder")
+    assert out["orbit_set_id"] is None
 
 
 def test_filename_fallback():
     sysm = _system()
     out = detect_orbit_config("/data/ntc/x_Config4_SRS.mdb", sysm)
     assert (out["config_label"], out["source"]) == (4, "filename")
+    assert out["orbit_set_id"] is None
 
 
 def test_single_config_filing():
@@ -69,3 +71,11 @@ def test_legacy_defaults():
     sysm = _system(mct="", nbr=0)
     assert sysm.multi_config_type == ""
     assert sysm.orbit_planes[0].orbit_set_id == 0
+
+
+def test_orb_set_id_alias():
+    from src.srs_reader import _row_orbit_set_id  # noqa: PLC0415
+    assert _row_orbit_set_id({"orb_set_id": "2"}) == 2
+    assert _row_orbit_set_id({"orbit_set_id": "5"}) == 5
+    assert _row_orbit_set_id({"orb_id": "9"}) == 0
+    assert _row_orbit_set_id({}) == 0

@@ -1,0 +1,1084 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Country-constrained WCGA — processo 3D</title>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+    background: #0a0e17; color: #e6eaf2;
+    font-family: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif; }
+  #app { display: flex; flex-direction: column; height: 100vh; }
+
+  #header { padding: 10px 18px; background: rgba(10,14,23,0.94);
+    border-bottom: 1px solid rgba(255,255,255,0.10);
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap; z-index: 20; }
+  #header h1 { font-size: 15px; margin: 0; font-weight: 700; color: #4fd1c5; }
+  #header h1 small { color: #94a3b8; font-weight: 400; font-size: 11px; margin-left: 8px; }
+
+  #steps { display: flex; gap: 4px; margin-left: auto; flex-wrap: wrap; }
+  .step-btn { background: #141a26; border: 1px solid rgba(255,255,255,0.10); color: #cbd5e0;
+    padding: 7px 11px; border-radius: 7px; cursor: pointer; font-size: 11px; font-weight: 600; }
+  .step-btn:hover { border-color: #4fd1c5; color: #fff; }
+  .step-btn.active { background: #4fd1c5; color: #06231f; border-color: #4fd1c5; }
+  .step-btn .n { opacity: .75; margin-right: 5px; }
+
+  #main { flex: 1; display: flex; min-height: 0; }
+  #stage { position: relative; flex: 1; min-width: 0; }
+  #canvas-wrap { position: absolute; inset: 0; }
+  #canvas-wrap canvas { display: block; width: 100% !important; height: 100% !important; }
+
+  #scene-title { position: absolute; top: 14px; left: 18px; z-index: 5;
+    background: rgba(10,14,23,0.78); padding: 8px 14px; border-radius: 6px;
+    border-left: 3px solid #4fd1c5; font-size: 13px; font-weight: 600; max-width: min(420px, 70vw);
+    pointer-events: none; }
+  #scene-title small { display: block; color: #94a3b8; font-weight: 400; font-size: 11px;
+    margin-top: 4px; line-height: 1.45; }
+
+  #controls-bar { position: absolute; bottom: 14px; left: 18px; z-index: 5; display: flex; gap: 8px; flex-wrap: wrap; }
+  .ctl { background: rgba(20,26,38,0.92); border: 1px solid rgba(255,255,255,0.12); color: #e6eaf2;
+    padding: 7px 12px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+  .ctl:hover { border-color: #4fd1c5; }
+  .ctl.primary { background: #134e4a; border-color: #4fd1c5; }
+
+  #legend { position: absolute; bottom: 14px; right: 18px; z-index: 5;
+    background: rgba(10,14,23,0.85); border: 1px solid rgba(255,255,255,0.08);
+    padding: 10px 13px; border-radius: 6px; font-size: 11px; max-width: 260px; }
+  #legend .row { display: flex; align-items: center; gap: 7px; margin: 4px 0; }
+  #legend .dot { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; }
+  #legend .line { width: 16px; height: 3px; flex-shrink: 0; border-radius: 1px; }
+
+  #hud-omega { position: absolute; top: 14px; right: 18px; z-index: 5;
+    background: rgba(10,14,23,0.88); border: 1px solid rgba(52,211,153,0.45);
+    padding: 10px 14px; border-radius: 8px; font-size: 12px; min-width: 210px;
+    font-family: ui-monospace, "IBM Plex Mono", monospace; line-height: 1.45;
+    pointer-events: none; display: none; }
+  #hud-omega .lbl { color: #94a3b8; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .06em; margin-bottom: 4px; font-family: "IBM Plex Sans", sans-serif; }
+  #hud-omega .val { color: #e6eaf2; }
+  #hud-omega .val b { color: #34d399; }
+  #hud-omega.locked { border-color: #34d399; box-shadow: 0 0 18px rgba(52,211,153,0.25); }
+  #hud-omega.locked .lbl { color: #34d399; }
+
+  #panel { width: 360px; flex-shrink: 0; background: #0d1320; overflow-y: auto;
+    padding: 18px 20px; border-left: 1px solid rgba(255,255,255,0.08); }
+  #panel h2 { font-size: 16px; margin: 0 0 6px; color: #4fd1c5; }
+  #panel .sub { font-size: 12px; color: #94a3b8; margin: 0 0 14px; line-height: 1.45; }
+  #panel h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: #7dd3c0;
+    margin: 16px 0 7px; border-bottom: 1px solid rgba(255,255,255,0.07); padding-bottom: 4px; }
+  #panel p, #panel li { font-size: 12.5px; line-height: 1.55; color: #cbd5e0; margin: 6px 0; }
+  #panel ul { margin: 6px 0; padding-left: 18px; }
+  #panel .formula { background: #060912; border: 1px solid rgba(79,209,197,0.25);
+    border-radius: 6px; padding: 10px 12px; font-family: ui-monospace, monospace; font-size: 12px;
+    color: #7dd3c0; margin: 10px 0; line-height: 1.5; }
+  #panel .note { font-size: 11.5px; color: #fbbf24; margin-top: 10px; line-height: 1.45; }
+  #panel .mode-box { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
+  #panel .mode-card { background: #060912; border-radius: 6px; padding: 9px 10px;
+    font-size: 11.5px; line-height: 1.45; color: #cbd5e0; }
+  #panel .mode-card.on { border: 1px solid rgba(52,211,153,0.45); }
+  #panel .mode-card.off { border: 1px solid rgba(148,163,184,0.4); }
+  #panel .mode-card h4 { margin: 0 0 6px; font-size: 11px; letter-spacing: .04em;
+    text-transform: uppercase; }
+  #panel .mode-card.on h4 { color: #34d399; }
+  #panel .mode-card.off h4 { color: #94a3b8; }
+  #panel .mode-card ul { margin: 0; padding-left: 16px; }
+  #panel .mode-card li { font-size: 11.5px; margin: 3px 0; }
+  .tag { display: inline-block; font-size: 10px; font-weight: 700; padding: 2px 8px;
+    border-radius: 10px; background: #14532d; color: #86efac; margin-bottom: 8px; }
+
+  @media (max-width: 900px) {
+    #main { flex-direction: column; }
+    #panel { width: 100%; max-height: 38vh; border-left: none;
+      border-top: 1px solid rgba(255,255,255,0.08); }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="header">
+    <h1>Country-constrained WCGA <small>S.1503-4 §D.3.1 · i = 75° · RAAN sweep per órbita</small></h1>
+    <div id="steps">
+      <button class="step-btn active" data-step="0"><span class="n">0</span>Visão</button>
+      <button class="step-btn" data-step="1"><span class="n">1</span>Sat + nadir</button>
+      <button class="step-btn" data-step="2"><span class="n">2</span>Candidatos Ω</button>
+      <button class="step-btn" data-step="3"><span class="n">3</span>θ/φ × cada Ω</button>
+      <button class="step-btn" data-step="4"><span class="n">4</span>Merge + WCG★</button>
+      <button class="step-btn" data-step="5"><span class="n">5</span>ΔΩ constelação</button>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="stage">
+      <div id="canvas-wrap"></div>
+      <div id="scene-title">
+        Visão geral
+        <small>Terra + Brasil + órbita. Use os passos à direita para ver cada fase do processo.</small>
+      </div>
+      <div id="hud-omega">
+        <div class="lbl" id="hud-omega-lbl">RAAN em varredura</div>
+        <div class="val" id="hud-omega-body"></div>
+      </div>
+      <div id="controls-bar">
+        <button class="ctl primary" id="btn-play">▶ Auto-play</button>
+        <button class="ctl" id="btn-reset">Reset câmera</button>
+      </div>
+      <div id="legend">
+        <div class="row"><span class="dot" style="background:#22c55e"></span> País (polígono)</div>
+        <div class="row"><span class="line" style="background:#64748b"></span> Ω<sub>filing</sub></div>
+        <div class="row"><span class="line" style="background:#f59e0b"></span> Ω candidato (só se sweep ON)</div>
+        <div class="row"><span class="dot" style="background:#a78bfa"></span> Grade θ/φ neste Ω</div>
+        <div class="row"><span class="dot" style="background:#ef4444"></span> ES fora do país</div>
+        <div class="row"><span class="dot" style="background:#4ade80"></span> ES no país (merge)</div>
+        <div class="row"><span class="line" style="background:#34d399"></span> WCG★ (pior EPFD) → traz Ω</div>
+        <div class="row"><span class="line" style="background:#38bdf8"></span> Planos (filing)</div>
+        <div class="row"><span class="line" style="background:#f472b6"></span> Planos após ΔΩ (só lon)</div>
+        <div class="row"><span class="dot" style="background:#fde047"></span> Sat. referência (WCG)</div>
+      </div>
+    </div>
+
+    <aside id="panel">
+      <span class="tag">ilustrativo · não normativo</span>
+      <h2 id="panel-title">Visão geral</h2>
+      <p class="sub" id="panel-sub">O mesmo algoritmo WCGA do Single-entry, com domínio ES restrito a países e varredura de RAAN (Ω).</p>
+      <div id="panel-body"></div>
+      <p class="note">Didático (esfera / Brasil esquemático). RAAN sweep auto = §D4.6.1 <b>por órbita</b>; ΔΩ da vencedora em <b>todas</b> as órbitas ON (OFF mantêm Ω filed). Esta cena anima o caminho ON. Motor: GeoJSON + grade θ/φ S.1503-4.</p>
+    </aside>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const RE = 1.0;           // Earth radius in scene units
+  const SAT_ALT = 0.55;     // exaggerated altitude for readability
+  const SAT_R = RE + SAT_ALT;
+  const DEG = Math.PI / 180;
+  const INCL_DEG = 75;      // orbital inclination i (deg)
+  const SAT_LAT = -15;      // demo WCGA satellite latitude (|lat| ≤ i)
+
+  // Simplified Brazil polygon (lon, lat) — schematic coastal outline
+  const BRAZIL = [
+    [-74.0, 5.2], [-68.0, 2.0], [-60.0, 5.0], [-51.5, 4.2], [-34.8, -7.0],
+    [-34.8, -20.0], [-40.5, -22.5], [-48.0, -28.5], [-53.5, -33.7],
+    [-57.5, -30.0], [-58.0, -22.0], [-67.5, -10.0], [-73.5, -7.5], [-74.0, 5.2],
+  ];
+  const LON_MIN = -74.5, LON_MAX = -34.5;
+  const PAD = 12; // ~φ₀ pad (deg) for Ω longitude grid
+
+  const STEPS = [
+    {
+      title: "Visão geral",
+      blurb: "Filtro ES no país + RAAN sweep ON/OFF por órbita (auto §D4.6.1; filings mistos suportados).",
+      panel: `
+        <h3>RAAN sweep — dois modos</h3>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON</h4>
+            <ul>
+              <li>Auto: órbita <b>não</b> repetitiva</li>
+              <li>Varre Ω candidatos (lon do país + pad)</li>
+              <li>θ/φ em <b>cada</b> Ω</li>
+              <li>Após WCG★: aplica <b>ΔΩ</b> em toda a constelação</li>
+              <li>Depois: ΔM (sempre)</li>
+            </ul>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF</h4>
+            <ul>
+              <li>Auto: trilha repetitiva (<code>f_stn_keep</code> + rpt ≥ 1 h)</li>
+              <li><b>Só</b> Ω do filing (sem lista de candidatos)</li>
+              <li>θ/φ só nesse Ω</li>
+              <li><b>Não</b> aplica ΔΩ (trilha depositada)</li>
+              <li>Depois: ΔM (sempre)</li>
+            </ul>
+          </div>
+        </div>
+        <p>Em ambos: só ES no polígono entram no merge; se nenhum θ/φ cair no país → <code>no_geometry</code>.</p>
+        <h3>Ordem (esta ilustração = sweep ON)</h3>
+        <ol style="padding-left:18px;margin:8px 0;color:#cbd5e0;font-size:12.5px;line-height:1.55">
+          <li>Coloca satélite com Ω do filing → lon₀.</li>
+          <li>Candidatos Ω (só se sweep ON).</li>
+          <li>Grade θ/φ por Ω (1 Ω se sweep OFF).</li>
+          <li>Filtro país + merge → WCG★ (pior EPFD).</li>
+          <li>ΔΩ na constelação (só se sweep ON) + ΔM.</li>
+        </ol>
+        <div class="formula">auto: por órbita — repeating → OFF · senão → ON · ΔΩ em todas as ON vs vencedora</div>
+        <p>i = 75° · lat_sat demo = −15°. Passo Ω (quando ON): max(s1503_step, 0.5°).</p>
+      `,
+    },
+    {
+      title: "1 · Satélite + nadir (Ω filing)",
+      blurb: "Ponto de partida comum aos dois modos: Ω do filing. Com sweep OFF, este é o único Ω da busca.",
+      panel: `
+        <h3>Colocação com Ω do filing</h3>
+        <p>Latitude do satélite: varredura WCGA em ±75°. Aqui −15°.</p>
+        <div class="formula">nadir ≈ (lat_sat, lon(Ω_filing))</div>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON</h4>
+            <p style="margin:0">Ω_filing = referência para gerar ΔΩ = lon_tgt − lon₀.</p>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF</h4>
+            <p style="margin:0">Trilha fixa: busca só neste Ω; sem rotação de planos.</p>
+          </div>
+        </div>
+      `,
+    },
+    {
+      title: "2 · Candidatos Ω (sweep ON)",
+      blurb: "Só existe com RAAN sweep ON. Com sweep OFF este passo é um no-op: candidatos = [Ω_filing].",
+      panel: `
+        <h3>Geração de candidatos</h3>
+        <div class="formula" id="panel-omega-formula">Ω = Ω_filing + (lon_tgt − lon₀)</div>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON</h4>
+            <ul>
+              <li>Amostra lon_tgt no bbox + pad</li>
+              <li>Cada tgt → um Ω candidato</li>
+              <li>Âmbar / azuis nesta cena</li>
+            </ul>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF</h4>
+            <ul>
+              <li>Lista = só Ω_filing</li>
+              <li>Sem grade de longitudes</li>
+              <li>Trilha do filing intacta</li>
+            </ul>
+          </div>
+        </div>
+        <p class="note" style="color:#fbbf24">Nesta animação mostramos o caminho ON. Ainda não há Ω★ — isso vem do pior EPFD.</p>
+      `,
+    },
+    {
+      title: "3 · Grade θ/φ × Ω",
+      blurb: "Sweep ON: θ/φ em cada Ω candidato. Sweep OFF: θ/φ só no Ω do filing.",
+      panel: `
+        <h3>θ/φ × domínio Ω</h3>
+        <div class="formula" id="panel-omega-star">WCGD_CalcAtLat_fixed_raan</div>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON</h4>
+            <p style="margin:0">Loop sequencial: para cada Ω → grade θ/φ completa → merge.</p>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF</h4>
+            <p style="margin:0">Uma única grade θ/φ no Ω do filing. Se o footprint não tocar o país → <code>no_geometry</code>.</p>
+          </div>
+        </div>
+        <p>Filtro de país aplica-se ponto a ponto em ambos os modos.</p>
+      `,
+    },
+    {
+      title: "4 · Filtro + merge → WCG★",
+      blurb: "Igual nos dois modos: ES fora do país descartados; vence o pior EPFD entre os válidos.",
+      panel: `
+        <h3>Aceitação e vencedor</h3>
+        <div class="formula">_wcga_es_in_domain → merge → max EPFD</div>
+        <ul>
+          <li><b>Verde / vermelho</b> — ES dentro / fora do polígono</li>
+          <li><b>Órbita verde</b> — geometria WCG★</li>
+        </ul>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON</h4>
+            <p style="margin:0">WCG★ traz um Ω★ (pode ≠ filing). Próximo: ΔΩ na constelação.</p>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF</h4>
+            <p style="margin:0">WCG★ usa Ω do filing. Próximo: <b>sem</b> ΔΩ; só ΔM.</p>
+          </div>
+        </div>
+      `,
+    },
+    {
+      title: "5 · Alinhar constelação",
+      blurb: "ΔΩ da vencedora em todas as órbitas ON (RAAN relativo preservado). Shells OFF/repeating mantêm Ω filed.",
+      panel: `
+        <h3>Pós-busca (main.py)</h3>
+        <div class="formula" id="panel-align-formula">ΔΩ / ΔM</div>
+        <div class="mode-box">
+          <div class="mode-card on">
+            <h4>Sweep ON (todas as órbitas ON)</h4>
+            <ul>
+              <li>ΔΩ da vencedora em <b>todas</b> as órbitas ON</li>
+              <li>Shells OFF / repeating mantêm Ω filed</li>
+              <li>Depois ΔM em todos os M</li>
+            </ul>
+          </div>
+          <div class="mode-card off">
+            <h4>Sweep OFF (órbita / force off)</h4>
+            <ul>
+              <li><b>Não</b> aplica ΔΩ nessa órbita</li>
+              <li>Planos ficam no Ω do filing</li>
+              <li>Ainda aplica ΔM (ECI do ref = WCG @ t=0)</li>
+            </ul>
+          </div>
+        </div>
+        <ul>
+          <li><b>Azul</b> — planos filing · <b>Rosa</b> — após ΔΩ (órbita ON)</li>
+          <li><b>Verde / amarelo</b> — alvo WCG★ e sat. de referência</li>
+        </ul>
+        <p class="note" style="color:#fbbf24">Auto no motor: §D4.6.1 <b>por órbita</b> (<code>f_stn_keep</code> + rpt ≥ 1 h → OFF). Filings mistos (ex. USASAT-NGSO-3) tratados shell a shell. Override: auto / on / off na UI.</p>
+      `,
+    },
+  ];
+
+  // ---------- math helpers ----------
+  function latLonToVec3(latDeg, lonDeg, r) {
+    const lat = latDeg * DEG, lon = lonDeg * DEG;
+    return new THREE.Vector3(
+      r * Math.cos(lat) * Math.cos(lon),
+      r * Math.sin(lat),
+      -r * Math.cos(lat) * Math.sin(lon)
+    );
+  }
+  /** Circular Keplerian position (ECI): Z north; then map to Three.js Y-up. */
+  function orbitPos(uRad, raanRad, iRad, r) {
+    const cu = Math.cos(uRad), su = Math.sin(uRad);
+    const cO = Math.cos(raanRad), sO = Math.sin(raanRad);
+    const ci = Math.cos(iRad), si = Math.sin(iRad);
+    const x = cu * cO - su * sO * ci;
+    const y = cu * sO + su * cO * ci;
+    const z = su * si;
+    return new THREE.Vector3(r * x, r * z, -r * y);
+  }
+  function argLatForSatLat(latDeg, iDeg) {
+    const s = Math.sin(latDeg * DEG) / Math.sin(iDeg * DEG);
+    return Math.asin(Math.max(-1, Math.min(1, s)));
+  }
+  function normalizeLon(lon) {
+    return ((lon + 180) % 360 + 360) % 360 - 180;
+  }
+  function pointInBrazil(lat, lon) {
+    // ray casting on BRAZIL ring (lon, lat)
+    let inside = false;
+    const n = BRAZIL.length;
+    for (let i = 0, j = n - 1; i < n; j = i++) {
+      const xi = BRAZIL[i][0], yi = BRAZIL[i][1];
+      const xj = BRAZIL[j][0], yj = BRAZIL[j][1];
+      const intersect = ((yi > lat) !== (yj > lat)) &&
+        (lon < (xj - xi) * (lat - yi) / (yj - yi + 1e-30) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  // ---------- Three.js setup ----------
+  const wrap = document.getElementById("canvas-wrap");
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(wrap.clientWidth, wrap.clientHeight);
+  renderer.setClearColor(0x0a0e17, 1);
+  wrap.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(42, wrap.clientWidth / wrap.clientHeight, 0.01, 100);
+  camera.position.set(2.6, 1.1, 2.4);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.07;
+  controls.minDistance = 1.6;
+  controls.maxDistance = 8;
+  controls.target.set(0, 0, 0);
+
+  scene.add(new THREE.AmbientLight(0x8899aa, 0.55));
+  const sun = new THREE.DirectionalLight(0xfff4e0, 0.95);
+  sun.position.set(4, 2, 3);
+  scene.add(sun);
+
+  // Everything Earth-fixed lives under globeRoot (one spin keeps layers aligned).
+  const globeRoot = new THREE.Group();
+  scene.add(globeRoot);
+
+  // Earth
+  const earthMat = new THREE.MeshPhongMaterial({
+    color: 0x1a3350, emissive: 0x061018, specular: 0x223344, shininess: 12,
+  });
+  const earth = new THREE.Mesh(new THREE.SphereGeometry(RE, 64, 48), earthMat);
+  globeRoot.add(earth);
+  const grid = new THREE.LineSegments(
+    new THREE.WireframeGeometry(new THREE.SphereGeometry(RE * 1.002, 36, 18)),
+    new THREE.LineBasicMaterial({ color: 0x2a4060, transparent: true, opacity: 0.35 })
+  );
+  globeRoot.add(grid);
+
+  // Equator / meridians hint
+  function addLatCircle(latDeg, color, opacity) {
+    const pts = [];
+    for (let i = 0; i <= 128; i++) {
+      const lon = -180 + (360 * i) / 128;
+      pts.push(latLonToVec3(latDeg, lon, RE * 1.004));
+    }
+    const g = new THREE.BufferGeometry().setFromPoints(pts);
+    const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity }));
+    globeRoot.add(line);
+    return line;
+  }
+  addLatCircle(0, 0x3b82f6, 0.25);
+  addLatCircle(INCL_DEG, 0xf59e0b, 0.3);   // max latitude (+i)
+  addLatCircle(-INCL_DEG, 0xf59e0b, 0.3);  // max latitude (−i)
+  addLatCircle(SAT_LAT, 0xfbbf24, 0.22);   // demo WCGA lat step
+
+  // Brazil polygon mesh (extruded slightly)
+  function makeCountryMesh() {
+    const shape = new THREE.Shape();
+    BRAZIL.forEach(([lon, lat], i) => {
+      // project to local tangent-ish plane for Shape, then map to sphere
+      // We'll build a Mesh from spherical triangles instead
+    });
+    // Fan from centroid on sphere surface
+    let clon = 0, clat = 0;
+    BRAZIL.forEach(([lon, lat]) => { clon += lon; clat += lat; });
+    clon /= BRAZIL.length; clat /= BRAZIL.length;
+    const c = latLonToVec3(clat, clon, RE * 1.006);
+    const positions = [];
+    const colors = [];
+    for (let i = 0; i < BRAZIL.length - 1; i++) {
+      const a = latLonToVec3(BRAZIL[i][1], BRAZIL[i][0], RE * 1.006);
+      const b = latLonToVec3(BRAZIL[i + 1][1], BRAZIL[i + 1][0], RE * 1.006);
+      positions.push(c.x, c.y, c.z, a.x, a.y, a.z, b.x, b.y, b.z);
+      for (let k = 0; k < 3; k++) colors.push(0.13, 0.77, 0.37);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    geo.computeVertexNormals();
+    const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      vertexColors: true, transparent: true, opacity: 0.55, side: THREE.DoubleSide,
+    }));
+    // outline
+    const outlinePts = BRAZIL.map(([lon, lat]) => latLonToVec3(lat, lon, RE * 1.008));
+    const outline = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(outlinePts),
+      new THREE.LineBasicMaterial({ color: 0x86efac, linewidth: 2 })
+    );
+    const group = new THREE.Group();
+    group.add(mesh);
+    group.add(outline);
+    globeRoot.add(group);
+    return group;
+  }
+  const countryGroup = makeCountryMesh();
+
+  // Layer groups per step
+  const gOrbit = new THREE.Group(); globeRoot.add(gOrbit);
+  const gOrbitFiling = new THREE.Group(); globeRoot.add(gOrbitFiling);
+  const gSat = new THREE.Group(); globeRoot.add(gSat);
+  const gOmega = new THREE.Group(); globeRoot.add(gOmega);
+  const gThetaPhi = new THREE.Group(); globeRoot.add(gThetaPhi);
+  const gFilter = new THREE.Group(); globeRoot.add(gFilter);
+
+  // Filing Ω: nadir far from Brazil. Aligned Ω: nadir lon over country band.
+  const FILING_LON = 25;     // nadir lon with Ω_filing (east Atlantic — fora do BR)
+  const DEMO_LON = -53.5;    // one target lon inside Brazil band
+  const I_RAD = INCL_DEG * DEG;
+  const U_DEMO = argLatForSatLat(SAT_LAT, INCL_DEG);
+
+  function raanForNadirLon(lonDeg) {
+    const p0 = orbitPos(U_DEMO, 0, I_RAD, 1);
+    const lon0 = Math.atan2(-p0.z, p0.x) / DEG;
+    return (lonDeg - lon0) * DEG;
+  }
+  const RAAN_FILING = raanForNadirLon(FILING_LON);
+  const RAAN_DEMO = raanForNadirLon(DEMO_LON);
+  const OMEGA_FILING_DEG = normalizeLon(RAAN_FILING / DEG);
+  const OMEGA_STAR_DEG = normalizeLon(RAAN_DEMO / DEG);
+  const DELTA_OMEGA_DEG = normalizeLon(DEMO_LON - FILING_LON);
+
+  function fmtDeg(d) {
+    const x = normalizeLon(d);
+    return (x >= 0 ? "+" : "") + x.toFixed(1) + "°";
+  }
+
+  const hudEl = document.getElementById("hud-omega");
+  const hudLbl = document.getElementById("hud-omega-lbl");
+  const hudBody = document.getElementById("hud-omega-body");
+
+  function showHud(mode, lonDeg, raanDeg, extra) {
+    hudEl.style.display = "block";
+    if (mode === "sweep") {
+      hudEl.classList.remove("locked");
+      hudLbl.textContent = "Ω candidato (lista)";
+      hudBody.innerHTML =
+        `Ω = <b>${fmtDeg(raanDeg)}</b><br>` +
+        `lon_tgt ≈ ${fmtDeg(lonDeg)}<br>` +
+        `<span style="color:#94a3b8">ainda sem vencedor</span>`;
+    } else if (mode === "eval") {
+      hudEl.classList.remove("locked");
+      hudLbl.textContent = "Avaliando θ/φ neste Ω";
+      hudBody.innerHTML =
+        `Ω = <b>${fmtDeg(raanDeg)}</b><br>` +
+        `lon nadir = ${fmtDeg(lonDeg)}<br>` +
+        `<span style="color:#a78bfa">${extra || "grade θ/φ completa"}</span>`;
+    } else if (mode === "winner") {
+      hudEl.classList.add("locked");
+      hudLbl.textContent = "WCG★ (após merge)";
+      hudBody.innerHTML =
+        `pior EPFD → traz Ω = <b>${fmtDeg(OMEGA_STAR_DEG)}</b><br>` +
+        `ΔΩ = ${fmtDeg(DELTA_OMEGA_DEG)} · lon = ${fmtDeg(DEMO_LON)}<br>` +
+        `<span style="color:#94a3b8">Ω não foi pré-escolhido</span>`;
+    } else if (mode === "align") {
+      hudEl.classList.add("locked");
+      hudLbl.textContent = "Constellation ΔΩ (longitude)";
+      const frac = (extra && extra.frac != null) ? extra.frac : 1;
+      const dO = DELTA_OMEGA_DEG * frac;
+      hudBody.innerHTML =
+        `ΔΩ × ${(frac * 100).toFixed(0)}% = <b>${fmtDeg(dO)}</b><br>` +
+        `all planes / sats · u frozen<br>` +
+        `<span style="color:#fde047">nadirs shift in longitude only</span>`;
+    } else {
+      hudEl.style.display = "none";
+    }
+  }
+
+  function makeOrbitLine(raan, color, opacity, radius) {
+    const pts = [];
+    for (let k = 0; k <= 256; k++) {
+      pts.push(orbitPos((2 * Math.PI * k) / 256, raan, I_RAD, radius));
+    }
+    return new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity })
+    );
+  }
+
+  function setOrbitRaan(raan, color, opacity) {
+    while (gOrbit.children.length) gOrbit.remove(gOrbit.children[0]);
+    gOrbit.add(makeOrbitLine(raan, color || 0xf59e0b, opacity == null ? 0.9 : opacity, SAT_R));
+    gOrbit.add(makeOrbitLine(raan, 0xfbbf24, 0.28, RE * 1.008));
+  }
+
+  // Fixed filing reference (always visible as ghost in steps 1–2)
+  gOrbitFiling.add(makeOrbitLine(RAAN_FILING, 0x64748b, 0.55, SAT_R));
+  gOrbitFiling.add(makeOrbitLine(RAAN_FILING, 0x475569, 0.22, RE * 1.008));
+
+  function buildSatNadir(lonDeg, colorSat, colorNadir) {
+    while (gSat.children.length) gSat.remove(gSat.children[0]);
+    const raan = raanForNadirLon(lonDeg);
+    const satPos = orbitPos(U_DEMO, raan, I_RAD, SAT_R);
+    const nadir = latLonToVec3(SAT_LAT, lonDeg, RE * 1.01);
+    const sat = new THREE.Mesh(
+      new THREE.SphereGeometry(0.045, 16, 12),
+      new THREE.MeshPhongMaterial({ color: colorSat || 0xf59e0b, emissive: 0x663300 })
+    );
+    sat.position.copy(satPos);
+    gSat.add(sat);
+    gSat.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([satPos, nadir]),
+      new THREE.LineBasicMaterial({ color: colorNadir || 0xfbbf24 })
+    ));
+    const nad = new THREE.Mesh(
+      new THREE.SphereGeometry(0.028, 12, 10),
+      new THREE.MeshBasicMaterial({ color: colorNadir || 0xfde68a })
+    );
+    nad.position.copy(nadir);
+    gSat.add(nad);
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.04, 0.055, 24),
+      new THREE.MeshBasicMaterial({ color: colorSat || 0xf59e0b, side: THREE.DoubleSide })
+    );
+    ring.position.copy(nadir.clone().multiplyScalar(1.01));
+    ring.lookAt(0, 0, 0);
+    gSat.add(ring);
+    return { satPos, nadir, raan };
+  }
+
+  // Filing sat marker (static, dim) — separate from moving sat
+  const gSatFiling = new THREE.Group(); globeRoot.add(gSatFiling);
+  (function buildFilingSat() {
+    const satPos = orbitPos(U_DEMO, RAAN_FILING, I_RAD, SAT_R);
+    const nadir = latLonToVec3(SAT_LAT, FILING_LON, RE * 1.01);
+    const sat = new THREE.Mesh(
+      new THREE.SphereGeometry(0.032, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0x94a3b8, transparent: true, opacity: 0.7 })
+    );
+    sat.position.copy(satPos);
+    gSatFiling.add(sat);
+    gSatFiling.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([satPos, nadir]),
+      new THREE.LineBasicMaterial({ color: 0x64748b, transparent: true, opacity: 0.55 })
+    ));
+    const nad = new THREE.Mesh(
+      new THREE.SphereGeometry(0.02, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0xcbd5e1 })
+    );
+    nad.position.copy(nadir);
+    gSatFiling.add(nad);
+  })();
+
+  setOrbitRaan(RAAN_FILING, 0xf59e0b, 0.85);
+  buildSatNadir(FILING_LON);
+
+  // Selected Ω★ orbit (green) — visible when locked / steps 3–4
+  const gSelected = new THREE.Group(); globeRoot.add(gSelected);
+  gSelected.visible = false;
+  (function buildSelectedOmega() {
+    gSelected.add(makeOrbitLine(RAAN_DEMO, 0x34d399, 0.95, SAT_R));
+    gSelected.add(makeOrbitLine(RAAN_DEMO, 0x6ee7b7, 0.4, RE * 1.01));
+    const satPos = orbitPos(U_DEMO, RAAN_DEMO, I_RAD, SAT_R);
+    const nadir = latLonToVec3(SAT_LAT, DEMO_LON, RE * 1.018);
+    const sat = new THREE.Mesh(
+      new THREE.SphereGeometry(0.05, 16, 12),
+      new THREE.MeshPhongMaterial({ color: 0x34d399, emissive: 0x047857 })
+    );
+    sat.position.copy(satPos);
+    gSelected.add(sat);
+    const star = new THREE.Mesh(
+      new THREE.SphereGeometry(0.038, 14, 12),
+      new THREE.MeshPhongMaterial({ color: 0xa7f3d0, emissive: 0x065f46 })
+    );
+    star.position.copy(nadir);
+    gSelected.add(star);
+    gSelected.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints([satPos, nadir]),
+      new THREE.LineBasicMaterial({ color: 0x34d399 })
+    ));
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(0.06, 0.09, 32),
+      new THREE.MeshBasicMaterial({ color: 0x6ee7b7, side: THREE.DoubleSide, transparent: true, opacity: 0.9 })
+    );
+    ring.position.copy(nadir.clone().multiplyScalar(1.005));
+    ring.lookAt(0, 0, 0);
+    gSelected.add(ring);
+  })();
+
+  // Step 2: ghost Ω orbits + lon band + equatorial ΔΩ arc
+  function buildOmegaSweepStatic() {
+    while (gOmega.children.length) gOmega.remove(gOmega.children[0]);
+    const lo0 = LON_MIN - PAD, lo1 = LON_MAX + PAD;
+
+    // Ghost orbits at candidate Ω (sparse — show plane rotation)
+    const ghostStep = 12;
+    for (let lon = lo0; lon <= lo1 + 1e-6; lon += ghostStep) {
+      const lonN = normalizeLon(lon);
+      const raan = raanForNadirLon(lonN);
+      gOmega.add(makeOrbitLine(raan, 0x38bdf8, 0.14, SAT_R));
+      const nadTick = new THREE.Mesh(
+        new THREE.SphereGeometry(0.016, 8, 8),
+        new THREE.MeshBasicMaterial({ color: 0x7dd3fc })
+      );
+      nadTick.position.copy(latLonToVec3(SAT_LAT, lonN, RE * 1.016));
+      gOmega.add(nadTick);
+    }
+
+    // Lon band of country + pad at SAT_LAT (where nadirs land)
+    const bandPts = [];
+    for (let lon = lo0; lon <= lo1; lon += 1) {
+      bandPts.push(latLonToVec3(SAT_LAT, normalizeLon(lon), RE * 1.014));
+    }
+    gOmega.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(bandPts),
+      new THREE.LineBasicMaterial({ color: 0x22d3ee, transparent: true, opacity: 0.85 })
+    ));
+
+    // Equatorial arc: span of candidate ΔΩ (filing → across band) — not a winner
+    const arcPts = [];
+    let a0 = FILING_LON, a1 = LON_MIN - PAD;
+    if (a1 > a0) a1 -= 360;
+    for (let t = 0; t <= 40; t++) {
+      arcPts.push(latLonToVec3(0, normalizeLon(a0 + (a1 - a0) * (t / 40)), RE * 1.02));
+    }
+    gOmega.add(new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(arcPts),
+      new THREE.LineBasicMaterial({ color: 0xf472b6, transparent: true, opacity: 0.75 })
+    ));
+
+    [LON_MIN, LON_MAX].forEach((lon) => {
+      const pts = [];
+      for (let lat = -35; lat <= 8; lat += 1) pts.push(latLonToVec3(lat, lon, RE * 1.014));
+      gOmega.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints(pts),
+        new THREE.LineBasicMaterial({ color: 0xf472b6, transparent: true, opacity: 0.55 })
+      ));
+    });
+  }
+  buildOmegaSweepStatic();
+
+  // Step 2: only sweep candidates — never lock a winner here
+  let omegaAnim = null;
+  function startOmegaAnim() {
+    omegaAnim = { t0: performance.now(), periodMs: 6000 };
+  }
+  function stopOmegaAnim() { omegaAnim = null; }
+
+  function updateOmegaAnim(now) {
+    if (!omegaAnim) return;
+    gSelected.visible = false;
+    const lo0 = LON_MIN - PAD, lo1 = LON_MAX + PAD;
+    const u = ((now - omegaAnim.t0) % omegaAnim.periodMs) / omegaAnim.periodMs;
+    let lon;
+    if (u < 0.25) {
+      lon = FILING_LON + (lo0 - FILING_LON) * (u / 0.25);
+    } else {
+      lon = lo0 + (lo1 - lo0) * ((u - 0.25) / 0.75);
+    }
+    lon = normalizeLon(lon);
+    const raanDeg = normalizeLon(raanForNadirLon(lon) / DEG);
+    setOrbitRaan(raanForNadirLon(lon), 0xf59e0b, 0.95);
+    buildSatNadir(lon);
+    showHud("sweep", lon, raanDeg);
+  }
+
+  // Sparse Ω candidates illustrated in step 3 (θ/φ on each)
+  const EVAL_LONS = [-70, -60, -53.5, -45, -38];
+
+  function buildThetaPhiAtLon(lon0, intoFilter) {
+    while (gThetaPhi.children.length) gThetaPhi.remove(gThetaPhi.children[0]);
+    if (intoFilter) {
+      while (gFilter.children.length) gFilter.remove(gFilter.children[0]);
+    }
+
+    const raan = raanForNadirLon(lon0);
+    const satPos = orbitPos(U_DEMO, raan, I_RAD, SAT_R);
+    const nadir = latLonToVec3(SAT_LAT, lon0, RE);
+    const radial = nadir.clone().normalize();
+    const east = new THREE.Vector3().crossVectors(new THREE.Vector3(0, 1, 0), radial).normalize();
+    if (east.lengthSq() < 1e-6) east.set(1, 0, 0);
+    const north = new THREE.Vector3().crossVectors(radial, east).normalize();
+
+    const phi0 = 28 * DEG;
+    for (let i = 0; i <= 36; i++) {
+      const th = (i / 36) * Math.PI * 2;
+      const groundHint = radial.clone().multiplyScalar(RE).add(
+        east.clone().multiplyScalar(RE * Math.sin(phi0) * Math.cos(th))
+      ).add(north.clone().multiplyScalar(RE * Math.sin(phi0) * Math.sin(th))).normalize().multiplyScalar(RE);
+      gThetaPhi.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([satPos.clone(), groundHint]),
+        new THREE.LineBasicMaterial({ color: 0xa78bfa, transparent: true, opacity: 0.16 })
+      ));
+    }
+
+    const kept = [], rejected = [];
+    for (let dlat = -22; dlat <= 22; dlat += 4) {
+      for (let dlon = -22; dlon <= 22; dlon += 4) {
+        if (dlat * dlat + dlon * dlon > 22 * 22) continue;
+        const lat = SAT_LAT + dlat;
+        const lon = normalizeLon(lon0 + dlon);
+        const p = latLonToVec3(lat, lon, RE * 1.012);
+        const inside = pointInBrazil(lat, lon);
+        (inside ? kept : rejected).push({ p, lat, lon });
+        gThetaPhi.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([satPos, p]),
+          new THREE.LineBasicMaterial({
+            color: 0xa78bfa, transparent: true, opacity: 0.12,
+          })
+        ));
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(0.016, 8, 8),
+          new THREE.MeshBasicMaterial({ color: 0xa78bfa })
+        );
+        m.position.copy(p);
+        gThetaPhi.add(m);
+      }
+    }
+
+    if (intoFilter) {
+      rejected.forEach(({ p }) => {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(0.022, 8, 8),
+          new THREE.MeshBasicMaterial({ color: 0xef4444 })
+        );
+        m.position.copy(p);
+        gFilter.add(m);
+      });
+      kept.forEach(({ p }) => {
+        const m = new THREE.Mesh(
+          new THREE.SphereGeometry(0.026, 10, 10),
+          new THREE.MeshBasicMaterial({ color: 0x4ade80 })
+        );
+        m.position.copy(p);
+        gFilter.add(m);
+      });
+      if (kept.length) {
+        const win = kept[Math.floor(kept.length / 2)];
+        const star = new THREE.Mesh(
+          new THREE.SphereGeometry(0.04, 12, 12),
+          new THREE.MeshPhongMaterial({ color: 0xfde047, emissive: 0xaa8800 })
+        );
+        star.position.copy(win.p);
+        gFilter.add(star);
+        gFilter.add(new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([satPos, win.p]),
+          new THREE.LineBasicMaterial({ color: 0xfde047 })
+        ));
+      }
+    }
+
+    setOrbitRaan(raan, 0xf59e0b, 0.9);
+    buildSatNadir(lon0);
+    return { kept: kept.length, rejected: rejected.length, raanDeg: normalizeLon(raan / DEG) };
+  }
+
+  // Step 3: cycle θ/φ evaluation across candidate Ω
+  let gridAnim = null;
+  let lastEvalIdx = -1;
+  function startGridAnim() {
+    gridAnim = { t0: performance.now(), periodMs: 1600 * EVAL_LONS.length };
+    lastEvalIdx = -1;
+  }
+  function stopGridAnim() { gridAnim = null; lastEvalIdx = -1; }
+
+  function updateGridAnim(now) {
+    if (!gridAnim) return;
+    gSelected.visible = false;
+    const u = ((now - gridAnim.t0) % gridAnim.periodMs) / gridAnim.periodMs;
+    const idx = Math.min(EVAL_LONS.length - 1, Math.floor(u * EVAL_LONS.length));
+    if (idx === lastEvalIdx) return;
+    lastEvalIdx = idx;
+    const lon = EVAL_LONS[idx];
+    const r = buildThetaPhiAtLon(lon, false);
+    showHud("eval", lon, r.raanDeg, `candidato ${idx + 1}/${EVAL_LONS.length}`);
+  }
+
+  // Prebuild filter view for illustrative WCG★ (DEMO_LON) — only shown in step 4
+  buildThetaPhiAtLon(DEMO_LON, true);
+
+  // ---- Step 5: multi-plane constellation + ΔΩ (longitude) alignment ----
+  const N_PLANES = 6;
+  const SATS_PER_PLANE = 4;
+  const PLANE_COLORS_BEFORE = [0x38bdf8, 0x0ea5e9, 0x0284c7, 0x0369a1, 0x075985, 0x0c4a6e];
+  const PLANE_COLORS_AFTER = [0xf472b6, 0xec4899, 0xdb2777, 0xe11d48, 0xf43f5e, 0xfb7185];
+
+  const gConstGhost = new THREE.Group(); globeRoot.add(gConstGhost); // filing (static)
+  const gConstLive = new THREE.Group(); globeRoot.add(gConstLive);   // animated
+  gConstGhost.visible = false;
+  gConstLive.visible = false;
+
+  function clearGroup(g) {
+    while (g.children.length) {
+      const c = g.children[0];
+      g.remove(c);
+      if (c.geometry) c.geometry.dispose();
+      if (c.material) c.material.dispose();
+    }
+  }
+
+  function addPlaneOrbit(group, raan, color, opacity) {
+    group.add(makeOrbitLine(raan, color, opacity, SAT_R));
+  }
+
+  function addSatMarker(group, pos, color, radius, emissive) {
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(radius, 12, 10),
+      new THREE.MeshPhongMaterial({
+        color,
+        emissive: emissive || 0x000000,
+        transparent: true,
+        opacity: 0.95,
+      })
+    );
+    m.position.copy(pos);
+    group.add(m);
+    return m;
+  }
+
+  // Exact WCG★ nadir from step 4 (sat = orbitPos(U_DEMO, RAAN_DEMO, …) ≡ gSelected)
+  const REF_NADIR_WCG = latLonToVec3(SAT_LAT, DEMO_LON, RE * 1.018);
+
+  /**
+   * Walker-like planes. frac∈[0,1] applies the same ΔΩ to every plane.
+   * Argument of latitude u is frozen per sat → only nadir longitude moves
+   * (same longitude shift for the whole constellation ground track).
+   */
+  function buildConstellationAtFrac(frac, intoGroup, mode) {
+    clearGroup(intoGroup);
+    const dRaan = (RAAN_DEMO - RAAN_FILING) * frac;
+    const colors = mode === "ghost" ? PLANE_COLORS_BEFORE : PLANE_COLORS_AFTER;
+    const opOrbit = mode === "ghost" ? 0.22 : 0.55;
+
+    for (let p = 0; p < N_PLANES; p++) {
+      // Plane 0 = reference plane (WCG★ orbit family)
+      const raan0 = RAAN_FILING + (2 * Math.PI * p) / N_PLANES;
+      const raan = raan0 + dRaan;
+      const col = colors[p % colors.length];
+      addPlaneOrbit(intoGroup, raan, col, opOrbit);
+
+      for (let s = 0; s < SATS_PER_PLANE; s++) {
+        const isRef = (p === 0 && s === 0);
+        // Fixed u: ref sat stays at WCGA latitude; others keep relative phasing.
+        // Only Ω changes → pure longitude displacement of every nadir.
+        let u;
+        if (isRef) {
+          u = U_DEMO;
+        } else {
+          const slot = s + (p === 0 ? 1 : 0); // skip u=U_DEMO slot on plane 0
+          u = (2 * Math.PI * slot) / SATS_PER_PLANE + (p * 0.35) + 0.4;
+        }
+        const pos = orbitPos(u, raan, I_RAD, SAT_R);
+        if (mode === "ghost") {
+          addSatMarker(intoGroup, pos, isRef ? 0xcbd5e1 : 0x64748b, isRef ? 0.032 : 0.022, 0x1e293b);
+        } else if (isRef) {
+          addSatMarker(intoGroup, pos, 0xfde047, 0.055, 0xaa8800);
+          if (frac > 0.92) {
+            intoGroup.add(new THREE.Line(
+              new THREE.BufferGeometry().setFromPoints([pos, REF_NADIR_WCG]),
+              new THREE.LineBasicMaterial({ color: 0xfde047, transparent: true, opacity: 0.9 })
+            ));
+          }
+        } else {
+          addSatMarker(intoGroup, pos, col, 0.028, 0x000000);
+        }
+      }
+    }
+  }
+
+  // Static filing ghost (always Δ=0)
+  buildConstellationAtFrac(0, gConstGhost, "ghost");
+
+  let alignAnim = null;
+  function startAlignAnim() {
+    alignAnim = { t0: performance.now(), periodMs: 6500 };
+  }
+  function stopAlignAnim() { alignAnim = null; }
+
+  function easeInOut(t) {
+    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  }
+
+  function updateAlignAnim(now) {
+    if (!alignAnim) return;
+    const u = ((now - alignAnim.t0) % alignAnim.periodMs) / alignAnim.periodMs;
+    // 0–0.2 hold filing; 0.2–0.75 animate; 0.75–1 hold aligned
+    let frac;
+    if (u < 0.18) frac = 0;
+    else if (u < 0.75) frac = easeInOut((u - 0.18) / 0.57);
+    else frac = 1;
+    buildConstellationAtFrac(frac, gConstLive, "live");
+    showHud("align", DEMO_LON, OMEGA_STAR_DEG, { frac });
+  }
+
+  // Visibility by step
+  function setStep(step) {
+    step = Math.max(0, Math.min(5, step));
+    currentStep = step;
+    stopOmegaAnim();
+    stopGridAnim();
+    stopAlignAnim();
+    document.querySelectorAll(".step-btn").forEach((b) => {
+      b.classList.toggle("active", Number(b.dataset.step) === step);
+    });
+    const S = STEPS[step];
+    document.getElementById("scene-title").innerHTML =
+      S.title + "<small>" + S.blurb + "</small>";
+    document.getElementById("panel-title").textContent = S.title;
+    document.getElementById("panel-sub").textContent = S.blurb;
+    document.getElementById("panel-body").innerHTML = S.panel;
+
+    const f2 = document.getElementById("panel-omega-formula");
+    if (f2) {
+      f2.innerHTML =
+        `Ω_filing = ${fmtDeg(OMEGA_FILING_DEG)} · lon₀ = ${fmtDeg(FILING_LON)}<br>` +
+        `lon_tgt ∈ [${fmtDeg(LON_MIN - PAD)}, ${fmtDeg(LON_MAX + PAD)}]<br>` +
+        `passo ≈ max(s1503_step, 0.5°) · <b>nenhum Ω★ ainda</b>`;
+    }
+    const f3 = document.getElementById("panel-omega-star");
+    if (f3) {
+      f3.innerHTML =
+        `para cada Ω candidato → grade θ/φ<br>` +
+        `ex.: ${EVAL_LONS.map((l) => fmtDeg(l)).join(", ")} (demo)`;
+    }
+    const f5 = document.getElementById("panel-align-formula");
+    if (f5) {
+      f5.innerHTML =
+        `<b style="color:#34d399">ON:</b> ΔΩ = ${fmtDeg(DELTA_OMEGA_DEG)} → todas órbitas ON<br>` +
+        `OFF/repeating mantêm Ω filed · then ΔM<br>` +
+        `<b style="color:#94a3b8">OFF:</b> skip ΔΩ · keep filing Ω · still ΔM<br>` +
+        `demo ON: ref → (${SAT_LAT}°, ${fmtDeg(DEMO_LON)}) · Ω★ = ${fmtDeg(OMEGA_STAR_DEG)}`;
+    }
+
+    countryGroup.visible = true;
+    gOrbitFiling.visible = step === 1 || step === 2;
+    gSatFiling.visible = step === 1 || step === 2;
+    gOrbit.visible = step !== 4 && step !== 5;
+    gSat.visible = step >= 1 && step !== 4 && step !== 5;
+    gSelected.visible = false;
+    gOmega.visible = step === 2;
+    gThetaPhi.visible = step === 3;
+    gFilter.visible = step === 4;
+    gConstGhost.visible = step === 5;
+    gConstLive.visible = step === 5;
+
+    if (step === 0 || step === 1) {
+      showHud("none");
+      setOrbitRaan(RAAN_FILING, step === 0 ? 0x94a3b8 : 0xf59e0b, 0.85);
+      if (step >= 1) buildSatNadir(FILING_LON);
+    } else if (step === 2) {
+      startOmegaAnim();
+    } else if (step === 3) {
+      startGridAnim();
+      updateGridAnim(performance.now());
+    } else if (step === 4) {
+      gOrbit.visible = false;
+      gSat.visible = false;
+      gSelected.visible = true;
+      buildThetaPhiAtLon(DEMO_LON, true);
+      gThetaPhi.visible = false;
+      showHud("winner");
+    } else {
+      // Step 5 — constellation alignment onto the same WCG★ pose as step 4
+      gOrbit.visible = false;
+      gSat.visible = false;
+      gSelected.visible = true; // green target = exact step-4 sat/nadir
+      gFilter.visible = true;
+      buildThetaPhiAtLon(DEMO_LON, true);
+      gThetaPhi.visible = false;
+      startAlignAnim();
+      updateAlignAnim(performance.now());
+    }
+  }
+
+  let currentStep = 0;
+  document.querySelectorAll(".step-btn").forEach((b) => {
+    b.addEventListener("click", () => { stopPlay(); setStep(Number(b.dataset.step)); });
+  });
+
+  let playTimer = null;
+  function stopPlay() {
+    if (playTimer) { clearInterval(playTimer); playTimer = null; }
+    document.getElementById("btn-play").textContent = "▶ Auto-play";
+  }
+  document.getElementById("btn-play").addEventListener("click", () => {
+    if (playTimer) { stopPlay(); return; }
+    document.getElementById("btn-play").textContent = "⏸ Pausar";
+    playTimer = setInterval(() => {
+      setStep((currentStep + 1) % 6);
+    }, 6000);
+  });
+  document.getElementById("btn-reset").addEventListener("click", () => {
+    camera.position.set(2.6, 1.1, 2.4);
+    controls.target.set(0, 0, 0);
+    controls.update();
+  });
+
+  function onResize() {
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  window.addEventListener("resize", onResize);
+
+  function animate(now) {
+    requestAnimationFrame(animate);
+    controls.update();
+    const t = now || performance.now();
+    updateOmegaAnim(t);
+    updateGridAnim(t);
+    updateAlignAnim(t);
+    renderer.render(scene, camera);
+  }
+
+  setStep(0);
+  animate();
+})();
+</script>
+</body>
+</html>

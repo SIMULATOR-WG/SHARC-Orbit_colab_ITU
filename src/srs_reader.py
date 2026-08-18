@@ -224,9 +224,10 @@ def detect_orbit_config_raw(
     2. Parent-folder token ``Config<N>`` in the path.
     3. Filename token ``Config<N>``.
 
-    Returns ``{"config_label": int | None, "source": str | None,
-    "is_multi": bool, "nbr_config": int}``. ``config_label`` stays ``None``
-    for single-config filings or when no label is found. Geometry (e.g. a
+    Returns ``{"config_label": int | None, "orbit_set_id": int | None,
+    "source": str | None, "is_multi": bool, "nbr_config": int}``.
+    ``orbit_set_id`` is set only from the SRS field (or ``orbit_set`` table);
+    ``config_label`` may still fall back to folder/filename. Geometry (e.g. a
     config spanning several inclinations) intentionally plays no role — only
     declared labels are trusted.
     """
@@ -234,13 +235,16 @@ def detect_orbit_config_raw(
 
     out = {
         "config_label": None,
+        "orbit_set_id": None,
         "source": None,
         "is_multi": str(multi_config_type or "").upper() == "M",
         "nbr_config": int(nbr_config or 0),
     }
     sets = {int(s) for s in orbit_set_ids if int(s) > 0}
     if len(sets) == 1:
-        out["config_label"] = int(next(iter(sets)))
+        sid = int(next(iter(sets)))
+        out["config_label"] = sid
+        out["orbit_set_id"] = sid
         out["source"] = "orbit_set_id"
         return out
     if len(sets) > 1:
@@ -270,11 +274,14 @@ def detect_orbit_config(mdb_path: str, system: "SRSNonGeoSystem") -> dict:
 
     See :func:`detect_orbit_config_raw` for the resolution rules.
     """
+    ids = {p.orbit_set_id for p in system.orbit_planes}
+    if not any(int(s) > 0 for s in ids):
+        ids |= _orbit_set_table_ids(mdb_path, system.ntc_id)
     return detect_orbit_config_raw(
         mdb_path,
         system.multi_config_type,
         system.nbr_config,
-        {p.orbit_set_id for p in system.orbit_planes},
+        ids,
     )
 
 
@@ -663,6 +670,47 @@ def _parse_int(val: str, default: int = 0) -> int:
         return default
 
 
+# AP4 A.4.b.3.d — SNS `orbit.orbit_set_id`. Some extracts shorten the name.
+_ORBIT_SET_ID_KEYS = ("orbit_set_id", "orb_set_id")
+
+
+def _row_orbit_set_id(row: dict) -> int:
+    """Read A.4.b.3.d from an ``orbit`` / ``orbit_set`` row (0 if absent)."""
+    lower = {str(k).lower(): v for k, v in (row or {}).items()}
+    for key in _ORBIT_SET_ID_KEYS:
+        if key not in lower:
+            continue
+        raw = lower[key]
+        if raw is None or str(raw).strip().strip('"') == "":
+            continue
+        return _parse_int(str(raw), default=0)
+    return 0
+
+
+def _orbit_set_table_ids(mdb_path: str, ntc_id: str | None) -> set[int]:
+    """IDs declared in table ``orbit_set`` (when ``orbit.orbit_set_id`` is empty)."""
+    if not os.path.isfile(mdb_path):
+        return set()
+    db = _open_access(mdb_path)
+    catalog = getattr(db, "catalog", None) or {}
+    if "orbit_set" not in catalog:
+        return set()
+    want = str(ntc_id).strip().strip('"') if ntc_id else None
+    ids: set[int] = set()
+    try:
+        rows = _run_mdb_export(mdb_path, "orbit_set") or []
+    except Exception:  # noqa: BLE001
+        return ids
+    for row in rows:
+        row_ntc = str(row.get("ntc_id") or "").strip().strip('"')
+        if want and row_ntc not in ("", want):
+            continue
+        sid = _row_orbit_set_id(row)
+        if sid > 0:
+            ids.add(sid)
+    return ids
+
+
 def _parse_bool(val: str) -> bool:
     if val is None:
         return False
@@ -795,7 +843,7 @@ def read_srs_mdb(mdb_path: str, ntc_id: str | None = None) -> SRSNonGeoSystem:
             long_asc_deg=_parse_float(row.get("long_asc", "0")),
             keep_range_deg=_parse_float(row.get("keep_rnge", "0")),
             f_sun_synch=_parse_bool(row.get("f_sunsynch", "")),
-            orbit_set_id=_parse_int(row.get("orbit_set_id", "0")),
+            orbit_set_id=_row_orbit_set_id(row),
         )
         system.orbit_planes.append(plane)
 
@@ -808,12 +856,11 @@ def read_srs_mdb(mdb_path: str, ntc_id: str | None = None) -> SRSNonGeoSystem:
     # per-config and campaigns can pair the sibling dbs of the same notice.
     if system.multi_config_type == "M":
         _cfg_info = detect_orbit_config(mdb_path, system)
-        logger.warning(
-            "Notice %s declares %d mutually-exclusive configurations "
-            "(multi_config_type=M); this db carries configuration %s "
-            "(source: %s). EPFD must be evaluated PER configuration — do not "
-            "aggregate this db with its sibling configuration dbs.",
-            system.ntc_id, system.nbr_config,
+        logger.info(
+            "Notice %s (%s) declares %d mutually-exclusive configurations; "
+            "this db carries configuration %s (source: %s). EPFD must be "
+            "evaluated PER configuration — do not aggregate sibling dbs.",
+            system.ntc_id, system.sat_name or "—", system.nbr_config,
             _cfg_info["config_label"] if _cfg_info["config_label"] is not None else "?",
             _cfg_info["source"] or "not found",
         )
@@ -1836,6 +1883,10 @@ def srs_to_constellation_config(system: SRSNonGeoSystem) -> dict:
             "min_operating_height_km": (
                 plane.op_height_km if plane.op_height_km > 0.0 else 0.0
             ),
+            # Per-plane §D4.6.1 flags (country WCGA RAAN sweep is decided per
+            # orbit shape from these — filings may mix repeating / free shells).
+            "f_stn_keep": bool(plane.f_stn_keep),
+            "rpt_period_s": float(plane.rpt_period_s or 0.0),
         })
 
     return config

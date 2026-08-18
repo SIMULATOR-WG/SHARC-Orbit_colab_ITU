@@ -45,6 +45,24 @@ def _wcga_remote_task(worker_fn: Callable, args: tuple, init: dict[str, Any]) ->
             _w.set_alpha_method(alpha_method)
         except Exception:  # noqa: BLE001
             pass
+    # Optional country-constrained ES domain (country single-entry only).
+    country_codes = init.get("country_codes") or ""
+    if country_codes:
+        os.environ["WCG_COUNTRY_CODES"] = str(country_codes)
+    else:
+        os.environ.pop("WCG_COUNTRY_CODES", None)
+    for key, init_key in (
+        ("WCG_ES_LAT_MIN", "es_lat_min"),
+        ("WCG_ES_LAT_MAX", "es_lat_max"),
+        ("WCG_ES_LON_MIN", "es_lon_min"),
+        ("WCG_ES_LON_MAX", "es_lon_max"),
+        ("WCG_COUNTRY_RAAN_SWEEP", "country_raan_sweep"),
+    ):
+        val = init.get(init_key) or ""
+        if val:
+            os.environ[key] = str(val)
+        else:
+            os.environ.pop(key, None)
     # Restore any broadcast ObjectRefs (oe_ref / common shipped once).
     return worker_fn(cluster.resolve_refs_in_tuple(args))
 

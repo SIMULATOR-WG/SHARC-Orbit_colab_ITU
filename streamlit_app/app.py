@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from lib import storage, theme, engine
+from lib import storage, theme, engine, git_revision
 
 st.set_page_config(
     page_title="SHARC-Orbit",
@@ -24,10 +24,23 @@ storage.init_db()
 
 # ─── Home page (rendered as a function, registered via st.Page) ─────────────
 def home() -> None:
-    st.title(":material/satellite_alt: SHARC-Orbit")
-    st.caption(
-        "Python-only UI · ITU-R S.1503-4 (single-entry) · Resolution 76 (aggregate, methods under study)"
-    )
+    _rev = git_revision()
+    _ver = str(_rev["label"])
+    _on_main = str(_rev["branch"]) in ("main", "master")
+    tcol, vcol = st.columns([4, 2])
+    with tcol:
+        st.title(":material/satellite_alt: SHARC-Orbit")
+        st.caption(
+            "Python-only UI · ITU-R S.1503-4 (single-entry) · "
+            "Resolution 76 (aggregate, methods under study)"
+        )
+    with vcol:
+        st.markdown(
+            f"<div style='text-align:right;padding-top:8px'>"
+            f"{theme.pill(_ver, 'ok' if _on_main and not _rev['dirty'] else 'warn')}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
     st.warning(
         "**System under development** — currently intended for experimentation "
         "only. Results must not be used for normative or decision-making purposes.",
@@ -113,7 +126,7 @@ Use the **left sidebar** to navigate between pages.
 </style>
 <div class="so-footer">
     <div class="so-row">
-        <strong>SHARC-Orbit</strong> · ITU-R S.1503-4 · Resolution 76
+        <strong>SHARC-Orbit</strong> · {_ver} · ITU-R S.1503-4 · Resolution 76
         · Python-only Streamlit UI
     </div>
     <div class="so-row">
@@ -150,6 +163,8 @@ PAGES = [
     st.Page("pages/F_Mask_Generator.py", title="Mask generator", icon=":material/auto_fix_high:",
               url_path="mask_generator"),
     st.Page("pages/3_Single_entry.py",  title="Single-entry", icon=":material/looks_one:"),
+    st.Page("pages/G_Country_Single_entry.py", title="Country single-entry",
+              icon=":material/public:", url_path="country_single_entry"),
     st.Page("pages/4_Aggregate.py",     title="Aggregate",    icon=":material/grid_view:"),
     st.Page("pages/5_Launcher.py",      title="Launcher",     icon=":material/play_circle:"),
     st.Page("pages/6_Runs.py",          title="Runs",         icon=":material/list:"),

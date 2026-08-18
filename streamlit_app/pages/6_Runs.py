@@ -51,7 +51,31 @@ def _load_config(run: dict) -> None:
         # Article 22 scenario (carried so reload reproduces the exact run).
         "reference_bandwidth_khz", "simulation_frequency_ghz",
     ]
-    if run["kind"] == "single":
+    if run["kind"] == "single" and (
+        run.get("method") == "country_constrained"
+        or params.get("study_mode") == "country_constrained"
+    ):
+        keys = common_keys + [
+            "mask_id", "country_codes",
+            "s1503_trail_all_points", "restrict_emitters_to_sim_band",
+            "disable_gso_min_elevation", "min_duration_s",
+        ]
+        state = {k: params[k] for k in keys if k in params}
+        state["system_id"] = params.get("system_id")
+        state["artificial_prec_mode"] = ap_mode
+        if any(state.get(k) is not None for k in
+               ("reference_bandwidth_khz", "simulation_frequency_ghz",
+                "mask_id")):
+            state["art22_from_reload"] = True
+        set_persisted_state("country_wcg.form", state)
+        sid = params.get("system_id")
+        if sid and sid not in _valid:
+            st.toast("Original filing was deleted — pick a system.",
+                     icon=":material/warning:")
+        elif sid:
+            set_current_system_id(sid)
+        st.switch_page("pages/G_Country_Single_entry.py")
+    elif run["kind"] == "single":
         keys = common_keys + [
             "s1503_trail_all_points", "wcg_manual",
             "wcg_manual_es_lat", "wcg_manual_es_lon", "wcg_manual_gso_lon",

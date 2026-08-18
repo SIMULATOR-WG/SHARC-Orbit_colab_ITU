@@ -185,6 +185,7 @@ prev = use_persisted_state("s1588.form", {
     "geometry_es_lon": "",
     "geometry_gso_lon": "",
     "wcga_s1503": True,
+    "wcga_no_mask_symmetry": True,
     "s1503_step_deg": 1.0,
     "dual_time_step_mode": "on",
     "fine_time_step_s": "",
@@ -210,6 +211,11 @@ if not prev.get("_auto_elev_migrated"):
     if prev.get("min_elevation_deg") in (10.0, 10, "10.0", "10"):
         prev["min_elevation_deg"] = None
     prev["_auto_elev_migrated"] = True
+    set_persisted_state("s1588.form", prev)
+if not prev.get("_full_theta_default_v1"):
+    prev = dict(prev)
+    prev["wcga_no_mask_symmetry"] = True
+    prev["_full_theta_default_v1"] = True
     set_persisted_state("s1588.form", prev)
 
 st.subheader("1. Systems")
@@ -713,10 +719,10 @@ with st.form("s1588_form"):
             )
             wcga_no_mask_symmetry = st.checkbox(
                 "Full θ — no mask symmetry",
-                value=bool(prev.get("wcga_no_mask_symmetry", False)),
-                help="Engine key: `wcga_no_mask_symmetry`. By default the WCGA "
-                     "assumes a mask symmetric in Δlon (θ ∈ [0, π]). Enable for "
-                     "asymmetric masks (slower).",
+                value=bool(prev.get("wcga_no_mask_symmetry", True)),
+                help="Engine key: `wcga_no_mask_symmetry`. DEFAULT ON: full θ "
+                     "(no Δlon symmetry). Uncheck to restrict θ ∈ [0, π] when "
+                     "the mask is symmetric in Δlon (faster).",
             )
             apply_table8_egso = st.checkbox(
                 "Apply Table 8 εGSO gate (S.1503-4)",
@@ -783,7 +789,7 @@ with st.form("s1588_form"):
                             else "s1503_4")
     else:
         wcga_s1503 = bool(prev.get("wcga_s1503", True))
-        wcga_no_mask_symmetry = bool(prev.get("wcga_no_mask_symmetry", False))
+        wcga_no_mask_symmetry = bool(prev.get("wcga_no_mask_symmetry", True))
         apply_table8_egso = not bool(prev.get("disable_gso_min_elevation", False))
         s1503_step = float(prev.get("s1503_step_deg", 1.0))
         gso_lon_mode = prev.get("gso_longitude_mode", "arc_optimal")

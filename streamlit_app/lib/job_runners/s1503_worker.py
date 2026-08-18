@@ -173,8 +173,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         wcg_search_cfg["s1503_step_deg"] = float(params["s1503_step_deg"])
         # legacy θ/φ grid fallback uses phi_step_deg — keep consistent.
         wcg_search_cfg["phi_step_deg"] = float(params["s1503_step_deg"])
-    if params.get("wcga_no_mask_symmetry"):
+    if params.get("wcga_no_mask_symmetry", True):
         wcg_search_cfg["s1503_symmetric_mask"] = False
+    else:
+        wcg_search_cfg["s1503_symmetric_mask"] = True
     if params.get("s1503_trail_all_points"):
         wcg_search_cfg["s1503_trail_all_points"] = True
     if params.get("gso_longitude_mode"):
@@ -387,6 +389,7 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             "type": _mc.get("type"),
             "nbr_config": _mc.get("nbr_config"),
             "config_label": _mc.get("config_label"),
+            "orbit_set_id": _mc.get("orbit_set_id"),
             "label_source": _mc.get("source"),
         }
 
@@ -464,6 +467,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             "epfd_dBW": float(wcg_dl.epfd_dBW),
             "elevation_deg": float(wcg_dl.elevation_deg),
         }
+        # Present only for country-constrained WCGA (ΔΩ ground-track alignment).
+        _cw_align = sim.get("_country_wcg_alignment")
+        if _cw_align:
+            sim_data["country_wcg_alignment"] = dict(_cw_align)
 
         # WCG explanation: decompose the single-entry EPFD and say WHY this
         # geometry won — an isolated EPFD peak vs the angular-velocity tie-break

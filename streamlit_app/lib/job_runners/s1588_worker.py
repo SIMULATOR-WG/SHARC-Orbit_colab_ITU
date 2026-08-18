@@ -281,8 +281,10 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
     wcg_cfg = cfg.setdefault("wcg_search", {})
     # Default to S.1503-4 §D.3.1 normative algorithm.
     wcg_cfg["use_s1503_algo"] = bool(common.get("wcga_s1503", True))
-    if common.get("wcga_no_mask_symmetry"):
+    if common.get("wcga_no_mask_symmetry", True):
         wcg_cfg["s1503_symmetric_mask"] = False
+    else:
+        wcg_cfg["s1503_symmetric_mask"] = True
     if common.get("s1503_step_deg") is not None:
         wcg_cfg["s1503_step_deg"] = float(common["s1503_step_deg"])
         wcg_cfg["phi_step_deg"] = float(common["s1503_step_deg"])

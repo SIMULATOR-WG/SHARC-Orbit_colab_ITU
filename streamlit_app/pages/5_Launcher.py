@@ -81,7 +81,7 @@ prev = use_persisted_state("launcher.form", {
     "service": "FSS",
     "es_antenna_diameter_m": 1.2,
     "wcga_s1503": True,
-    "wcga_no_mask_symmetry": False,
+    "wcga_no_mask_symmetry": True,
     "s1503_step_deg": 1.0,
     "gso_longitude_mode": "arc_optimal",
     "alpha_method": "analytical",
@@ -110,6 +110,11 @@ if not prev.get("_auto_elev_migrated"):
     if prev.get("min_elevation_deg") in (10.0, 10, "10.0", "10"):
         prev["min_elevation_deg"] = None
     prev["_auto_elev_migrated"] = True
+    set_persisted_state("launcher.form", prev)
+if not prev.get("_full_theta_default_v1"):
+    prev = dict(prev)
+    prev["wcga_no_mask_symmetry"] = True
+    prev["_full_theta_default_v1"] = True
     set_persisted_state("launcher.form", prev)
 _opt_ids = [s["id"] for s in systems]
 _methods_all = ["method_1", "method_2", "method_3", "method_4"]
@@ -309,8 +314,10 @@ with st.form("campaign_form"):
         )
         wcga_no_mask_symmetry = st.checkbox(
             "Full θ — no mask symmetry",
-            value=bool(prev.get("wcga_no_mask_symmetry", False)),
-            help="Engine key: `wcga_no_mask_symmetry`. Enable for asymmetric masks.",
+            value=bool(prev.get("wcga_no_mask_symmetry", True)),
+            help="Engine key: `wcga_no_mask_symmetry`. DEFAULT ON: full θ "
+                 "(no Δlon symmetry). Uncheck to restrict θ ∈ [0, π] when "
+                 "the mask is symmetric in Δlon (faster).",
         )
         apply_table8_egso = st.checkbox(
             "Apply Table 8 εGSO gate (S.1503-4)",

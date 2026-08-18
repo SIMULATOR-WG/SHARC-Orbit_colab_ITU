@@ -28,6 +28,10 @@ class OrbitalElements:
     omega: float      # Argument of perigee ω (rad)
     M: float          # Mean anomaly M (rad)
     min_operating_height_km: float = 0.0  # H_min (SRS); 0 = no altitude filter
+    # SRS §D4.6.1 ground-track flags (per plane). Used by country-constrained
+    # WCGA to decide RAAN (Ω) sweep per orbit shape when mode = auto.
+    f_stn_keep: bool = False
+    rpt_period_s: float = 0.0
 
     # J2 secular derivatives (computed at initialization)
     raan_dot: float = field(default=0.0, init=False)
@@ -80,6 +84,8 @@ class OrbitalElements:
         child.M_dot = self.M_dot
         child.n = self.n
         child.min_operating_height_km = self.min_operating_height_km
+        child.f_stn_keep = bool(self.f_stn_keep)
+        child.rpt_period_s = float(self.rpt_period_s or 0.0)
         return child
 
     @classmethod
@@ -93,6 +99,8 @@ class OrbitalElements:
         M_deg: float,
         *,
         min_operating_height_km: float = 0.0,
+        f_stn_keep: bool = False,
+        rpt_period_s: float = 0.0,
     ) -> "OrbitalElements":
         return cls(
             a=a, e=e,
@@ -101,6 +109,8 @@ class OrbitalElements:
             omega=omega_deg * DEG2RAD,
             M=M_deg * DEG2RAD,
             min_operating_height_km=float(min_operating_height_km or 0.0),
+            f_stn_keep=bool(f_stn_keep),
+            rpt_period_s=float(rpt_period_s or 0.0),
         )
 
 

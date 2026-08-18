@@ -96,6 +96,50 @@ def launch_s1503(*, system_id: str, params: dict[str, Any]) -> str:
     return run_id
 
 
+def launch_country_wcg(*, system_id: str, params: dict[str, Any]) -> str:
+    """Launch a country-constrained single-entry run.
+
+    Runs the same S.1503-4 WCGA + EPFD↓ pipeline as Single-entry, with the
+    WCGA ES domain restricted to ``params['country_codes']``. Aggregate /
+    Single-entry leave that filter unset and are unchanged.
+    """
+    sys_row = _system_to_filing(system_id)
+    if not sys_row:
+        raise ValueError(f"system {system_id} not found")
+    codes = list(params.get("country_codes") or [])
+    if not codes:
+        raise ValueError("country_codes is required")
+    full = dict(params)
+    full.update({
+        "srs_path": sys_row["srs_path"],
+        "mask_path": sys_row.get("mask_path"),
+        "srs_relpath": sys_row.get("srs_relpath"),
+        "mask_relpath": sys_row.get("mask_relpath"),
+        "mask_id": params.get("mask_id") if params.get("mask_id") is not None
+                   else sys_row.get("mask_id"),
+        "ntc_id": sys_row.get("ntc_id"),
+        "system_id": system_id,
+        "country_codes": codes,
+        "study_mode": "country_constrained",
+    })
+    run_id = storage.create_run(
+        kind="single", method="country_constrained", params=full,
+    )
+    pp = _params_path(run_id)
+    pp.parent.mkdir(parents=True, exist_ok=True)
+    full["result_path"] = str(pp.parent)
+    pp.write_text(json.dumps(full, indent=2), encoding="utf-8")
+    h = workers.spawn(
+        run_id,
+        args=[sys.executable, "-m",
+              "streamlit_app.lib.job_runners.country_wcg_worker", str(pp)],
+        cwd=REPO_ROOT,
+    )
+    _persist_worker_pid(run_id, h.proc.pid)
+    storage.update_run(run_id, status="running", progress_pct=0.0)
+    return run_id
+
+
 def launch_s1503_manual(*, manual_cfg: dict[str, Any],
                         params: dict[str, Any]) -> str:
     """Launch a single S.1503 run for a MANUAL/parametric system (R3/R4).
