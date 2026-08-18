@@ -1177,7 +1177,12 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
                 unique_orbits[key] = idx
         _emit(f"[method_3] {len(unique_orbits)} unique orbit(s) to evaluate")
         step_deg = float(common.get("s1503_step_deg") or 1.0)
-        n_jobs = int(cfgs[0]["simulation"].get("n_jobs", 1) or 1)
+        # -1 = all cores (matches run_wcg_downlink's own default, src/main.py).
+        # Safe here: the orbit loop below is sequential — nothing else runs
+        # concurrently to oversubscribe against (unlike _run_at_geometry /
+        # _system_contribution_task, dispatched many-at-once via Ray, which
+        # correctly keep n_jobs=1 per task).
+        n_jobs = int(cfgs[0]["simulation"].get("n_jobs", -1) or -1)
         best_wcg = None
         for k, (key, ref_idx) in enumerate(unique_orbits.items()):
             oe_ref = combined[ref_idx]
@@ -1230,7 +1235,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         min_elevation_deg=min_elev,
         tstep_s=dt,
         nsteps=num_steps,
-        n_jobs=int(cfgs[0]["simulation"].get("n_jobs", 1)),
+        # -1 = all cores (matches run_wcg_downlink's default) — this is the
+        # one joint simulation for the whole run, nothing else contends for
+        # cores at this point.
+        n_jobs=int(cfgs[0]["simulation"].get("n_jobs", -1) or -1),
         strict_max_co_freq_total=caps0["strict_max_co_freq_total"],
         strict_exclusion_zone=caps0["strict_exclusion_zone"],
         min_angle_at_es_deg=caps0["min_angle_at_es_deg"],
