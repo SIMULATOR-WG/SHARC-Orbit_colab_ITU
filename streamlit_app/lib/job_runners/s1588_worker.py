@@ -374,6 +374,86 @@ def _bw_correction_db(cfg: dict[str, Any], mask: Any) -> float:
     return 10.0 * _math.log10(limit_bw_khz / mask_bw_khz)
 
 
+def _apply_orbit_dynamics(
+    cfg: dict[str, Any], constellation: list, t_run_s: float,
+) -> list:
+    """Fold this filing's S.1503-4 §D6.3 orbit case (artificial precession /
+    admin-supplied precession / station-keeping wobble) into a COPY of its
+    own satellites' orbital elements — instead of the ``raan_dot_artificial
+    _rad_s`` / ``raan_dot_override_rad_s`` / ``wdelta_deg`` scalars
+    ``run_epfd_simulation`` accepts, which apply ONE shared value to an
+    entire propagation batch.
+
+    ``_run_at_geometry`` (method_2/4, single filing per call) passes those
+    scalars straight through and that's correct there. method_3 fuses
+    satellites from MULTIPLE filings into one ``combined`` list and
+    propagates them in a single batch call — passing a scalar there would
+    force every system to share ONE filing's precession, silently dropping
+    the others' (or, worse, misapplying one system's rate to another's
+    satellites). Each Case is a constant (Case 1/3) or affine-in-t (Case 2)
+    correction to (raan, raan_dot, omega_dot, M_dot), so it folds cleanly
+    into per-satellite elements computed once, upfront — the batch
+    propagator then just reads each satellite's own ``raan_dot`` as usual,
+    no per-system branching needed inside the hot loop.
+
+    ``t_run_s``: the run's ACTUAL total duration (the joint T_run for
+    method_3, shared by every satellite regardless of system) — Case 1/2
+    rates are defined relative to it (§D6.3.5/§D6.3.4: sweep exactly one
+    revolution / ±Wdelta over the run that's actually happening).
+
+    Mirrors ``_run_at_geometry``'s per-filing Case resolution (same cfg
+    fields, same D6.3.6 Case-3-over-Case-1 precedence).
+    """
+    import copy
+    import math as _math
+
+    sim = cfg.get("simulation") or {}
+    ngso = cfg.get("non_gso") or {}
+
+    raan_dot_override = None
+    if sim.get("use_precession_mdb"):
+        pday = float(ngso.get("_precession_deg_day", 0.0) or 0.0)
+        if pday:
+            raan_dot_override = (pday * _math.pi / 180.0) / 86400.0
+
+    artificial_precession = bool(sim.get("artificial_precession"))
+    if raan_dot_override is not None and artificial_precession:
+        # §D6.3.6: the three orbit cases are mutually exclusive — admin
+        # precession (Case 3) takes precedence over artificial (Case 1).
+        artificial_precession = False
+    raan_dot_artificial = (
+        (2.0 * _math.pi) / t_run_s if (artificial_precession and t_run_s > 0) else 0.0
+    )
+
+    wdelta_deg = 0.0
+    if sim.get("apply_station_keeping_wdelta") and ngso.get("_f_stn_keep"):
+        wdelta_deg = float(ngso.get("_keep_range_deg", 0.0) or 0.0)
+    wdelta_rad = _math.radians(wdelta_deg) if wdelta_deg else 0.0
+
+    if raan_dot_override is None and raan_dot_artificial == 0.0 and wdelta_rad == 0.0:
+        return constellation  # nothing to fold in — plain J2 propagation
+
+    out = []
+    for oe in constellation:
+        oe2 = copy.copy(oe)
+        if raan_dot_override is not None:
+            # Case 3 (§D6.3.6 eqs 51-53): ω held constant, M at point-mass n0.
+            oe2.raan_dot = raan_dot_override
+            oe2.omega_dot = 0.0
+            oe2.M_dot = oe.n
+        else:
+            oe2.raan_dot = oe.raan_dot + raan_dot_artificial
+        if wdelta_rad != 0.0 and t_run_s > 0.0:
+            # §D6.3.4: raan(t) = raan0 + raan_dot*t + Wdelta*(2t/Trun - 1)
+            #                   = (raan0 - Wdelta) + (raan_dot + 2Wdelta/Trun)*t
+            # — affine in t, so it folds into raan0/raan_dot exactly (no
+            # need for propagate_and_to_ecef_batch's time-varying term).
+            oe2.raan = oe.raan - wdelta_rad
+            oe2.raan_dot = oe2.raan_dot + (2.0 * wdelta_rad / t_run_s)
+        out.append(oe2)
+    return out
+
+
 def _s1503_normative_caps(cfg: dict[str, Any]) -> dict[str, Any]:
     """MAX_CO_FREQ (Steps 19-22) + OR/exclusion-zone gates for one filing.
 
@@ -691,6 +771,13 @@ def _system_contribution_task(
              "timeseries_duration_s": []}
     if not constellation:
         return empty
+    # This filing's own orbit dynamics (§D6.3), relative to the SAME joint
+    # T_run as the headline sim — matches _apply_orbit_dynamics's use in the
+    # fuse loop, so this decomposition reproduces what actually ran for
+    # these satellites (not plain unperturbed J2 propagation).
+    constellation = _apply_orbit_dynamics(
+        cfg, constellation, joint_ctx["dt"] * joint_ctx["num_steps"],
+    )
     mask = _build_mask(cfg)
     antenna = create_gso_es_antenna(
         joint_ctx["es_diameter_m"], joint_ctx["es_freq_ghz"],
@@ -1019,6 +1106,12 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     _emit("[method_3] fusing constellations into megaconstellation")
     _emit_progress(10)
 
+    # Joint T_run — every satellite propagates over this SAME span regardless
+    # of system, so each filing's own artificial-precession/station-keeping
+    # rate (§D6.3) is defined relative to it, not that filing's own (possibly
+    # shorter) standalone T_run.
+    t_run_joint = dt * num_steps
+
     combined: list = []
     masks_by_id: dict[int, Any] = {}
     mask_id_per_sat: list[int] = []
@@ -1028,6 +1121,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         const, _ = create_constellation_for_config(cfg)
         if not const:
             continue
+        # Fold this system's own orbit dynamics into ITS satellites only
+        # (see _apply_orbit_dynamics — run_epfd_simulation's raan_dot_*/
+        # wdelta_deg scalars would apply ONE filing's rate to everyone).
+        const = _apply_orbit_dynamics(cfg, const, t_run_joint)
         combined.extend(const)
         mask_obj = _build_mask(cfg)
         global_id = idx + 1
@@ -1119,6 +1216,11 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # (see _s1503_normative_caps / _finalize_epfd_after_max_co_freq). Without
     # this, the joint sim treated Nco as unlimited (method_3 previously
     # dropped it entirely), inflating the peak vs. method_1's per-system cap.
+    # raan_dot_artificial_rad_s / raan_dot_override_rad_s / wdelta_deg are
+    # deliberately left at their 0/None/0 defaults below: each system's own
+    # orbit dynamics (§D6.3) are already folded into `combined`'s elements
+    # by _apply_orbit_dynamics above — a scalar here would apply ONE
+    # filing's precession to the whole fused constellation.
     sim_res = run_epfd_simulation(
         constellation=combined,
         wcg=wcg,
