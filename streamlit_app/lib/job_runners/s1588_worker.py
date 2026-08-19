@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import sys
 import time
@@ -40,7 +41,9 @@ REPO_ROOT = HERE.parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from streamlit_app.lib import cluster, hwinfo, plan  # noqa: E402
+from streamlit_app.lib import (  # noqa: E402
+    cluster, epfd_cluster, hwinfo, plan, wcga_cluster,
+)
 
 
 def _emit(line: str) -> None:
@@ -1359,11 +1362,70 @@ def _decompose_by_resimulation(
     ]
 
 
+def _joint_time_base(
+    refs: list[tuple[float, int, int]], sim_cfg: dict[str, Any],
+) -> tuple[float, float, int, int, dict[str, str]]:
+    """Joint (Δt_fine, Δt_coarse, Ncoarse, N) for a fused megaconstellation.
+
+    ``refs`` is one ``(Δt_fine, NSTEPS, Ncoarse)`` §D4 reference per filing
+    (see :func:`src.main.compute_s1503_dual_reference`), all dimensioned with
+    the joint run's shared victim-ES antenna.
+
+    Rule:
+
+    * a value the USER supplied is used **as given**. In particular the
+      iteration count N is the count of the JOINT run. It used to be applied
+      per filing and then re-derived by the §D4.1 rule, which multiplied it by
+      max Δt / min Δt — two filings whose auto Δt were 26.977 s and 0.94 s
+      turned a requested N=100 000 into 2 869 893 steps;
+    * a value left on auto is the **smallest** among the values computed for
+      the individual systems — §D4.1's "smallest time step over all
+      sub-constellations", applied here across filings. For N that means
+      ``floor(longest T_run / smallest Δt_fine)``, since no requested count
+      exists to honour.
+
+    §D4.7 wants the coarse step to be an integer multiple of the fine one;
+    a user-supplied pair is snapped to the nearest multiple exactly as
+    ``run_wcg_downlink`` does, and a coarse step that is not larger than the
+    fine one collapses the ladder to a single step (``Ncoarse=1``).
+
+    Returns ``(fine, coarse, ncoarse, nsteps, sources)``, where ``sources``
+    maps ``n``/``fine``/``coarse`` to ``"user"`` or ``"auto(min)"`` for the
+    run log.
+    """
+    user_n = int(sim_cfg.get("num_time_steps", 0) or 0)
+    user_fine = (float(sim_cfg.get("fine_time_step_s", 0.0) or 0.0)
+                 if sim_cfg.get("_fine_step_overridden") else 0.0)
+    user_coarse = (float(sim_cfg.get("coarse_time_step_s", 0.0) or 0.0)
+                   if sim_cfg.get("_coarse_step_overridden") else 0.0)
+
+    fine = user_fine if user_fine > 0.0 else min(r[0] for r in refs)
+    nsteps = (user_n if user_n > 0
+              else int(math.floor(max(r[0] * r[1] for r in refs) / fine)))
+    coarse = (user_coarse if user_coarse > 0.0
+              else min(r[0] * max(1, r[2]) for r in refs))
+    if coarse > fine:
+        ncoarse = max(1, int(round(coarse / fine)))
+        coarse = fine * ncoarse
+    else:
+        ncoarse, coarse = 1, fine
+
+    def _src(from_user: bool) -> str:
+        return "user" if from_user else "auto(min)"
+
+    return fine, coarse, ncoarse, nsteps, {
+        "n": _src(user_n > 0),
+        "fine": _src(user_fine > 0.0),
+        "coarse": _src(user_coarse > 0.0),
+    }
+
+
 def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     """Joint simulation (Method 2B): fused megaconstellation, single sim run."""
     from src.main import (  # type: ignore[import]
-        create_constellation_for_config, compute_s1503_time_reference,
+        create_constellation_for_config, compute_s1503_dual_reference,
     )
+    from src.time_step import DualTimeStep  # type: ignore[import]
     from src.pfd_mask import PFDMaskMulti  # type: ignore[import]
     from src.epfd_calculator import run_epfd_simulation  # type: ignore[import]
     from src.wcg_search import search_wcg_s1503  # type: ignore[import]
@@ -1410,34 +1472,21 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     es_antenna = _build_antenna(cfgs[0])
     alpha0 = float(cfgs[0]["non_gso"].get("alpha0_deg", 0.0))
 
-    def _filing_time_base(cfg: dict[str, Any]) -> tuple[float, int]:
-        """This filing's own §D4 (Δt, N) reference, dimensioned with the
-        JOINT run's shared es_antenna (one victim ES for the aggregate — its
-        θ_3dB is what §D4.2 actually consumes). ε₀ is passed through to
-        compute_time_step_and_count but is a dead parameter of the §D4
-        dimensioning (signature-only in time_step.py), so the cfg is used
-        as-is — no shared-ε₀ copy needed. User overrides win, same as
-        ``resolve_time_base``."""
-        sim_cfg = cfg.get("simulation") or {}
-        nsteps = int(sim_cfg.get("num_time_steps", 0) or 0)
-        tstep = (float(sim_cfg.get("coarse_time_step_s", 0.0) or 0.0)
-                 if sim_cfg.get("_coarse_step_overridden") else 0.0)
-        if nsteps > 0 and tstep > 0.0:
-            return tstep, nsteps
-        ref_tstep, ref_nsteps = compute_s1503_time_reference(cfg, es_antenna=es_antenna)
-        return (tstep if tstep > 0.0 else ref_tstep, nsteps if nsteps > 0 else ref_nsteps)
-
-    # One fused constellation ⇒ one timeline. With N / Δt left on auto, apply
-    # the SAME §D4.1 rule used across a filing's own sub-constellations
-    # (compute_time_step_and_count_multi: Δt = min, NSTEPS = floor(max Trun /
-    # min Δt)) — here across filings/systems instead of orbit shapes.
-    _bases = [_filing_time_base(c) for c in cfgs]
-    dt = min(b[0] for b in _bases)
-    trun_max = max(b[0] * b[1] for b in _bases)
-    num_steps = int(math.floor(trun_max / dt))
-    if len(cfgs) > 1:
-        _emit(f"[method_3] joint time base (§D4.1 across filings): "
-              f"Δt={dt:.4f}s · N={num_steps:,}")
+    # Joint time base (N, Δt_fine, Δt_coarse) — see _joint_time_base. Each
+    # filing's own §D4 reference is dimensioned with the JOINT run's shared
+    # es_antenna: its θ_3dB is what §D4.2/§D4.7 actually consume, and one
+    # shared victim ES is the correct physical model for an aggregate.
+    _sim0 = cfgs[0].get("simulation") or {}
+    dt, coarse, ncoarse, num_steps, _src = _joint_time_base(
+        [compute_s1503_dual_reference(c, es_antenna=es_antenna) for c in cfgs],
+        _sim0,
+    )
+    _emit(
+        f"[method_3] joint time base: N={num_steps:,} [{_src['n']}] · "
+        f"Δt_fine={dt:.6f}s [{_src['fine']}] · "
+        f"Δt_coarse={coarse:.6f}s [{_src['coarse']}] · "
+        f"Ncoarse={ncoarse} · T_run={dt * num_steps:,.0f}s"
+    )
 
     _emit("[method_3] fusing constellations into megaconstellation")
     _emit_progress(10)
@@ -1506,6 +1555,28 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # convention. Sub-masks with differing RefBW keep the primary's (same
     # limitation as method_1's engine assembly).
     bw_correction_db = _bw_correction_db(cfgs[0], pfd_multi)
+
+    # Dual time step (§D4.7) for the joint pass. The aggregate worker used to
+    # write dual_time_step_mode into the cfg and then never build a
+    # DualTimeStep — the joint run always used a single fine step, so a
+    # requested coarse step was silently ignored and every one of the N steps
+    # was fine. Built only when a coarse ladder actually exists (Ncoarse > 1)
+    # and the mode is not 'off'. α₀ for the gain threshold is the SMALLEST
+    # across filings: in a fused run each system has its own α₀ (see
+    # per_system_alpha0), and the smallest one yields the widest critical
+    # region — i.e. fine steps wherever ANY system needs them, which is the
+    # conservative choice for a sampling decision.
+    _dual_mode = str(_sim0.get("dual_time_step_mode") or "s1503").strip().lower()
+    dual_ts = None
+    if _dual_mode != "off" and ncoarse > 1:
+        dual_ts = DualTimeStep(
+            coarse_step_s=coarse, fine_step_s=dt, mode="s1503_gain",
+            ncoarse=ncoarse, es_antenna=es_antenna,
+            alpha0_deg=(min(per_system_alpha0) if per_system_alpha0 else alpha0),
+            disable_or_condition=caps0["strict_exclusion_zone"],
+        )
+        _emit(f"[method_3] dual time step (§D4.7) active: fine={dt:.6f}s · "
+              f"coarse={coarse:.6f}s · Ncoarse={ncoarse}")
 
     # geometry: manual or joint WCGA
     if (params.get("geometry_es_lat") is not None and
@@ -1602,6 +1673,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         min_elevation_deg=min_elev,
         tstep_s=dt,
         nsteps=num_steps,
+        dual_ts=dual_ts,
         # -1 = all cores (matches run_wcg_downlink's default) — this is the
         # one joint simulation for the whole run, nothing else contends for
         # cores at this point.
@@ -1724,10 +1796,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         "per_system": per_system,
         "per_system_at_wcg": per_system_at_wcg,
         "n_systems": len(filings),
-        # Joint megaconstellation timeline (one shared N / Δt).
+        # Joint megaconstellation timeline (one shared N / Δt ladder).
         "dual_time_step": _dual_time_step_block(
             cfgs[0].get("simulation") or {}, acc,
-            fine_step_s=dt, coarse_step_s=dt, ncoarse=1,
+            fine_step_s=dt, coarse_step_s=coarse, ncoarse=ncoarse,
             num_time_steps=num_steps,
         ),
     }
@@ -1891,18 +1963,55 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
            else "(sequential fallback: all cores per task)")
     )
 
-    if method == "method_1":
-        out = _run_method_1(params)
-    elif method == "method_2":
-        out = _run_method_2(params)
-    elif method == "method_3":
-        out = _run_method_3(params)
-    elif method == "method_4":
-        out = _run_method_4(params)
-    elif method == "method_5":
-        out = _run_method_5(params)
-    else:
-        raise ValueError(f"unknown method: {method}")
+    # method_3 is the one method whose dominant work happens in THIS process:
+    # one joint WCGA + one joint EPFD↓ simulation over the fused
+    # megaconstellation. The other methods are many independent simulations
+    # that `cluster.parallel_starmap_progress` already fans out over Ray, so
+    # their driver does no heavy compute. Inject the cluster executors for the
+    # two driver-side sweeps (WCGA latitude sweep, EPFD time-chunk sweep) —
+    # otherwise method_3 stays capped to this node's cores via the engine's own
+    # multiprocessing.Pool, however large the cluster. Parity-preserving: same
+    # work units and merges, only the executor differs. No-op when standalone.
+    # Inert for the Ray-dispatched side phases (post_sum, per-system
+    # re-simulation): those run in worker processes, where the engine's
+    # module-level hook is unset, so no task nests another fan-out.
+    _distributed = False
+    if method == "method_3":
+        try:
+            rt_env_m3 = cluster.uploads_runtime_env()
+            wcga_on = wcga_cluster.enable(
+                runtime_env=rt_env_m3,
+                on_progress=lambda i, n: _emit_progress(20 + 25.0 * i / max(1, n)),
+            )
+            epfd_on = epfd_cluster.enable(
+                runtime_env=rt_env_m3,
+                on_progress=lambda i, n: _emit_progress(50 + 32.0 * i / max(1, n)),
+            )
+            if wcga_on or epfd_on:
+                _distributed = True
+                _emit("[method_3] distributed across Ray cluster: "
+                      f"WCGA={'on' if wcga_on else 'off'} · "
+                      f"EPFD={'on' if epfd_on else 'off'}")
+        except Exception as exc:  # noqa: BLE001 — local compute is the fallback
+            _emit(f"WARN: cluster dispatch unavailable ({exc}); local compute")
+
+    try:
+        if method == "method_1":
+            out = _run_method_1(params)
+        elif method == "method_2":
+            out = _run_method_2(params)
+        elif method == "method_3":
+            out = _run_method_3(params)
+        elif method == "method_4":
+            out = _run_method_4(params)
+        elif method == "method_5":
+            out = _run_method_5(params)
+        else:
+            raise ValueError(f"unknown method: {method}")
+    finally:
+        if _distributed:
+            wcga_cluster.disable()
+            epfd_cluster.disable()
 
     # Attach Article 22 / Resolution 76 limits from the first filing config
     # (Res. 76 assumes common ES diameter + ref BW across systems).
