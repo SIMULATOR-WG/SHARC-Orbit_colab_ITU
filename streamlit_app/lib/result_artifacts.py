@@ -115,8 +115,12 @@ def write_timeseries_csv(result_path: Path, sim_data: dict[str, Any],
         f"# units: t_s [s] · epfd_db [{unit}] · duration_s [s]",
         "t_s,epfd_db,duration_s",
     ]
+    # t_s is FIXED-point, not %g: a long run reaches ~1.4e7 s, where 6
+    # significant digits quantise time to ~100 s — coarser than the step itself,
+    # so consecutive rows collapsed onto the same timestamp. Milliseconds are
+    # ample for any §D4 step.
     lines += [
-        f"{float(ti):.6g},{float(ei):.4f},{float(di):.6g}"
+        f"{float(ti):.3f},{float(ei):.4f},{float(di):.6g}"
         for ti, ei, di in zip(t, e, d)
     ]
     payload = "\n".join(lines) + "\n"
