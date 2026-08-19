@@ -501,6 +501,35 @@ def _build_mask(cfg: dict[str, Any]):
                         mask_id=pfd.get("mask_id"))
 
 
+def _build_mask_for_sats(cfg: dict[str, Any], mask_id_per_sat: list[int] | None):
+    """Per-satellite PFD mask routing (S.1503-4 mask_lnk1), same rule as method_1.
+
+    ``build_downlink_engine_inputs`` (method_1's engine assembly) routes each
+    satellite through its OWN mask whenever the filing's mask_lnk1 declares
+    more than one PFD mask id (e.g. one mask per orbital shell — USASAT-NGSO-3X
+    carries 9 per band). The fixed-geometry paths (method_2/3/4/5) used to
+    drop the ``mask_id_per_sat`` list and radiate every satellite with the
+    single ``cfg["pfd_mask"]["mask_id"]`` — one shell's mask (mask_lnk1
+    precedence, or the user's pick) applied to the whole constellation, which
+    skews multi-shell filings by whole dB versus method_1 at the same geometry.
+
+    Single-mask filings (XML file source, or MDB with ≤1 distinct id) fall
+    back to :func:`_build_mask` — bit-identical to the previous behaviour.
+    """
+    from src.pfd_mask import PFDMaskMulti  # type: ignore[import]
+    from src.srs_reader import load_pfd_masks_for_ids  # type: ignore[import]
+    pfd = cfg.get("pfd_mask") or {}
+    unique_ids = sorted({int(m) for m in (mask_id_per_sat or []) if int(m) != -1})
+    if pfd.get("source") != "mask_mdb" or len(unique_ids) <= 1:
+        return _build_mask(cfg)
+    srs_sys = cfg.get("_srs_system")
+    masks_by_id = load_pfd_masks_for_ids(
+        pfd["mdb_file"], unique_ids,
+        ntc_id=getattr(srs_sys, "ntc_id", None) if srs_sys else None,
+    )
+    return PFDMaskMulti(masks_by_id, mask_id_per_sat)
+
+
 def _build_antenna(cfg: dict[str, Any]):
     from src.antenna import create_gso_es_antenna  # type: ignore[import]
     gso_es = cfg["gso_es"]
@@ -673,8 +702,8 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
     import math as _math
 
     # Honour restrict_emitters_to_sim_band (default ON in _load_cfg).
-    constellation, _mask_ids = create_constellation_for_config(cfg)
-    mask = _build_mask(cfg)
+    constellation, mask_ids = create_constellation_for_config(cfg)
+    mask = _build_mask_for_sats(cfg, mask_ids)
     antenna = _build_antenna(cfg)
 
     sim = cfg["simulation"]
@@ -817,7 +846,7 @@ def _system_contribution_task(
     from src.s1588_studies.geometry import GeometryPoint  # type: ignore[import]
 
     cfg = _load_cfg(filing, common)
-    constellation, _mask_ids = create_constellation_for_config(cfg)
+    constellation, mask_ids = create_constellation_for_config(cfg)
     empty = {"ccdf_bins_db": [], "ccdf_pct": [], "max_epfd_dbw": None,
              "n_satellites": 0, "timeseries_t_s": [], "timeseries_epfd_db": [],
              "timeseries_duration_s": []}
@@ -830,7 +859,7 @@ def _system_contribution_task(
     constellation = _apply_orbit_dynamics(
         cfg, constellation, joint_ctx["dt"] * joint_ctx["num_steps"],
     )
-    mask = _build_mask(cfg)
+    mask = _build_mask_for_sats(cfg, mask_ids)
     antenna = create_gso_es_antenna(
         joint_ctx["es_diameter_m"], joint_ctx["es_freq_ghz"],
         joint_ctx["es_efficiency"], service=joint_ctx["es_service"],
@@ -1392,9 +1421,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     masks_by_id: dict[int, Any] = {}
     mask_id_per_sat: list[int] = []
     system_id_per_sat: list[int] = []
+    next_gid = 1
     for idx, cfg in enumerate(cfgs):
         # Per-filing emitter band filter (restrict_emitters_to_sim_band).
-        const, _ = create_constellation_for_config(cfg)
+        const, local_ids = create_constellation_for_config(cfg)
         if not const:
             continue
         # Fold this system's own orbit dynamics into ITS satellites only
@@ -1402,10 +1432,28 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         # wdelta_deg scalars would apply ONE filing's rate to everyone).
         const = _apply_orbit_dynamics(cfg, const, t_run_joint)
         combined.extend(const)
-        mask_obj = _build_mask(cfg)
-        global_id = idx + 1
-        masks_by_id[global_id] = mask_obj
-        mask_id_per_sat.extend([global_id] * len(const))
+        # This filing's own per-satellite mask routing (mask_lnk1, same rule
+        # as method_1 — see _build_mask_for_sats), remapped onto ids GLOBAL
+        # to the fused constellation so filings never collide in masks_by_id.
+        # Satellites without a mask_lnk1 row (-1) resolve HERE to this
+        # filing's own primary mask: left as -1, the fused PFDMaskMulti's
+        # fallback would route them to the GLOBAL primary — possibly a
+        # foreign system's mask.
+        mask_obj = _build_mask_for_sats(cfg, local_ids)
+        if isinstance(mask_obj, PFDMaskMulti):
+            gid_of = {lid: next_gid + k
+                      for k, lid in enumerate(sorted(mask_obj.masks_by_id))}
+            for lid, gid in gid_of.items():
+                masks_by_id[gid] = mask_obj.masks_by_id[lid]
+            next_gid += len(gid_of)
+            fallback_gid = gid_of[int(mask_obj.primary_mask_id)]
+            mask_id_per_sat.extend(
+                gid_of.get(int(m), fallback_gid) for m in local_ids
+            )
+        else:
+            masks_by_id[next_gid] = mask_obj
+            mask_id_per_sat.extend([next_gid] * len(const))
+            next_gid += 1
         system_id_per_sat.extend([idx] * len(const))
 
     if not combined:
@@ -1421,11 +1469,12 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # per filing in the UI), same convention as alpha0/es_antenna above.
     caps0 = _s1503_normative_caps(cfgs[0])
     per_system_nco = [_s1503_normative_caps(c)["max_co_freq_by_lat"] for c in cfgs]
-    # PFD->EPFD RefBW correction, from cfgs[0]'s own mask/Article-22 row —
-    # same convention as PFDMaskMulti.refbw_khz (already takes the PRIMARY
-    # mask's RefBW only), so this doesn't add a NEW inconsistency; it just
-    # stops silently assuming 0 dB correction for every filing.
-    bw_correction_db = _bw_correction_db(cfgs[0], masks_by_id[1])
+    # PFD->EPFD RefBW correction: Article-22 row (shared limit config, so
+    # cfgs[0] serves) vs the fused mask's refbw_khz — which PFDMaskMulti
+    # already reduces to the PRIMARY sub-mask's RefBW, the engine's own
+    # convention. Sub-masks with differing RefBW keep the primary's (same
+    # limitation as method_1's engine assembly).
+    bw_correction_db = _bw_correction_db(cfgs[0], pfd_multi)
 
     # geometry: manual or joint WCGA
     if (params.get("geometry_es_lat") is not None and
