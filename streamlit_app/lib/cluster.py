@@ -27,7 +27,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from . import DATA_ROOT
 
@@ -625,7 +625,9 @@ def env_overlay() -> dict[str, str]:
     return overlay
 
 
-def uploads_runtime_env(*, size_limit_gb: float = 2.0) -> dict[str, Any] | None:
+def uploads_runtime_env(
+    *, size_limit_gb: float = 2.0, keep_subdirs: "Iterable[str] | None" = None,
+) -> dict[str, Any] | None:
     """Build a Ray runtime_env that ships:
 
     * ``streamlit_app/data/uploads/`` as ``working_dir`` (SRS/mask MDBs
@@ -633,6 +635,15 @@ def uploads_runtime_env(*, size_limit_gb: float = 2.0) -> dict[str, Any] | None:
     * ``src/`` and ``streamlit_app/`` as ``py_modules`` so the engine
       and helper packages are importable on every Ray worker, even when
       the worker host has no SHARC-Orbit checkout.
+
+    ``keep_subdirs``: upload paths (or their leading directory names) this run
+    actually needs. Every OTHER top-level upload directory is excluded, so the
+    shipped ``working_dir`` package carries this run's MDBs instead of the
+    whole upload library — which grows without bound and is re-zipped,
+    re-uploaded and re-unpacked on every worker node. A big package is also a
+    bigger target for a corrupt unpack (Ray reuses a content-hashed package,
+    so one bad zip keeps failing every task on that node). Falls back to
+    shipping everything when the list is empty.
 
     Returns ``None`` when Ray is unavailable / mode is standalone.
     """
@@ -683,6 +694,19 @@ def uploads_runtime_env(*, size_limit_gb: float = 2.0) -> dict[str, Any] | None:
     }
     if UPLOADS_DIR.exists() and any(UPLOADS_DIR.rglob("*")):
         env["working_dir"] = str(UPLOADS_DIR.resolve())
+        # Ship only the upload dirs this run needs. Patterns are anchored to
+        # each uploaded root ("/name/**"), so they cannot touch the src/ and
+        # streamlit_app/ py_modules.
+        keep = {
+            str(s).replace("\\", "/").strip("/").split("/")[0]
+            for s in (keep_subdirs or []) if s
+        }
+        if keep:
+            env["excludes"] = list(env["excludes"]) + [
+                f"/{child.name}/**"
+                for child in sorted(UPLOADS_DIR.iterdir())
+                if child.is_dir() and child.name not in keep
+            ]
     return env
 
 

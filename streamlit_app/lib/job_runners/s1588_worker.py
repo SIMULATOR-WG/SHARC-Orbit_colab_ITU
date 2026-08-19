@@ -1362,6 +1362,37 @@ def _decompose_by_resimulation(
     ]
 
 
+def _fall_back_to_local_compute(reason: str) -> bool:
+    """Disarm the injected cluster executors after a dispatch failure.
+
+    A broken Ray runtime environment on ONE worker node (a corrupt
+    ``working_dir`` package, a stale cached download, an unreachable node)
+    makes every task dispatched through the injected executors fail. Those
+    executors serve method_3's two driver-side sweeps — the joint WCGA and the
+    joint EPFD↓ time-chunk sweep — so without this the whole run dies on an
+    infrastructure fault that has nothing to do with the computation, even
+    though the driver can perfectly well do the work on its own cores (which
+    is exactly what it did before the executors were armed).
+
+    Returns True when a distributed executor was actually armed (so the caller
+    knows a local retry is worth attempting), False when the failure happened
+    with local compute already in force and is therefore genuine.
+    """
+    from src.epfd_calculator import get_epfd_executor  # type: ignore[import]
+    from src.wcg_search import get_wcga_executor  # type: ignore[import]
+
+    if get_epfd_executor() is None and get_wcga_executor() is None:
+        return False
+    wcga_cluster.disable()
+    epfd_cluster.disable()
+    _emit(
+        f"WARN: cluster dispatch failed ({reason}); disabling it and continuing "
+        "on this node's cores. Results are unaffected — the distributed and "
+        "local paths run the same work units."
+    )
+    return True
+
+
 def _joint_time_base(
     refs: list[tuple[float, int, int]], sim_cfg: dict[str, Any],
 ) -> tuple[float, float, int, int, dict[str, str]]:
@@ -1617,23 +1648,31 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
             ref_sid = int(system_id_per_sat[ref_idx])
             ref_nco = per_system_nco[ref_sid]
             _emit_progress(20 + 25.0 * (k + 1) / max(1, len(unique_orbits)))
-            try:
-                wcg_i = search_wcg_s1503(
-                    oe_ref=oe_ref, t_s=0.0,
-                    pfd_mask=ref_mask, es_antenna=es_antenna,
-                    # Owning filing's own ε₀/α₀ — same values the joint
-                    # simulation applies to this orbit's satellites.
-                    alpha0_deg=per_system_alpha0[ref_sid],
-                    min_elevation_deg=per_system_eps0[ref_sid],
-                    gso_min_elevation_deg=caps0["gso_min_elevation_deg"],
-                    step_size_deg=step_deg, n_jobs=n_jobs,
-                    orbit_idx=k, total_orbits=len(unique_orbits),
-                    max_co_freq_by_lat=ref_nco,
-                    strict_exclusion_zone=caps0["strict_exclusion_zone"],
-                )
-            except Exception as exc:  # noqa: BLE001
-                _emit(f"WARN: WCGA orbit {k}: {exc}")
-                continue
+            wcg_kwargs = dict(
+                oe_ref=oe_ref, t_s=0.0,
+                pfd_mask=ref_mask, es_antenna=es_antenna,
+                # Owning filing's own ε₀/α₀ — same values the joint
+                # simulation applies to this orbit's satellites.
+                alpha0_deg=per_system_alpha0[ref_sid],
+                min_elevation_deg=per_system_eps0[ref_sid],
+                gso_min_elevation_deg=caps0["gso_min_elevation_deg"],
+                step_size_deg=step_deg, n_jobs=n_jobs,
+                orbit_idx=k, total_orbits=len(unique_orbits),
+                max_co_freq_by_lat=ref_nco,
+                strict_exclusion_zone=caps0["strict_exclusion_zone"],
+            )
+            wcg_i = None
+            # A cluster-dispatch fault (broken runtime env on a worker node)
+            # must not cost the orbit: disarm and redo it locally, once.
+            for _attempt in (1, 2):
+                try:
+                    wcg_i = search_wcg_s1503(**wcg_kwargs)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    if _attempt == 1 and _fall_back_to_local_compute(str(exc)):
+                        continue
+                    _emit(f"WARN: WCGA orbit {k}: {exc}")
+                    break
             if wcg_i is None:
                 continue
             if best_wcg is None or wcg_i.epfd_dBW > best_wcg.epfd_dBW:
@@ -1664,7 +1703,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # orbit dynamics (§D6.3) are already folded into `combined`'s elements
     # by _apply_orbit_dynamics above — a scalar here would apply ONE
     # filing's precession to the whole fused constellation.
-    sim_res = run_epfd_simulation(
+    sim_kwargs = dict(
         constellation=combined,
         wcg=wcg,
         pfd_mask=pfd_multi,
@@ -1693,6 +1732,20 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         # land, so a cancelled run still leaves something to show.
         on_chunk=on_chunk,
     )
+    # A cluster-dispatch fault must not throw away the run: disarm and redo the
+    # joint pass locally, once. Costly (it restarts the simulation), but the
+    # alternative is losing the whole run to an infrastructure fault — and the
+    # WCGA above normally trips this first, so the sim rarely pays it.
+    for _attempt in (1, 2):
+        try:
+            sim_res = run_epfd_simulation(**sim_kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if _attempt == 1 and _fall_back_to_local_compute(str(exc)):
+                _emit("[method_3] restarting the joint EPFD↓ simulation locally")
+                _emit_progress(50)
+                continue
+            raise
     sim_res.build_cdf()
     _emit_progress(82)
 
@@ -1941,7 +1994,13 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     # uploads/ directory is shipped to every remote node. ensure_init is
     # idempotent, so subsequent parallel_starmap_progress calls inherit
     # the same connection.
-    rt_env = cluster.uploads_runtime_env()
+    # Ship only THIS run's uploads in the working_dir (see uploads_runtime_env):
+    # the whole library is re-zipped and re-unpacked on every node otherwise.
+    _keep_uploads = [
+        v for f in (params.get("filings") or [])
+        for v in (f.get("srs_relpath"), f.get("mask_relpath")) if v
+    ]
+    rt_env = cluster.uploads_runtime_env(keep_subdirs=_keep_uploads)
     init_info = cluster.ensure_init(runtime_env=rt_env)
     if init_info.get("active"):
         wd = (rt_env or {}).get("working_dir")
@@ -1978,13 +2037,12 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     _distributed = False
     if method == "method_3":
         try:
-            rt_env_m3 = cluster.uploads_runtime_env()
             wcga_on = wcga_cluster.enable(
-                runtime_env=rt_env_m3,
+                runtime_env=rt_env,
                 on_progress=lambda i, n: _emit_progress(20 + 25.0 * i / max(1, n)),
             )
             epfd_on = epfd_cluster.enable(
-                runtime_env=rt_env_m3,
+                runtime_env=rt_env,
                 on_progress=lambda i, n: _emit_progress(50 + 32.0 * i / max(1, n)),
             )
             if wcga_on or epfd_on:
