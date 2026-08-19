@@ -106,6 +106,8 @@ def _load_config(run: dict) -> None:
             "geometry_gso_lon",
             # Convolution tail truncation (S.1588 Annex 1 §1).
             "truncate_tail", "truncate_tail_pct",
+            # method_3 opt-in independent-WCG contrast curve.
+            "method3_post_sum",
         ]
         state = {k: params[k] for k in keys if k in params}
         sids = params.get("system_ids") or []

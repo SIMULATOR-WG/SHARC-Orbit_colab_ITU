@@ -567,7 +567,8 @@ def estimate_aggregate(*, method: str, n_systems: int, n_sat_per_system: int,
                          grid_step_deg: float = 30.0,
                          gso_pointing_step_deg: float | None = None,
                          min_elevation_deg: float | None = 10.0,
-                         country_codes: list[str] | None = None) -> Estimate:
+                         country_codes: list[str] | None = None,
+                         method3_post_sum: bool = False) -> Estimate:
     n_total_sats = max(1, n_systems) * max(1, n_sat_per_system)
     tsim_per_filing = _t_sim(n_sat_per_system, n_time_steps)
     twcga_per_filing = _t_wcga(n_sat_per_system, s1503_step_deg)
@@ -590,18 +591,24 @@ def estimate_aggregate(*, method: str, n_systems: int, n_sat_per_system: int,
             f"≈ {_fmt_seconds(tsim_per_filing)} per sim",
         ]
     elif method == "method_3":
-        # joint WCGA on combined + 1 joint sim
+        # Joint WCGA on the fused constellation + ONE joint sim. The per-system
+        # decomposition is accumulated inside that same sim (per-system
+        # sub-accumulators), so it adds no simulation of its own.
         t_joint_wcga = _t_wcga(n_total_sats, s1503_step_deg)
         t_joint_sim = _t_sim(n_total_sats, n_time_steps)
-        # post_sum: N per-system single-entries
-        t_post = n_systems * (twcga_per_filing + tsim_per_filing)
-        wall = t_joint_wcga + t_joint_sim + t_post
-        n_sims = 1 + n_systems  # joint + post_sum components
+        wall = t_joint_wcga + t_joint_sim
+        n_sims = 1
         notes = [
             f"joint WCGA on {n_total_sats} sats ≈ {_fmt_seconds(t_joint_wcga)}",
             f"joint EPFD sim ≈ {_fmt_seconds(t_joint_sim)}",
-            f"post_sum (N single-entries) ≈ {_fmt_seconds(t_post)}",
+            "per-system curves: same pass, no extra sim",
         ]
+        if method3_post_sum:
+            # Opt-in contrast curve: each filing again, at its OWN WCG.
+            t_post = n_systems * (twcga_per_filing + tsim_per_filing)
+            wall += t_post
+            n_sims += n_systems
+            notes.append(f"post_sum (N single-entries) ≈ {_fmt_seconds(t_post)}")
     elif method == "method_4":
         wall = n_systems * twcga_per_filing + (n_systems * n_systems) * tsim_per_filing
         n_sims = n_systems * n_systems

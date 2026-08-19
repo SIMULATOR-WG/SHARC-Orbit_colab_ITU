@@ -126,11 +126,14 @@ _METHOD_HINT: dict[str, str] = {
         "a per-satellite PFD mask (`mask_lnk1` preserved).\n"
         "2. Locate a **joint WCG** via S.1503-4 §D.3.1 on the megaconstellation "
         "(or use manual geometry).\n"
-        "3. Run a **single** EPFD↓ simulation at that joint WCG.\n"
-        "4. Also produce `post_sum` (convolution of per-system Method 1) "
-        "as a contrast curve.\n\n"
-        "Physically rigorous: correlations between systems are kept. Highest "
-        "compute cost per run."
+        "3. Run a **single** EPFD↓ simulation at that joint WCG — it yields the "
+        "headline CCDF **and**, from the same pass, each system's own "
+        "contribution at that geometry (satellites are tagged by system, and "
+        "the aggregation is a linear sum, so the joint curve decomposes "
+        "exactly). No re-simulation per system.\n"
+        "4. Optional: `post_sum` (each filing at its OWN WCG, convolved) as a "
+        "contrast curve — off by default, it roughly doubles the run.\n\n"
+        "Physically rigorous: correlations between systems are kept."
     ),
     "method_4": (
         "**Method 4 — per-WCG convolution sweep (audit).**\n\n"
@@ -195,6 +198,7 @@ prev = use_persisted_state("s1588.form", {
     "country_codes": [],
     "truncate_tail": False,
     "truncate_tail_pct": "",
+    "method3_post_sum": False,
 })
 # One-shot migrations from legacy form defaults → auto per filing.
 if not prev.get("_auto_timebase_migrated"):
@@ -705,8 +709,20 @@ with st.form("s1588_form"):
                     value=str(prev.get("geometry_gso_lon") or ""),
                     help="Engine key: `geometry_gso_lon`.",
                 )
+        method3_post_sum = st.checkbox(
+            "Also compute the `post_sum` contrast curve (roughly doubles the run)",
+            value=bool(prev.get("method3_post_sum", False)),
+            help="Engine key: `method3_post_sum`. OFF by default. The headline "
+                 "joint CCDF and the per-system decomposition both come out of "
+                 "the single joint simulation. `post_sum` is a different "
+                 "quantity — each filing run independently at its OWN WCG, "
+                 "antenna and timeline, then convolved — so it costs a further "
+                 "full pipeline per filing. Enable only when you want that "
+                 "comparison against the joint result.",
+        )
     else:
         es_lat = es_lon = gso_lon = ""
+        method3_post_sum = False
 
     if method in ("method_1", "method_3", "method_4"):
         with st.expander("4. WCG search (S.1503-4 §D.3)", expanded=False):
@@ -955,6 +971,7 @@ with st.form("s1588_form"):
         country_codes=list(country_codes) if country_codes else None,
         gso_pointing_step_deg=_gp,
         min_elevation_deg=_melev,
+        method3_post_sum=bool(method3_post_sum),
     )
     with st.container(border=True):
         src_note = "(from MDB)" if _real_count_ok else "(partial — some fallback)"
@@ -1067,6 +1084,10 @@ if submit:
         if _ttp is not None and _ttp > 0:
             params["truncate_tail_pct"] = _ttp
 
+    # method_3: opt-in independent-WCG contrast curve (off = joint sim only).
+    if method == "method_3" and method3_post_sum:
+        params["method3_post_sum"] = True
+
     # Article 22 scenario leaf (section 1) overrides service / ES antenna /
     # ref BW / frequency run for the whole aggregate. No mask_id pinned —
     # each filing keeps its own PFD mask.
@@ -1107,6 +1128,7 @@ if submit:
         "restrict_emitters_to_sim_band": bool(restrict_emitters),
         "truncate_tail": bool(truncate_tail),
         "truncate_tail_pct": truncate_tail_pct,
+        "method3_post_sum": bool(method3_post_sum),
         "_auto_timebase_migrated": True,
         "_auto_elev_migrated": True,
     })

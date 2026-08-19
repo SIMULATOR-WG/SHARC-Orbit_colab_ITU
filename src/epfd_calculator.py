@@ -34,6 +34,7 @@ import time
 import logging
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Callable
 
 from .constants import RE_KM
 from .coordinates import (
@@ -301,6 +302,8 @@ def _finalize_epfd_after_max_co_freq(
     *,
     system_id_all: np.ndarray | None = None,
     max_co_freq_by_system: dict[int, int] | None = None,
+    override_items: list[tuple[float, int]] | None = None,
+    per_system_out: dict[int, list] | None = None,
 ) -> tuple[list[float], list[float]]:
     """Steps 19–22 §D5.1.4.1: standard selection (20–21), then OR branch (22).
 
@@ -321,7 +324,31 @@ def _finalize_epfd_after_max_co_freq(
     linear sum. Without partitioning, it would collapse all systems into a single N
     (anti-conservative with heterogeneous tables). ``strict_max_co_freq_total`` is
     ignored in this mode (a joint cap makes no sense across systems).
+
+    ``per_system_out`` (method_3 single-pass decomposition): when a dict is
+    passed together with ``system_id_all``, it is filled with
+    ``system_id → [linear EPFD, n_contributors]`` over that system's SELECTED
+    satellites for this step. Since Step 23 is a linear sum and each satellite
+    belongs to exactly one system, these values sum back to the joint step
+    total — which is what lets the per-system CCDFs be accumulated in the SAME
+    pass instead of re-simulating each system separately.
+    ``override_items`` carries the Step 22 (OR) values with their satellite
+    indices so the OR branch can be attributed too (``override_epfd`` alone is
+    index-less). Caveat: with the non-normative ``strict_max_co_freq_total=True``
+    AND a step having zero standard contributors, the OR values can be trimmed
+    downstream while ``per_system_out`` already counted them all — the per-system
+    split may then slightly over-count for such steps. The joint result is
+    unaffected either way.
     """
+    if per_system_out is not None and system_id_all is not None and override_items:
+        # Step 22 (OR) values are kept in full in the normative path, so they
+        # can be attributed straight from their satellite indices.
+        for _v, _k in override_items:
+            _sid = int(system_id_all[_k])
+            _slot = per_system_out.setdefault(_sid, [0.0, 0])
+            _slot[0] += float(_v)
+            _slot[1] += 1
+
     if system_id_all is not None and max_co_freq_by_system is not None and standard_items:
         # Partition standard_items by system_id and apply each system's N.
         by_sys: dict[int, list[tuple[float, int]]] = {}
@@ -331,11 +358,16 @@ def _finalize_epfd_after_max_co_freq(
         standard_epfd = []
         for sid, group in by_sys.items():
             n_sys = int(max_co_freq_by_system.get(sid, max_co_freq))
-            standard_epfd.extend(
-                _select_standard_epfd_s1503_steps_20_21(
-                    group, n_sys, min_angle_at_es_deg, es_ecef, pos_ecef_all,
-                )
+            selected = _select_standard_epfd_s1503_steps_20_21(
+                group, n_sys, min_angle_at_es_deg, es_ecef, pos_ecef_all,
             )
+            standard_epfd.extend(selected)
+            if per_system_out is not None:
+                # The group IS one system, so every selected value belongs to
+                # `sid` — no index round-trip needed.
+                slot = per_system_out.setdefault(sid, [0.0, 0])
+                slot[0] += float(sum(selected))
+                slot[1] += len(selected)
         # OR (Step 22) is kept intact (normative). strict_total ignored.
         return standard_epfd, list(override_epfd)
 
@@ -394,8 +426,14 @@ def _accumulate_epfd_visible_satellites(
     system_id_all: np.ndarray | None = None,
     max_co_freq_by_system: dict[int, int] | None = None,
     per_sat_out: dict | None = None,
+    per_system_out: dict[int, list] | None = None,
 ) -> tuple[list[float], list[float], float, bool]:
     """Returns (standard_linear, override_linear, min_alpha_deg, any_critical_gain).
+
+    ``per_system_out`` (method_3): pass-through to
+    :func:`_finalize_epfd_after_max_co_freq` — filled with this step's linear
+    EPFD per ``system_id``, so a joint run can accumulate per-system CCDFs in
+    the same pass. Inert unless ``system_id_all`` is also given.
 
     ``per_sat_out`` (track-duration collect mode, S.1503-4 §D5.1.4.2): when a
     dict is passed, the per-step MAX_CO_FREQ selection (Steps 19–22 of
@@ -582,6 +620,16 @@ def _accumulate_epfd_visible_satellites(
             if std_mask[j]
         ]
         override_epfd = epfd_lin[~std_mask].tolist()
+        # Same values as `override_epfd`, paired with their satellite index —
+        # built only when the per-system split is requested (method_3).
+        override_items = (
+            [
+                (float(epfd_lin[j]), int(idx_k[j]))
+                for j in range(elig_j.size)
+                if not std_mask[j]
+            ]
+            if per_system_out is not None else None
+        )
 
         standard_epfd, override_epfd = _finalize_epfd_after_max_co_freq(
             standard_items,
@@ -593,6 +641,8 @@ def _accumulate_epfd_visible_satellites(
             pos_ecef_all,
             system_id_all=system_id_all,
             max_co_freq_by_system=max_co_freq_by_system,
+            override_items=override_items,
+            per_system_out=per_system_out,
         )
 
         return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -601,6 +651,9 @@ def _accumulate_epfd_visible_satellites(
     min_alpha = 180.0
     any_critical_gain = False
     standard_items: list[tuple[float, int]] = []
+    # Step 22 (OR) values with their satellite index — only collected when the
+    # per-system split is requested (method_3); mirrors `override_epfd`.
+    _override_items_scalar: list[tuple[float, int]] = []
     _ps_idx: list[int] = []
     _ps_epfd: list[float] = []
     _ps_std: list[bool] = []
@@ -680,6 +733,8 @@ def _accumulate_epfd_visible_satellites(
             standard_items.append((epfd_i, int(k)))
         else:
             override_epfd.append(epfd_i)
+            if per_system_out is not None:
+                _override_items_scalar.append((float(epfd_i), int(k)))
 
     if per_sat_out is not None:
         per_sat_out["idx"] = np.asarray(_ps_idx, dtype=np.int64)
@@ -698,6 +753,8 @@ def _accumulate_epfd_visible_satellites(
         pos_ecef_all,
         system_id_all=system_id_all,
         max_co_freq_by_system=max_co_freq_by_system,
+        override_items=(_override_items_scalar if per_system_out is not None else None),
+        per_system_out=per_system_out,
     )
 
     return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -1137,6 +1194,48 @@ class _DualTSProxy:
         return g_db > thr
 
 
+def _acc_add_per_system(
+    acc,
+    per_system_step: dict[int, list],
+    all_sids: np.ndarray | None,
+    t_s: float,
+    duration_s: float,
+    min_alpha_deg: float,
+    is_fine: bool | None = None,
+) -> None:
+    """Feeds one step's per-system split into ``acc``'s sub-accumulators.
+
+    **Every** system is advanced on **every** step — including systems that
+    contributed nothing (EPFD reported as −999, exactly as the joint engine does
+    for a step with no contributors). This is not cosmetic: the CCDF denominator
+    is ``total_duration_s``, so skipping the silent steps of a system would
+    shrink its denominator and inflate its percentages. Advancing all of them
+    keeps every per-system curve on the joint run's time base, which is what
+    makes the curves comparable percentile-by-percentile and their linear sum
+    reproduce the joint one.
+
+    ``min_alpha_deg`` is the **joint** step value (α is a geometry property of
+    the step, not of a system) and the horizon/visible counts are left at 0 —
+    only the contributing count is per-system. So a sub-accumulator's
+    ``min_alpha``/horizon/visible fields mirror the step, not the system.
+    """
+    if all_sids is None:
+        return
+    for sid in all_sids:
+        sid = int(sid)
+        lin, n_contrib = per_system_step.get(sid, (0.0, 0))
+        acc.system_acc(sid).add(
+            time_s=t_s,
+            epfd_db=(10.0 * math.log10(lin) if lin > 0.0 else -999.0),
+            duration_s=duration_s,
+            num_horizon_sats=0,
+            num_visible_sats=0,
+            num_contributing_sats=int(n_contrib),
+            min_alpha_deg=min_alpha_deg,
+            is_fine=is_fine,
+        )
+
+
 # Helper for parallelism (module level)
 def _simulate_chunk(args):
     """Simulates a time interval (chunk) with vectorized batch propagation.
@@ -1205,6 +1304,14 @@ def _simulate_chunk(args):
     # Constellation-invariant within the chunk — hoisted out of the time loop.
     min_h_chunk = _min_operating_height_km_batch(constellation, N)
 
+    # method_3 per-system decomposition in the SAME pass: the full system id set
+    # (hoisted — every step must advance every system, see _acc_add_per_system).
+    all_sids = (
+        np.unique(system_id_per_sat)
+        if (system_id_per_sat is not None and max_co_freq_by_system is not None)
+        else None
+    )
+
     for _ in range(num_steps):
         gso_ecef = gso_position_ecef(gso_lon, t_s)
 
@@ -1239,6 +1346,7 @@ def _simulate_chunk(args):
         # receives the horizon set and filters ε₀ internally for Step 18 ①).
         num_visible = int(np.count_nonzero(sin_el >= math.sin(math.radians(min_elevation_deg))))
 
+        per_system_step: dict[int, list] | None = {} if all_sids is not None else None
         standard_epfd, override_epfd, min_alpha, _ = _accumulate_epfd_visible_satellites(
             visible_idx=visible_idx,
             pos_ecef_all=pos_ecef_all,
@@ -1268,6 +1376,7 @@ def _simulate_chunk(args):
             sin_el_full=sin_el,
             system_id_all=system_id_per_sat,
             max_co_freq_by_system=max_co_freq_by_system,
+            per_system_out=per_system_step,
         )
 
         epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -1286,6 +1395,11 @@ def _simulate_chunk(args):
             min_alpha_deg=min_alpha,
             is_fine=True,  # fixed step: uniform Δt (no coarse)
         )
+        if per_system_step is not None:
+            _acc_add_per_system(
+                acc, per_system_step, all_sids, t_s, tstep_s, min_alpha,
+                is_fine=True,
+            )
         if results is not None:
             results.append(EPFDTimeStepResult(
                 time_s=t_s,
@@ -1668,6 +1782,7 @@ def run_epfd_simulation(
     keep_full_history: bool = False,
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
+    on_chunk: "Callable[[EPFDStreamAccumulator, int, int], None] | None" = None,
 ) -> EPFDSimulationResult:
     """Runs the complete EPFD↓ time simulation.
 
@@ -1678,6 +1793,15 @@ def run_epfd_simulation(
     simulations with >~1e6 steps, leave it **False** — the streaming accumulator
     preserves the exact CCDF (0.1 dB bins S.1503-4 D7.1.3), aggregates and a
     decimated trace for the panel, in <1 MB regardless of N.
+
+    ``on_chunk(acc, steps_done, steps_total)``: called after each chunk is
+    merged, with the **partially merged** accumulator. Lets a caller persist
+    intermediate results so a run cancelled hours in still leaves a usable
+    CCDF / time series on disk. The engine stays storage-agnostic — what to
+    write is entirely the callback's business. Callback exceptions are
+    swallowed: persistence must never kill a simulation. Fires on the
+    sequential path too (on its progress heartbeat), so both modes behave the
+    same from the caller's side.
     """
     result = EPFDSimulationResult(wcg=wcg, keep_full_history=keep_full_history)
 
@@ -1740,6 +1864,13 @@ def run_epfd_simulation(
         )
         # Constellation-invariant within the run — hoisted out of the time loop.
         min_h_seq = _min_operating_height_km_batch(constellation, total_sats)
+        # method_3 per-system decomposition in the SAME pass (see
+        # _acc_add_per_system); None outside a multi-system joint run.
+        all_sids_seq = (
+            np.unique(system_id_per_sat)
+            if (system_id_per_sat is not None and max_co_freq_by_system is not None)
+            else None
+        )
 
         while fine_steps_elapsed < nsteps - 1e-9:
             if dual_ts is None:
@@ -1784,6 +1915,9 @@ def run_epfd_simulation(
 
             num_visible = int(np.count_nonzero(sin_el >= sin_min_el_seq))
 
+            per_system_step: dict[int, list] | None = (
+                {} if all_sids_seq is not None else None
+            )
             standard_epfd, override_epfd, min_alpha, any_critical_gain = (
                 _accumulate_epfd_visible_satellites(
                     visible_idx=visible_idx,
@@ -1814,6 +1948,7 @@ def run_epfd_simulation(
                     sin_el_full=sin_el,
                     system_id_all=system_id_per_sat,
                     max_co_freq_by_system=max_co_freq_by_system,
+                    per_system_out=per_system_step,
                 )
             )
 
@@ -1836,6 +1971,11 @@ def run_epfd_simulation(
                 min_alpha_deg=min_alpha,
                 is_fine=_is_fine,
             )
+            if per_system_step is not None:
+                _acc_add_per_system(
+                    result.acc, per_system_step, all_sids_seq, t_s, dt, min_alpha,
+                    is_fine=_is_fine,
+                )
             if keep_full_history:
                 result.time_steps.append(EPFDTimeStepResult(
                     time_s=t_s, epfd_aggregate_dBW=epfd_aggregate_dBW,
@@ -1866,6 +2006,12 @@ def run_epfd_simulation(
                     f"  {bar} {pct:6.2f}%  "
                     f"step {step_count}/{nsteps}  t={t_s:.1f}s  EPFD={epfd_aggregate_dBW:.1f}"
                 )
+                if on_chunk is not None:
+                    result.acc.finalize_decimated()
+                    try:
+                        on_chunk(result.acc, step_count, nsteps)
+                    except Exception:  # noqa: BLE001 — persistence is best-effort
+                        logger.debug("on_chunk callback failed", exc_info=True)
 
     # --- PARALLEL MODE WITH DUAL TIME STEP ---
     elif dual_ts is not None:
@@ -1924,6 +2070,12 @@ def run_epfd_simulation(
                 f"  {bar} {pct:6.2f}%  "
                 f"step {step_eq}/{nsteps}  chunk {chunk_idx}/{total_chunks}"
             )
+            if on_chunk is not None:
+                result.acc.finalize_decimated()
+                try:
+                    on_chunk(result.acc, step_eq, nsteps)
+                except Exception:  # noqa: BLE001 — persistence is best-effort
+                    logger.debug("on_chunk callback failed", exc_info=True)
 
         if _EPFD_EXECUTOR is not None:
             logger.info(
@@ -2006,6 +2158,15 @@ def run_epfd_simulation(
                 f"step {done_steps}/{nsteps}  "
                 f"chunk {chunk_idx}/{total_chunks}"
             )
+            if on_chunk is not None:
+                # Chunks arrive in order on the local Pool (imap), but not under
+                # an injected cluster executor — sort the partial trace so the
+                # snapshot is time-ordered either way (no-op when already is).
+                result.acc.finalize_decimated()
+                try:
+                    on_chunk(result.acc, done_steps, nsteps)
+                except Exception:  # noqa: BLE001 — persistence is best-effort
+                    logger.debug("on_chunk callback failed", exc_info=True)
 
         if _EPFD_EXECUTOR is not None:
             logger.info(

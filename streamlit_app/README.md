@@ -498,7 +498,7 @@ oversubscription from Numba's internal threading).
 |---|---|
 | method_1 | `N` filings (per-filing single-entry sim) |
 | method_2 | `n_grid_points × N` (geometry × filing) |
-| method_3 | joint sim sequential; post_sum `N` tasks parallel |
+| method_3 | one joint sim, internally parallel over time chunks (per-system curves accumulated in that same pass); `N` tasks only when the optional `post_sum` is enabled |
 | method_4 | `N` WCGAs + `N × N` (WCG × filing) sims |
 
 Each Ray task receives only JSON-serialisable dicts (filing payload

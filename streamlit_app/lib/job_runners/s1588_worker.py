@@ -31,6 +31,7 @@ import copy
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -569,11 +570,60 @@ def _dual_time_step_block(
     return out
 
 
+def _task_n_jobs(cfg: dict[str, Any], common: dict[str, Any]) -> int:
+    """Engine ``n_jobs`` (real OS processes) for a sim dispatched via
+    ``cluster.parallel_starmap_progress``.
+
+    Three-way precedence:
+
+    1. An explicit ``cfg["simulation"]["n_jobs"]`` always wins.
+    2. This task's OWN Ray CPU reservation, when present — published
+       per-task via ``cluster.TASK_CPUS_ENV`` (see ``cluster._task_scoped``).
+       Ray's ``num_cpus`` accounting sizes how many tasks run concurrently,
+       but does NOT make any single task's own computation faster: every
+       Ray worker process has Numba's thread pool capped to 1 thread at
+       process startup (``uploads_runtime_env``'s env vars — a ceiling
+       ``numba.set_num_threads`` can only lower, never raise). Confirmed
+       live: a task that reserved 2.66 CPUs still measured ~100% of ONE
+       core across all its threads, not ~266% — the reservation alone did
+       nothing. The engine's own ``multiprocessing.Pool`` (this ``n_jobs``:
+       real OS processes, each still 1-Numba-thread, but N of them
+       genuinely use N cores) is the axis that still scales per task — the
+       heavier filings ``_costs_to_num_cpus`` reserves more CPU for (e.g. a
+       30,000-satellite filing next to a 30-satellite one in the same grid
+       sweep) need this or the extra reservation just idles.
+    3. Otherwise, ``common["task_n_jobs"]`` — decided ONCE per run in
+       ``_run`` from ``cluster.ensure_init``: ``1`` when Ray is active
+       (many tasks run concurrently, one per DEFAULT reserved slot — an
+       inner Pool on top would oversubscribe absent the per-task override
+       above), ``-1``/auto when standalone (``parallel_starmap_progress``
+       degenerates to a sequential loop there, so each task runs alone —
+       measured at ~2 of ~22 cores when left at 1). Defaults to ``1`` when
+       absent (a caller/test that builds ``common`` without going through
+       ``_run``).
+    """
+    explicit = (cfg.get("simulation") or {}).get("n_jobs")
+    if explicit:
+        return int(explicit)
+    import os
+    env_val = os.environ.get(cluster.TASK_CPUS_ENV)
+    if env_val:
+        try:
+            return max(1, int(round(float(env_val))))
+        except ValueError:
+            pass
+    return int(common.get("task_n_jobs", 1) or 1)
+
+
 def _run_single_filing(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, Any]:
     """Run a complete single-system S.1503 pipeline (WCGA + EPFD↓ + compliance)."""
     from src.main import run_wcg_downlink  # type: ignore[import]
     from src.exceptions import NoValidGeometry  # type: ignore[import]
     cfg = _load_cfg(filing, common)
+    # run_wcg_downlink reads n_jobs straight off cfg["simulation"] — set it
+    # explicitly (see _task_n_jobs) so a Ray-dispatched task uses its OWN
+    # CPU reservation instead of always grabbing every core.
+    cfg.setdefault("simulation", {})["n_jobs"] = _task_n_jobs(cfg, common)
     try:
         constellation, wcg_dl, sim_dl, comp_dl, *_ = run_wcg_downlink(cfg)
     except NoValidGeometry as exc:
@@ -657,7 +707,7 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
         time_step_s=tstep,
         alpha0_deg=float(cfg["non_gso"].get("alpha0_deg", 0.0)),
         min_elevation_deg=float(cfg["non_gso"].get("min_elevation_deg", 5.0)),
-        n_jobs=int(cfg["simulation"].get("n_jobs", 1)),
+        n_jobs=_task_n_jobs(cfg, common),
         raan_dot_artificial_rad_s=raan_dot_artificial,
         raan_dot_override_rad_s=raan_dot_override,
         wdelta_deg=wdelta_deg,
@@ -797,7 +847,7 @@ def _system_contribution_task(
         alpha0_deg=joint_ctx["alpha0_deg"],
         min_elevation_deg=joint_ctx["min_elevation_deg"],
         pfd_bw_correction_db=joint_ctx["pfd_bw_correction_db"],
-        n_jobs=int(cfg["simulation"].get("n_jobs", 1)),
+        n_jobs=_task_n_jobs(cfg, common),
         max_co_freq_by_lat=max_co_freq_by_lat,
         strict_max_co_freq_total=joint_ctx["strict_max_co_freq_total"],
         strict_exclusion_zone=joint_ctx["strict_exclusion_zone"],
@@ -1038,6 +1088,230 @@ def _run_method_2(params: dict[str, Any]) -> dict[str, Any]:
 # ─── method_3 ────────────────────────────────────────────────────────────────
 
 
+_EMPTY_DECOMP: dict[str, Any] = {
+    "ccdf_bins_db": [], "ccdf_pct": [], "max_epfd_dbw": None,
+    "n_satellites": 0, "timeseries_t_s": [], "timeseries_epfd_db": [],
+    "timeseries_duration_s": [],
+}
+
+
+def _decompose_from_joint_acc(
+    acc: Any, cfgs: list[dict[str, Any]], system_id_per_sat: list[int],
+) -> list[dict[str, Any]] | None:
+    """Per-system curves read off the joint run's own accumulator.
+
+    ``run_epfd_simulation``, when given ``system_id_per_sat`` +
+    ``max_co_freq_by_lat_per_system``, accumulates one sub-accumulator per
+    system in the SAME pass as the joint curve (``acc.per_system``, see
+    ``epfd_calculator._acc_add_per_system``). Each sub-accumulator holds that
+    system's own linear-power contribution at the joint geometry, on the joint
+    time base — exactly what the old per-system re-simulation produced, at zero
+    extra cost.
+
+    Returns ``None`` when the joint pass carried no per-system split (engine
+    paths that don't populate it yet, e.g. a dual-time-step joint run), so the
+    caller can fall back to :func:`_decompose_by_resimulation`. Takes the
+    accumulator itself (not the result object) so it also serves the mid-run
+    partial snapshots, where only a partially merged accumulator exists.
+    """
+    per_system = getattr(acc, "per_system", None) if acc is not None else None
+    if not per_system:
+        return None
+
+    out: list[dict[str, Any]] = []
+    for i in range(len(cfgs)):
+        sub = per_system.get(i)
+        row: dict[str, Any] = {"system_index": i, "label": _system_label(cfgs[i], i)}
+        if sub is None:
+            out.append({**row, **_EMPTY_DECOMP})
+            continue
+        bins, pct = sub.build_ccdf()
+        out.append({
+            **row,
+            "ccdf_bins_db": list(map(float, bins)),
+            "ccdf_pct": list(map(float, pct)),
+            "max_epfd_dbw": float(bins[0]) if len(bins) else None,
+            "n_satellites": int(sum(1 for s in system_id_per_sat if int(s) == i)),
+            "timeseries_t_s": [float(x) for x in sub.decim_t_s],
+            "timeseries_epfd_db": [float(x) for x in sub.decim_epfd_db],
+            "timeseries_duration_s": [float(x) for x in sub.decim_duration_s],
+        })
+    return out
+
+
+def _write_partial_geometry(result_path: Path, wcg: Any) -> None:
+    """Persists the joint WCG into ``partial/`` as soon as the WCGA closes.
+
+    Best-effort: a filesystem hiccup must not abort a run that just spent a
+    WCGA finding this geometry.
+    """
+    from streamlit_app.lib import result_artifacts  # noqa: PLC0415
+
+    payload = {
+        "method": "method_3",
+        "partial": True,
+        "geometry": {
+            "es_lat_deg": float(wcg.es_lat_deg),
+            "es_lon_deg": float(wcg.es_lon_deg),
+            "gso_lon_deg": float(wcg.gso_lon_deg),
+        },
+        "wcg_epfd_dbw": float(getattr(wcg, "epfd_dBW", float("nan"))),
+    }
+    try:
+        out_dir = result_path / "partial"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "wcg.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        result_artifacts.write_geometries_csv(out_dir, payload)
+        _emit(f"[method_3] joint WCG persisted to partial/ "
+              f"(ES {payload['geometry']['es_lat_deg']:.2f},"
+              f"{payload['geometry']['es_lon_deg']:.2f} · "
+              f"GSO {payload['geometry']['gso_lon_deg']:.2f})")
+    except Exception as exc:  # noqa: BLE001 — artifacts are best-effort
+        _emit(f"WARN: could not persist the joint WCG: {exc}")
+
+
+def _partial_snapshot_writer(
+    result_path: Path,
+    wcg: Any,
+    cfgs: list[dict[str, Any]],
+    system_id_per_sat: list[int],
+    *,
+    min_interval_s: float = 30.0,
+) -> Any:
+    """Builds the ``on_chunk`` callback that persists mid-run method_3 results.
+
+    A joint run over a megaconstellation takes hours; cancelling it used to
+    leave nothing. This writes the joint CCDF, the decimated time series, the
+    per-system curves and the geometry after each chunk, reusing
+    ``result_artifacts``' writers — so the files carry the exact same names,
+    headers and units as a finished run and open with the normal tooling.
+
+    Everything lands in a **``partial/`` subdirectory**, never the run root: a
+    truncated CCDF that looks like a finished one is a real hazard when the
+    output feeds a filing. The final run writes the root artifacts as usual.
+
+    Throttled to ``min_interval_s`` because the engine calls back per chunk
+    (and per 2 s heartbeat on the sequential path) while each snapshot rewrites
+    files of up to ~10k rows. The last chunk always writes, so the newest
+    snapshot is never one interval stale.
+    """
+    from streamlit_app.lib import result_artifacts  # noqa: PLC0415
+
+    out_dir = result_path / "partial"
+    geometry = {
+        "es_lat_deg": float(wcg.es_lat_deg),
+        "es_lon_deg": float(wcg.es_lon_deg),
+        "gso_lon_deg": float(wcg.gso_lon_deg),
+    }
+    state = {"last": 0.0}
+
+    def _on_chunk(acc: Any, steps_done: int, steps_total: int) -> None:
+        now = time.monotonic()
+        is_last = steps_done >= steps_total
+        if not is_last and (now - state["last"]) < min_interval_s:
+            return
+        state["last"] = now
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        bins, pct = acc.build_ccdf()
+        bins_l = list(map(float, bins))
+        pct_l = list(map(float, pct))
+        snapshot: dict[str, Any] = {
+            "method": "method_3",
+            # Marks this as a truncated run for anything that reads the JSON.
+            "partial": True,
+            "progress": {
+                "steps_done": int(steps_done),
+                "steps_total": int(steps_total),
+                "pct": round(100.0 * steps_done / max(1, steps_total), 3),
+            },
+            "geometry": geometry,
+            "ccdf_bins_db": bins_l,
+            "ccdf_pct": pct_l,
+            "max_epfd_dbw_m2_40khz": bins_l[0] if bins_l else None,
+            "percentiles": _percentiles(bins_l, pct_l) if bins_l else {},
+            "per_system_at_wcg": (
+                _decompose_from_joint_acc(acc, cfgs, system_id_per_sat) or []
+            ),
+            "n_systems": len(cfgs),
+        }
+        (out_dir / "sim_data.partial.json").write_text(
+            json.dumps(snapshot, indent=2), encoding="utf-8",
+        )
+        # CSVs only — the PNG writers spin up matplotlib, too slow per chunk.
+        for fn in (
+            lambda: result_artifacts.write_ccdf_csv(out_dir, snapshot),
+            lambda: result_artifacts.write_timeseries_csv(out_dir, snapshot, acc),
+            lambda: result_artifacts.write_per_system_ccdf_csv(out_dir, snapshot),
+            lambda: result_artifacts.write_per_system_timeseries_csv(out_dir, snapshot),
+            lambda: result_artifacts.write_geometries_csv(out_dir, snapshot),
+        ):
+            try:
+                fn()
+            except Exception:  # noqa: BLE001 — snapshots are best-effort
+                pass
+
+    return _on_chunk
+
+
+def _decompose_by_resimulation(
+    *,
+    filings: list[dict[str, Any]],
+    cfgs: list[dict[str, Any]],
+    common: dict[str, Any],
+    wcg: Any,
+    dt: float,
+    num_steps: int,
+    alpha0: float,
+    min_elev: float,
+    caps0: dict[str, Any],
+    per_system_nco: list,
+    bw_correction_db: float,
+) -> list[dict[str, Any]]:
+    """Fallback decomposition: one full simulation per system at the joint WCG.
+
+    Costs about as much as the joint run itself (same step count, and the
+    systems' satellites sum to the fused constellation), so this is only for
+    engine paths where :func:`_decompose_from_joint_acc` cannot serve.
+    """
+    joint_ctx = {
+        "lat": float(wcg.es_lat_deg), "lon": float(wcg.es_lon_deg),
+        "glon": float(wcg.gso_lon_deg),
+        "dt": dt, "num_steps": num_steps,
+        "alpha0_deg": alpha0, "min_elevation_deg": min_elev,
+        "es_diameter_m": float(cfgs[0]["gso_es"]["antenna_diameter_m"]),
+        "es_efficiency": float(cfgs[0]["gso_es"].get("antenna_efficiency", 0.99)),
+        "es_service": str(cfgs[0]["gso_es"].get("service", "FSS")).upper(),
+        "es_freq_ghz": float(cfgs[0]["non_gso"]["frequency_ghz"]),
+        "strict_max_co_freq_total": caps0["strict_max_co_freq_total"],
+        "strict_exclusion_zone": caps0["strict_exclusion_zone"],
+        "min_angle_at_es_deg": caps0["min_angle_at_es_deg"],
+        "gso_min_elevation_deg": caps0["gso_min_elevation_deg"],
+        "pfd_bw_correction_db": bw_correction_db,
+    }
+    tasks = [(f, common, joint_ctx, per_system_nco[i]) for i, f in enumerate(filings)]
+    costs = plan.filing_costs(filings, common, sim=True, wcga=False)
+    try:
+        results = cluster.parallel_starmap_progress(
+            _system_contribution_task, tasks,
+            on_done=_progress_cb(82.0, 88.0),
+            costs=costs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _emit(f"WARN: parallel per-system decomposition failed ({exc}); falling back sequential")
+        results = []
+        for idx, task_args in enumerate(tasks):
+            try:
+                results.append(_system_contribution_task(*task_args))
+            except Exception as e2:  # noqa: BLE001
+                _emit(f"WARN: per-system decomposition fallback {idx}: {e2}")
+                results.append(None)
+    return [
+        {"system_index": i, "label": _system_label(cfgs[i], i), **(r or _EMPTY_DECOMP)}
+        for i, r in enumerate(results)
+    ]
+
+
 def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     """Joint simulation (Method 2B): fused megaconstellation, single sim run."""
     from src.main import (  # type: ignore[import]
@@ -1215,6 +1489,13 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         _emit(f"[method_3] WCG_agg: ES({wcg.es_lat_deg:.2f},{wcg.es_lon_deg:.2f}) GSO {wcg.gso_lon_deg:.2f}")
         _emit_progress(45)
 
+    # Persist the joint WCG the moment it is known — it is the headline geometry
+    # and it cost a full WCGA to find; no reason to make it wait hours for the
+    # simulation to end (or vanish with it on a cancel).
+    result_path = Path(params["result_path"])
+    _write_partial_geometry(result_path, wcg)
+    on_chunk = _partial_snapshot_writer(result_path, wcg, cfgs, system_id_per_sat)
+
     _emit("[method_3] joint EPFD↓ simulation")
     _emit_progress(50)
     # MAX_CO_FREQ (Steps 19-22) applied PER SYSTEM on the fused constellation
@@ -1248,6 +1529,9 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         pfd_bw_correction_db=bw_correction_db,
         system_id_per_sat=np.asarray(system_id_per_sat, dtype=np.int64),
         max_co_freq_by_lat_per_system=per_system_nco,
+        # Snapshot CCDF / time series / per-system curves into partial/ as chunks
+        # land, so a cancelled run still leaves something to show.
+        on_chunk=on_chunk,
     )
     sim_res.build_cdf()
     _emit_progress(82)
@@ -1261,67 +1545,58 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # linear-power sum of these curves reproduces the joint result at any
     # instant/percentile. Different from post_sum below, which uses each
     # filing's OWN independent WCG/antenna/timeline.
-    _emit("[method_3] per-system decomposition at the joint WCG")
-    joint_ctx = {
-        "lat": float(wcg.es_lat_deg), "lon": float(wcg.es_lon_deg),
-        "glon": float(wcg.gso_lon_deg),
-        "dt": dt, "num_steps": num_steps,
-        "alpha0_deg": alpha0, "min_elevation_deg": min_elev,
-        "es_diameter_m": float(cfgs[0]["gso_es"]["antenna_diameter_m"]),
-        "es_efficiency": float(cfgs[0]["gso_es"].get("antenna_efficiency", 0.99)),
-        "es_service": str(cfgs[0]["gso_es"].get("service", "FSS")).upper(),
-        "es_freq_ghz": float(cfgs[0]["non_gso"]["frequency_ghz"]),
-        "strict_max_co_freq_total": caps0["strict_max_co_freq_total"],
-        "strict_exclusion_zone": caps0["strict_exclusion_zone"],
-        "min_angle_at_es_deg": caps0["min_angle_at_es_deg"],
-        "gso_min_elevation_deg": caps0["gso_min_elevation_deg"],
-        "pfd_bw_correction_db": bw_correction_db,
-    }
-    decomp_tasks = [(f, common, joint_ctx, per_system_nco[i]) for i, f in enumerate(filings)]
-    decomp_costs = plan.filing_costs(filings, common, sim=True, wcga=False)
-    try:
-        decomp_results = cluster.parallel_starmap_progress(
-            _system_contribution_task, decomp_tasks,
-            on_done=_progress_cb(82.0, 88.0),
-            costs=decomp_costs,
+    #
+    # Read straight off the joint run: `run_epfd_simulation` accumulated one
+    # sub-accumulator per system_id in the SAME pass (see
+    # epfd_calculator._acc_add_per_system), so no extra simulation is needed.
+    # `_decompose_by_resimulation` is the FALLBACK for engine paths that don't
+    # carry the per-system split (e.g. a dual-time-step joint run) — it
+    # re-simulates every system over the full joint step count, which costs
+    # about as much as the joint run itself.
+    per_system_at_wcg = _decompose_from_joint_acc(
+        getattr(sim_res, "acc", None), cfgs, system_id_per_sat,
+    )
+    if per_system_at_wcg is not None:
+        _emit(f"[method_3] per-system decomposition: {len(per_system_at_wcg)} system(s) "
+              "read from the joint pass (no re-simulation)")
+    else:
+        _emit("[method_3] joint pass carried no per-system split; falling back to "
+              "one simulation per system")
+        per_system_at_wcg = _decompose_by_resimulation(
+            filings=filings, cfgs=cfgs, common=common, wcg=wcg,
+            dt=dt, num_steps=num_steps, alpha0=alpha0, min_elev=min_elev,
+            caps0=caps0, per_system_nco=per_system_nco,
+            bw_correction_db=bw_correction_db,
         )
-    except Exception as exc:  # noqa: BLE001
-        _emit(f"WARN: parallel per-system decomposition failed ({exc}); falling back sequential")
-        decomp_results = []
-        for idx, task_args in enumerate(decomp_tasks):
-            try:
-                decomp_results.append(_system_contribution_task(*task_args))
-            except Exception as e2:  # noqa: BLE001
-                _emit(f"WARN: per-system decomposition fallback {idx}: {e2}")
-                decomp_results.append(None)
-    _empty_decomp = {"ccdf_bins_db": [], "ccdf_pct": [], "max_epfd_dbw": None,
-                     "n_satellites": 0, "timeseries_t_s": [], "timeseries_epfd_db": [],
-                     "timeseries_duration_s": []}
-    per_system_at_wcg = [
-        {"system_index": i, "label": _system_label(cfgs[i], i), **(r or _empty_decomp)}
-        for i, r in enumerate(decomp_results)
-    ]
     _emit_progress(88)
 
-    # post_sum: convolution of single-system CCDFs (as contrast)
-    _emit("[method_3] post_sum complement (per-system convolution)")
-    post_tasks = [(f, common) for f in filings]
-    post_costs = plan.filing_costs(filings, common, sim=True, wcga=True)
-    try:
-        per_system = cluster.parallel_starmap_progress(
-            _single_filing_task, post_tasks,
-            on_done=_progress_cb(88.0, 96.0),
-            costs=post_costs,
-        )
-    except Exception as exc:  # noqa: BLE001
-        _emit(f"WARN: parallel post_sum failed ({exc}); falling back sequential")
-        per_system = []
-        for idx, filing in enumerate(filings):
-            try:
-                per_system.append(_run_single_filing(filing, common))
-            except Exception as e2:  # noqa: BLE001
-                _emit(f"WARN: per-system fallback {idx}: {e2}")
-                per_system.append({"error": str(e2)})
+    # post_sum: convolution of single-system CCDFs (as contrast). OFF by default:
+    # it is NOT a decomposition of the joint run (each filing gets its OWN WCG,
+    # antenna and timeline), so it costs a further full pipeline per filing —
+    # roughly doubling the run — for a comparison curve. Opt in per run.
+    per_system: list = []
+    if not common.get("method3_post_sum"):
+        _emit("[method_3] post_sum skipped (set method3_post_sum to compute the "
+              "independent-WCG convolution complement)")
+    else:
+        _emit("[method_3] post_sum complement (per-system convolution)")
+        post_tasks = [(f, common) for f in filings]
+        post_costs = plan.filing_costs(filings, common, sim=True, wcga=True)
+        try:
+            per_system = cluster.parallel_starmap_progress(
+                _single_filing_task, post_tasks,
+                on_done=_progress_cb(88.0, 96.0),
+                costs=post_costs,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit(f"WARN: parallel post_sum failed ({exc}); falling back sequential")
+            per_system = []
+            for idx, filing in enumerate(filings):
+                try:
+                    per_system.append(_run_single_filing(filing, common))
+                except Exception as e2:  # noqa: BLE001
+                    _emit(f"WARN: per-system fallback {idx}: {e2}")
+                    per_system.append({"error": str(e2)})
 
     post_bins: list[float] = []
     post_pct: list[float] = []
@@ -1514,6 +1789,17 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             _emit(f"Ray active · mode={init_info.get('mode')} (no working_dir)")
     elif init_info.get("error"):
         _emit(f"Ray inactive ({init_info['error']}); falling back to sequential")
+
+    # Inner parallelism for fanned-out tasks (see _task_n_jobs). Decided ONCE
+    # here — ensure_init is the single authority on whether Ray is active — and
+    # carried in params, so every method's `common` inherits it. Without this
+    # the standalone path ran each task single-process AND one at a time.
+    params["task_n_jobs"] = 1 if init_info.get("active") else -1
+    _emit(
+        f"Task inner parallelism: n_jobs={params['task_n_jobs']} "
+        + ("(Ray fan-out: one reserved slot per task)" if init_info.get("active")
+           else "(sequential fallback: all cores per task)")
+    )
 
     if method == "method_1":
         out = _run_method_1(params)

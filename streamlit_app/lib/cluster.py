@@ -313,31 +313,40 @@ def status() -> dict[str, Any]:
 # ─── Parallel dispatch ──────────────────────────────────────────────────────
 
 
-def _numba_capped(fn: Callable, num_cpus: float) -> Callable:
-    """Wrap ``fn`` so it pins Numba's thread pool to its OWN Ray CPU
-    reservation before running.
+#: Env var each Ray task reads (via s1588_worker._task_n_jobs) to learn
+#: how many CPUs IT reserved, so the engine can chunk its own time-step loop
+#: across that many real OS processes (multiprocessing.Pool) instead of
+#: Numba threads — see ``_task_scoped`` for why threads don't work here.
+TASK_CPUS_ENV = "SHARC_TASK_CPUS"
 
-    The engine's own oversubscription guard (``_compute_epfd_numba_threads``
-    in epfd_calculator.py) only accounts for ITS OWN internal multiprocessing
-    (``n_jobs``) — it has no idea Ray is *also* running many other tasks
-    concurrently. Every task in this module calls the engine with
-    ``n_jobs<=1``, which makes Numba grab ALL cores per task (correct for
-    the sequential fallback below, where nothing else runs at the same
-    time) — but under Ray, with ``num_cpus`` slots advertised, up to
-    ``total_cpus / num_cpus`` of these tasks run at once, each ALSO trying
-    to grab every core: e.g. 32 concurrent tasks x 32 Numba threads = 1024
-    threads fighting over 32 physical cores. Ray's own scheduling already
-    provides the "N tasks in parallel" parallelism (one per reserved CPU
-    slot); each task should therefore use only the threads IT reserved.
+
+def _task_scoped(fn: Callable, num_cpus: float) -> Callable:
+    """Wrap ``fn`` so it knows its OWN Ray CPU reservation via ``TASK_CPUS_ENV``.
+
+    ``uploads_runtime_env`` pins every thread library (Numba/OMP/MKL/...) to
+    1 thread for every Ray worker process — a *process-startup* env var, so
+    it cannot be raised later at runtime (``numba.set_num_threads(N)`` can
+    only ever LOWER the ceiling ``NUMBA_NUM_THREADS`` was started with).
+    That pin exists precisely to stop Numba from grabbing every core in each
+    of the many tasks Ray runs concurrently — correct, but it also means a
+    single heavy task (e.g. a 30,000-satellite filing next to a 30-satellite
+    one in the same grid sweep) can never get more raw compute by asking for
+    more threads: the ceiling was fixed before Python even started.
+
+    The parallelism axis that DOES still work per-task is the engine's own
+    ``multiprocessing.Pool`` (its ``n_jobs`` parameter, real OS processes —
+    each still capped to 1 Numba thread by the same env var, but N processes
+    genuinely use N cores). This wrapper just publishes ``num_cpus`` (the
+    reservation Ray granted this task) so the engine call sites in
+    ``s1588_worker.py`` can pass it through as their own ``n_jobs`` instead
+    of the flat default of 1 — Ray's "N tasks in parallel" (one per reserved
+    slot) and the engine's "N processes within one task" now scale on the
+    SAME budget instead of one silently doing nothing.
     """
-    cap = max(1, int(num_cpus))
+    cap = max(1, int(round(num_cpus)))
 
     def _wrapped(*args, **kwargs):
-        try:
-            import numba
-            numba.set_num_threads(cap)
-        except Exception:  # noqa: BLE001 — never fail the task over this
-            pass
+        os.environ[TASK_CPUS_ENV] = str(cap)
         return fn(*args, **kwargs)
 
     # Preserve the original name/docstring for the Ray dashboard — otherwise
@@ -354,15 +363,16 @@ def _numba_capped(fn: Callable, num_cpus: float) -> Callable:
 def _costs_to_num_cpus(
     costs: list[float] | None, *, base_num_cpus: float, cpu_cap: float,
 ) -> list[float] | None:
-    """Scale each task's Ray CPU reservation (and so its Numba thread
-    budget, via ``_numba_capped``) to its relative ``costs`` weight.
+    """Scale each task's Ray CPU reservation (and so its engine ``n_jobs``
+    budget, via ``_task_scoped`` / ``TASK_CPUS_ENV``) to its relative
+    ``costs`` weight.
 
     One flat ``num_cpus`` for every task is wrong when a batch mixes wildly
     different sizes — e.g. a grid sweep over 3 filings where one has 30
-    satellites and another has 30,000: pinning both to 1 Numba thread
-    makes the heavy filing's tasks take ~30x longer than they need to,
-    while Ray happily runs many of the cheap filing's tasks concurrently
-    (they don't need the extra threads). Scaling by cost fixes both: the
+    satellites and another has 30,000: giving both the same single-process
+    budget makes the heavy filing's tasks take far longer than they need
+    to, while Ray happily runs many of the cheap filing's tasks concurrently
+    (they don't need the extra cores). Scaling by cost fixes both: the
     cheapest task in the batch keeps ``base_num_cpus`` (unchanged
     behaviour when every task is similar), heavier ones reserve
     proportionally more.
@@ -414,11 +424,13 @@ def parallel_starmap_progress(
       slowest unit starts earliest, minimising makespan under
       heterogeneous task weights. Results are always returned in input
       order regardless of dispatch order.
-    * **Per-task CPU/Numba-thread reservation** (Ray-active only, see
+    * **Per-task CPU reservation** (Ray-active only, see
       ``_costs_to_num_cpus``): the cheapest task in the batch keeps
-      ``num_cpus``; heavier ones reserve proportionally more (and so get
-      proportionally more Numba threads via ``_numba_capped``), capped so
-      one task can't claim the whole node.
+      ``num_cpus``; heavier ones reserve proportionally more, capped so
+      one task can't claim the whole node. Published to the task via
+      ``TASK_CPUS_ENV`` (see ``_task_scoped``) so it can size the engine's
+      own ``n_jobs`` (real multiprocessing) accordingly — see
+      ``s1588_worker._task_n_jobs``.
 
     ``stall_timeout_s``: abort (TimeoutError) when **no** task completes
     for that long — a hung remote task must not block the job forever.
@@ -440,10 +452,10 @@ def parallel_starmap_progress(
     info = ensure_init(runtime_env=runtime_env)
     if info.get("active"):
         import ray
-        # Cap Numba threads to each task's OWN CPU reservation — see
-        # _numba_capped. Sequential fallback below deliberately skips this
-        # (nothing else runs concurrently there, so full-core Numba is
-        # correct as-is).
+        # Publish each task's OWN CPU reservation via TASK_CPUS_ENV — see
+        # _task_scoped. Sequential fallback below deliberately skips this
+        # (nothing else runs concurrently there, so the engine's own -1/
+        # auto n_jobs default is correct as-is).
         #
         # Per-item reservation from `costs`: a flat num_cpus is wrong when
         # the batch mixes wildly different task sizes (e.g. one filing
@@ -470,7 +482,7 @@ def parallel_starmap_progress(
         fut_to_idx: dict[Any, int] = {}
         for i in order:
             item_cpus = per_item_cpus[i] if per_item_cpus is not None else num_cpus
-            rfn = ray.remote(_numba_capped(fn, item_cpus))
+            rfn = ray.remote(_task_scoped(fn, item_cpus))
             opts = {"num_cpus": item_cpus, "scheduling_strategy": "SPREAD"}
             fut_to_idx[rfn.options(**opts).remote(*items[i])] = i
         pending = list(fut_to_idx.keys())

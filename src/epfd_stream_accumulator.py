@@ -100,9 +100,29 @@ class EPFDStreamAccumulator:
     decim_min_alpha_deg: list[float] = field(default_factory=list)
     decim_duration_s: list[float] = field(default_factory=list)
 
+    # Multi-system aggregation (Resolution 76 / method_3): one sub-accumulator
+    # per ``system_id``, fed from the SAME pass as the joint one — each system's
+    # own linear-power contribution at the joint geometry. Because the joint
+    # EPFD of a step is the linear sum over satellites, and each satellite
+    # belongs to exactly one system, these curves sum back to the joint one
+    # sample-for-sample; no re-simulation is needed to decompose the aggregate.
+    # Same class (not a slim variant) so ``add``/``merge``/``build_ccdf``/the
+    # decimated trace all work unchanged — ~1 MB per system, and a run has a
+    # handful. Nested one level only: sub-accumulators keep this dict empty.
+    per_system: dict[int, "EPFDStreamAccumulator"] = field(default_factory=dict)
+
     # ─────────────────────────────────────────────────────────────────────
     #  Insertion
     # ─────────────────────────────────────────────────────────────────────
+
+    def system_acc(self, system_id: int) -> "EPFDStreamAccumulator":
+        """Sub-accumulator for ``system_id``, created on first use."""
+        sid = int(system_id)
+        sub = self.per_system.get(sid)
+        if sub is None:
+            sub = EPFDStreamAccumulator(decim_capacity=self.decim_capacity)
+            self.per_system[sid] = sub
+        return sub
 
     def add(
         self,
@@ -269,8 +289,15 @@ class EPFDStreamAccumulator:
         while len(self.decim_t_s) > 2 * self.decim_capacity:
             self._decim_halve()
 
+        # Per-system sub-accumulators (recurses exactly one level: a
+        # sub-accumulator's own ``per_system`` is always empty).
+        for sid, other_sub in other.per_system.items():
+            self.system_acc(sid).merge(other_sub)
+
     def finalize_decimated(self) -> None:
         """Reorders the decimated trace by time (parallel chunks arrive out of order)."""
+        for sub in self.per_system.values():
+            sub.finalize_decimated()
         if not self.decim_t_s:
             return
         idx = np.argsort(np.asarray(self.decim_t_s, dtype=np.float64), kind="stable")

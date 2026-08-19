@@ -187,7 +187,7 @@ st.markdown(
 |---|---|---|---|
 | **method_1** | Convolve per-system CCDFs at each filing's own WCG | `N` sims | Conservative aggregate (Study 1). |
 | **method_2** | Sweep ES×GSO grid → keep per-system + per-point convolution + envelope | `n_grid × N` sims | Tighter aggregate (Study 2 / WP-4A Step-1). |
-| **method_3** | Fuse N constellations + joint WCGA + single joint sim | 1 large sim + `N` post_sum | Highest fidelity (Study 3). |
+| **method_3** | Fuse N constellations + joint WCGA + single joint sim (per-system curves come out of the same pass) | 1 large sim (+ `N` only if `post_sum` is enabled) | Highest fidelity (Study 3). |
 | **method_4** | For each filing's WCG, simulate all N → convolve | `N × N` sims | Inhomogeneity audit (didactic). |
 
 **Choosing a method**
