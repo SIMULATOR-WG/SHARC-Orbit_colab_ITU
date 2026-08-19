@@ -425,6 +425,8 @@ def _accumulate_epfd_visible_satellites(
     sin_el_full: np.ndarray | None = None,
     system_id_all: np.ndarray | None = None,
     max_co_freq_by_system: dict[int, int] | None = None,
+    min_elevation_deg_all: np.ndarray | None = None,
+    alpha0_deg_all: np.ndarray | None = None,
     per_sat_out: dict | None = None,
     per_system_out: dict[int, list] | None = None,
 ) -> tuple[list[float], list[float], float, bool]:
@@ -482,12 +484,28 @@ def _accumulate_epfd_visible_satellites(
             if visible_idx.size == 0:
                 return [], [], 180.0, False
 
-    if sin_el_full is not None and float(min_elevation_deg) > 0.0:
+    if min_elevation_deg_all is not None and sin_el_full is not None:
+        # Per-system ε₀ (method_3 joint runs): each satellite gates on its OWN
+        # system's threshold in Step 18 bullet ① — one shared scalar would let
+        # a stricter system's satellites transmit below their declared ε₀.
+        _sin_min_el_all = np.sin(np.radians(
+            np.asarray(min_elevation_deg_all, dtype=np.float64)
+        ))
+        _eps0_ok_full = np.asarray(sin_el_full, dtype=np.float64) >= _sin_min_el_all
+        eps0_ok_vis = _eps0_ok_full[visible_idx]
+    elif sin_el_full is not None and float(min_elevation_deg) > 0.0:
         _sin_min_el_local = math.sin(math.radians(float(min_elevation_deg)))
         _eps0_ok_full = np.asarray(sin_el_full, dtype=np.float64) >= _sin_min_el_local
         eps0_ok_vis = _eps0_ok_full[visible_idx]
     else:
         eps0_ok_vis = np.ones(visible_idx.size, dtype=bool)
+
+    # Per-system α₀ (method_3): per-visible-satellite exclusion-zone half-angle;
+    # None → the scalar alpha0_deg applies to every satellite (single-entry).
+    alpha0_vis = (
+        np.asarray(alpha0_deg_all, dtype=np.float64)[visible_idx]
+        if alpha0_deg_all is not None else None
+    )
 
     if _pfd_mask_uses_batch(pfd_mask):
         pos_vis = pos_ecef_all[visible_idx]
@@ -520,7 +538,9 @@ def _accumulate_epfd_visible_satellites(
         ):
             any_critical_gain = bool(np.any(g_rel_arr > dual_ts._gain_threshold_db))
 
-        is_alpha_outside = np.abs(alpha_arr) >= alpha0_deg
+        is_alpha_outside = np.abs(alpha_arr) >= (
+            alpha0_vis if alpha0_vis is not None else alpha0_deg
+        )
         n_vis = visible_idx.size
         # Step 18 bullet ①: |α| ≥ α₀  AND  ε_NGSO ≥ ε₀[lat][AzNGSO].
         is_standard_arr = is_alpha_outside & eps0_ok_vis
@@ -540,7 +560,8 @@ def _accumulate_epfd_visible_satellites(
                 theta_cand = None if theta_arr is None else theta_arr[cand]
                 g_rel_at_a0 = _relative_gain_batch(
                     es_antenna,
-                    np.full(cand.size, alpha0_deg, dtype=float),
+                    (alpha0_vis[cand] if alpha0_vis is not None
+                     else np.full(cand.size, alpha0_deg, dtype=float)),
                     theta_cand,
                 )
                 override[cand] = g_rel_arr[cand] > np.minimum(-30.0, g_rel_at_a0)
@@ -679,19 +700,22 @@ def _accumulate_epfd_visible_satellites(
             if dual_ts.is_critical_gain(es_antenna.relative_gain(offaxis, theta_planar)):
                 any_critical_gain = True
 
-        is_alpha_outside = abs(alpha) >= alpha0_deg
+        _alpha0_k = (
+            float(alpha0_deg_all[k]) if alpha0_deg_all is not None else alpha0_deg
+        )
+        is_alpha_outside = abs(alpha) >= _alpha0_k
         is_eps0_ok = bool(eps0_ok_vis[j_local])
         is_standard = is_alpha_outside and is_eps0_ok
         if per_sat_out is not None:
             # Collect mode: OR flag evaluated for every satellite (§D5.1.4.2).
             is_or_flag = s1503_or_condition_include(
-                es_antenna, offaxis, alpha0_deg, theta_planar,
+                es_antenna, offaxis, _alpha0_k, theta_planar,
                 disable_or_condition=strict_exclusion_zone,
             )
             is_override = (not is_standard) and is_or_flag
         else:
             is_or_flag = is_override = (not is_standard) and s1503_or_condition_include(
-                es_antenna, offaxis, alpha0_deg, theta_planar,
+                es_antenna, offaxis, _alpha0_k, theta_planar,
                 disable_or_condition=strict_exclusion_zone,
             )
         if not is_standard and not is_override:
@@ -1250,10 +1274,21 @@ def _simulate_chunk(args):
     ``ts`` is ``None`` except when ``keep_full_history=True`` (last element of args).
     """
     # Compat: unpacking tolerant of chunks without ``keep_full_history`` at the end
-    # and/or without the multi-system aggregation fields (system_id + table/system).
+    # and/or without the multi-system aggregation fields (system_id + table/system
+    # + per-satellite ε₀/α₀ arrays).
     system_id_per_sat = None
     max_co_freq_by_system = None
-    if len(args) == 23:
+    min_el_all = None
+    alpha0_all = None
+    if len(args) == 25:
+        (start_step, num_steps, t_start, tstep_s, constellation,
+         wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+         pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
+         min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
+         keep_full_history, system_id_per_sat, max_co_freq_by_system,
+         min_el_all, alpha0_all) = args
+    elif len(args) == 23:
         (start_step, num_steps, t_start, tstep_s, constellation,
          wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
          pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
@@ -1303,6 +1338,9 @@ def _simulate_chunk(args):
     )
     # Constellation-invariant within the chunk — hoisted out of the time loop.
     min_h_chunk = _min_operating_height_km_batch(constellation, N)
+    sin_min_el_arr = (
+        np.sin(np.radians(min_el_all)) if min_el_all is not None else None
+    )
 
     # method_3 per-system decomposition in the SAME pass: the full system id set
     # (hoisted — every step must advance every system, see _acc_add_per_system).
@@ -1344,7 +1382,10 @@ def _simulate_chunk(args):
 
         # num_visible = sats with ε ≥ ε₀ (reporting semantics; the accumulator
         # receives the horizon set and filters ε₀ internally for Step 18 ①).
-        num_visible = int(np.count_nonzero(sin_el >= math.sin(math.radians(min_elevation_deg))))
+        num_visible = int(np.count_nonzero(
+            sin_el >= (sin_min_el_arr if sin_min_el_arr is not None
+                       else math.sin(math.radians(min_elevation_deg)))
+        ))
 
         per_system_step: dict[int, list] | None = {} if all_sids is not None else None
         standard_epfd, override_epfd, min_alpha, _ = _accumulate_epfd_visible_satellites(
@@ -1376,6 +1417,8 @@ def _simulate_chunk(args):
             sin_el_full=sin_el,
             system_id_all=system_id_per_sat,
             max_co_freq_by_system=max_co_freq_by_system,
+            min_elevation_deg_all=min_el_all,
+            alpha0_deg_all=alpha0_all,
             per_system_out=per_system_step,
         )
 
@@ -1426,7 +1469,19 @@ def _simulate_chunk_dual_ts(args):
     """
     system_id_per_sat = None
     max_co_freq_by_system = None
-    if len(args) == 27:
+    min_el_all = None
+    alpha0_all = None
+    if len(args) == 29:
+        (t_start, t_end,
+         dual_ts_mode, dual_ts_fine_s, dual_ts_coarse_s, dual_ts_ncoarse,
+         dual_ts_gain_threshold_db, dual_ts_alpha_threshold_deg,
+         constellation, wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+         pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
+         min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
+         keep_full_history, system_id_per_sat, max_co_freq_by_system,
+         min_el_all, alpha0_all) = args
+    elif len(args) == 27:
         (t_start, t_end,
          dual_ts_mode, dual_ts_fine_s, dual_ts_coarse_s, dual_ts_ncoarse,
          dual_ts_gain_threshold_db, dual_ts_alpha_threshold_deg,
@@ -1483,6 +1538,9 @@ def _simulate_chunk_dual_ts(args):
     )
     # Constellation-invariant within the chunk — hoisted out of the time loop.
     min_h = _min_operating_height_km_batch(constellation, N)
+    sin_min_el_arr = (
+        np.sin(np.radians(min_el_all)) if min_el_all is not None else None
+    )
     _proxy = _DualTSProxy(
         dual_ts_mode, dual_ts_fine_s, dual_ts_coarse_s,
         dual_ts_ncoarse, dual_ts_gain_threshold_db,
@@ -1556,6 +1614,8 @@ def _simulate_chunk_dual_ts(args):
                 sin_el_full=sin_el,
                 system_id_all=system_id_per_sat,
                 max_co_freq_by_system=max_co_freq_by_system,
+                min_elevation_deg_all=min_el_all,
+                alpha0_deg_all=alpha0_all,
             )
         )
 
@@ -1572,7 +1632,10 @@ def _simulate_chunk_dual_ts(args):
         epfd_agg_db = (
             10.0 * math.log10(epfd_sum_linear) if epfd_sum_linear > 0 else -999.0
         )
-        num_visible = int(np.count_nonzero(sin_el >= math.sin(math.radians(min_elevation_deg))))
+        num_visible = int(np.count_nonzero(
+            sin_el >= (sin_min_el_arr if sin_min_el_arr is not None
+                       else math.sin(math.radians(min_elevation_deg)))
+        ))
         num_contributing = len(standard_epfd) + len(override_epfd)
         acc.add(
             time_s=t_s,
@@ -1782,6 +1845,8 @@ def run_epfd_simulation(
     keep_full_history: bool = False,
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
+    min_elevation_deg_per_system: list | None = None,
+    alpha0_deg_per_system: list | None = None,
     on_chunk: "Callable[[EPFDStreamAccumulator, int, int], None] | None" = None,
 ) -> EPFDSimulationResult:
     """Runs the complete EPFD↓ time simulation.
@@ -1825,6 +1890,27 @@ def run_epfd_simulation(
             for sid, tbl in enumerate(max_co_freq_by_lat_per_system)
         }
 
+    # Per-system ε₀/α₀ (method_3 joint runs), expanded to per-satellite arrays
+    # via system_id_per_sat: each system's own Step-18 thresholds gate its own
+    # satellites — one shared scalar would let a stricter system's satellites
+    # transmit below their declared ε₀ (or against the wrong exclusion-zone
+    # half-angle). The scalar alpha0_deg / min_elevation_deg args then serve
+    # only callers without a per-system list (all single-entry paths). Lists
+    # are indexed by system id (original cfg order, same convention as
+    # max_co_freq_by_lat_per_system).
+    min_el_all: np.ndarray | None = None
+    alpha0_all: np.ndarray | None = None
+    if system_id_per_sat is not None:
+        _sid_arr = np.asarray(system_id_per_sat, dtype=np.int64)
+        if min_elevation_deg_per_system is not None:
+            min_el_all = np.asarray(
+                min_elevation_deg_per_system, dtype=np.float64
+            )[_sid_arr]
+        if alpha0_deg_per_system is not None:
+            alpha0_all = np.asarray(
+                alpha0_deg_per_system, dtype=np.float64
+            )[_sid_arr]
+
     # --- SEQUENTIAL MODE (n_jobs=1 or no dual_ts when n_jobs=1) ---
     if n_jobs == 1:
             
@@ -1857,6 +1943,9 @@ def run_epfd_simulation(
             [ cl * co,  cl * so,  sl ],
         ])
         sin_min_el_seq = math.sin(math.radians(min_elevation_deg))
+        sin_min_el_all_seq = (
+            np.sin(np.radians(min_el_all)) if min_el_all is not None else None
+        )
         max_co_freq_seq = _resolve_max_co_freq(wcg.es_lat_deg, max_co_freq_by_lat or [])
 
         _prop_cache_seq = build_constellation_cache(
@@ -1913,7 +2002,10 @@ def run_epfd_simulation(
                 ):
                     visible_idx = np.array([], dtype=np.int64)
 
-            num_visible = int(np.count_nonzero(sin_el >= sin_min_el_seq))
+            num_visible = int(np.count_nonzero(
+                sin_el >= (sin_min_el_all_seq if sin_min_el_all_seq is not None
+                           else sin_min_el_seq)
+            ))
 
             per_system_step: dict[int, list] | None = (
                 {} if all_sids_seq is not None else None
@@ -1948,6 +2040,8 @@ def run_epfd_simulation(
                     sin_el_full=sin_el,
                     system_id_all=system_id_per_sat,
                     max_co_freq_by_system=max_co_freq_by_system,
+                    min_elevation_deg_all=min_el_all,
+                    alpha0_deg_all=alpha0_all,
                     per_system_out=per_system_step,
                 )
             )
@@ -2043,6 +2137,7 @@ def run_epfd_simulation(
                 wdelta_deg, t_run_s, gso_min_elevation_deg,
                 keep_full_history,
                 system_id_per_sat, max_co_freq_by_system,
+                min_el_all, alpha0_all,
             ))
             t_c = t_end_c
 
@@ -2132,6 +2227,7 @@ def run_epfd_simulation(
                 gso_min_elevation_deg,
                 keep_full_history,
                 system_id_per_sat, max_co_freq_by_system,
+                min_el_all, alpha0_all,
             ))
             current_step += count
             current_t += count * tstep_s

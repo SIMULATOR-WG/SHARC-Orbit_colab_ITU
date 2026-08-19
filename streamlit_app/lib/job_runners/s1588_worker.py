@@ -827,9 +827,11 @@ def _system_contribution_task(
     """method_3 per-system decomposition: this filing's own satellites' EPFD
     contribution, evaluated with the JOINT run's shared geometry, time base,
     ES antenna and gates (``joint_ctx``) — everything the fused simulation
-    applies UNIFORMLY to every satellite regardless of system. Only the
-    constellation/mask and MAX_CO_FREQ stay per-filing (Steps 19-22 are
-    intra-system even inside the joint run — see ``_s1503_normative_caps``).
+    applies UNIFORMLY to every satellite regardless of system. The
+    constellation/mask, MAX_CO_FREQ and ε₀/α₀ stay per-filing (Steps 18-22
+    are intra-system even inside the joint run: the joint pass partitions
+    Step-18 eligibility per system, and the caller injects this filing's own
+    ε₀/α₀ into ``joint_ctx`` — see ``_decompose_by_resimulation``).
 
     This does NOT reuse ``_run_at_geometry`` (unlike method_2/4's fixed-
     geometry tasks): that helper derives antenna/α0/ε₀/Δt/N from THIS
@@ -1296,12 +1298,19 @@ def _decompose_by_resimulation(
     caps0: dict[str, Any],
     per_system_nco: list,
     bw_correction_db: float,
+    per_system_eps0: list | None = None,
+    per_system_alpha0: list | None = None,
 ) -> list[dict[str, Any]]:
     """Fallback decomposition: one full simulation per system at the joint WCG.
 
     Costs about as much as the joint run itself (same step count, and the
     systems' satellites sum to the fused constellation), so this is only for
     engine paths where :func:`_decompose_from_joint_acc` cannot serve.
+
+    ``per_system_eps0`` / ``per_system_alpha0``: each filing's own ε₀/α₀ —
+    the joint pass partitions Step-18 eligibility per system, so each task
+    must gate this filing's satellites with the SAME thresholds the joint run
+    applied to them (falls back to the shared scalars when absent).
     """
     joint_ctx = {
         "lat": float(wcg.es_lat_deg), "lon": float(wcg.es_lon_deg),
@@ -1318,7 +1327,16 @@ def _decompose_by_resimulation(
         "gso_min_elevation_deg": caps0["gso_min_elevation_deg"],
         "pfd_bw_correction_db": bw_correction_db,
     }
-    tasks = [(f, common, joint_ctx, per_system_nco[i]) for i, f in enumerate(filings)]
+    tasks = [
+        (f, common,
+         {**joint_ctx,
+          "alpha0_deg": float(per_system_alpha0[i])
+          if per_system_alpha0 is not None else alpha0,
+          "min_elevation_deg": float(per_system_eps0[i])
+          if per_system_eps0 is not None else min_elev},
+         per_system_nco[i])
+        for i, f in enumerate(filings)
+    ]
     costs = plan.filing_costs(filings, common, sim=True, wcga=False)
     try:
         results = cluster.parallel_starmap_progress(
@@ -1359,16 +1377,31 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
 
     cfgs = [_load_cfg(f, common) for f in filings]
 
-    # Joint megaconstellation needs one ε₀. Explicit UI override wins; otherwise
-    # the least restrictive filing value (min) — more visible sats ⇒ more
-    # conservative aggregate EPFD↓. Each filing's cfg still keeps its own ε₀
-    # for any per-system side paths.
+    # ε₀/α₀ per system: the engine partitions Step-18 eligibility by system
+    # (min_elevation_deg_per_system / alpha0_deg_per_system + system_id_per_sat),
+    # so each filing's satellites gate on that filing's OWN thresholds — the
+    # same criterion each filing gets on its independent method_1 run. A UI
+    # ε₀ override was already applied per filing by _load_cfg, so it shows up
+    # here as identical per-system values.
+    per_system_eps0 = [
+        float(c["non_gso"].get("min_elevation_deg", 5.0)) for c in cfgs
+    ]
+    per_system_alpha0 = [
+        float(c["non_gso"].get("alpha0_deg", 0.0)) for c in cfgs
+    ]
+
+    # Scalar ε₀ fallback (engine arg + logs): least restrictive filing value.
+    # With the per-system lists above it no longer gates any satellite.
     if common.get("min_elevation_deg") is not None:
         min_elev = float(common["min_elevation_deg"])
     else:
-        min_elev = min(
-            float(c["non_gso"].get("min_elevation_deg", 5.0)) for c in cfgs
-        ) if cfgs else 5.0
+        min_elev = min(per_system_eps0) if per_system_eps0 else 5.0
+
+    if len(set(zip(per_system_eps0, per_system_alpha0))) > 1:
+        _emit("[method_3] per-system Step-18 thresholds: " + " · ".join(
+            f"sys{i}: ε₀={e:g}° α₀={a:g}°"
+            for i, (e, a) in enumerate(zip(per_system_eps0, per_system_alpha0))
+        ))
 
     # Built here (not further down) because the §D4 time-base reference below
     # must use the SAME es_antenna θ_3dB the joint simulation actually applies
@@ -1379,21 +1412,19 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
 
     def _filing_time_base(cfg: dict[str, Any]) -> tuple[float, int]:
         """This filing's own §D4 (Δt, N) reference, dimensioned with the
-        JOINT run's shared es_antenna/ε₀ — not this filing's own (different)
-        antenna/elevation — so the reference matches what the fused
-        simulation will actually run. User overrides win, same as
-        ``resolve_time_base``. Only a throwaway shallow-copied ``non_gso``
-        carries the shared ε₀; ``cfg`` itself is untouched (per-system side
-        paths — post_sum, per_system_at_wcg — still use each filing's own ε₀)."""
+        JOINT run's shared es_antenna (one victim ES for the aggregate — its
+        θ_3dB is what §D4.2 actually consumes). ε₀ is passed through to
+        compute_time_step_and_count but is a dead parameter of the §D4
+        dimensioning (signature-only in time_step.py), so the cfg is used
+        as-is — no shared-ε₀ copy needed. User overrides win, same as
+        ``resolve_time_base``."""
         sim_cfg = cfg.get("simulation") or {}
         nsteps = int(sim_cfg.get("num_time_steps", 0) or 0)
         tstep = (float(sim_cfg.get("coarse_time_step_s", 0.0) or 0.0)
                  if sim_cfg.get("_coarse_step_overridden") else 0.0)
         if nsteps > 0 and tstep > 0.0:
             return tstep, nsteps
-        cfg_shared = dict(cfg)
-        cfg_shared["non_gso"] = {**cfg["non_gso"], "min_elevation_deg": min_elev}
-        ref_tstep, ref_nsteps = compute_s1503_time_reference(cfg_shared, es_antenna=es_antenna)
+        ref_tstep, ref_nsteps = compute_s1503_time_reference(cfg, es_antenna=es_antenna)
         return (tstep if tstep > 0.0 else ref_tstep, nsteps if nsteps > 0 else ref_nsteps)
 
     # One fused constellation ⇒ one timeline. With N / Δt left on auto, apply
@@ -1512,13 +1543,17 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         for k, (key, ref_idx) in enumerate(unique_orbits.items()):
             oe_ref = combined[ref_idx]
             ref_mask = pfd_multi.mask_for_sat(ref_idx)
-            ref_nco = per_system_nco[system_id_per_sat[ref_idx]]
+            ref_sid = int(system_id_per_sat[ref_idx])
+            ref_nco = per_system_nco[ref_sid]
             _emit_progress(20 + 25.0 * (k + 1) / max(1, len(unique_orbits)))
             try:
                 wcg_i = search_wcg_s1503(
                     oe_ref=oe_ref, t_s=0.0,
                     pfd_mask=ref_mask, es_antenna=es_antenna,
-                    alpha0_deg=alpha0, min_elevation_deg=min_elev,
+                    # Owning filing's own ε₀/α₀ — same values the joint
+                    # simulation applies to this orbit's satellites.
+                    alpha0_deg=per_system_alpha0[ref_sid],
+                    min_elevation_deg=per_system_eps0[ref_sid],
                     gso_min_elevation_deg=caps0["gso_min_elevation_deg"],
                     step_size_deg=step_deg, n_jobs=n_jobs,
                     orbit_idx=k, total_orbits=len(unique_orbits),
@@ -1578,6 +1613,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         pfd_bw_correction_db=bw_correction_db,
         system_id_per_sat=np.asarray(system_id_per_sat, dtype=np.int64),
         max_co_freq_by_lat_per_system=per_system_nco,
+        # Step-18 eligibility partitioned per system: each filing's own ε₀/α₀
+        # gate its own satellites (method_1's criterion, kept in the fusion).
+        min_elevation_deg_per_system=per_system_eps0,
+        alpha0_deg_per_system=per_system_alpha0,
         # Snapshot CCDF / time series / per-system curves into partial/ as chunks
         # land, so a cancelled run still leaves something to show.
         on_chunk=on_chunk,
@@ -1616,6 +1655,8 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
             dt=dt, num_steps=num_steps, alpha0=alpha0, min_elev=min_elev,
             caps0=caps0, per_system_nco=per_system_nco,
             bw_correction_db=bw_correction_db,
+            per_system_eps0=per_system_eps0,
+            per_system_alpha0=per_system_alpha0,
         )
     _emit_progress(88)
 
