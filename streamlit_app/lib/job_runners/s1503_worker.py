@@ -271,7 +271,9 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     from streamlit_app.lib import cluster, wcga_cluster, epfd_cluster  # noqa: PLC0415
     _distributed = False
     try:
-        rt_env = cluster.uploads_runtime_env()
+        rt_env = cluster.uploads_runtime_env(
+            filings=[{"srs_path": srs_path, "mask_path": mask_path}],
+        )
         wcga_on = wcga_cluster.enable(
             runtime_env=rt_env,
             on_progress=lambda i, n: _emit_progress(15 + 30.0 * i / max(1, n)),

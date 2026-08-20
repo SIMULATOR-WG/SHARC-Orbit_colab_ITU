@@ -211,6 +211,71 @@ def write_per_system_timeseries_csv(result_path: Path, sim_data: dict[str, Any])
     return out.name
 
 
+def write_per_point_timeseries_csv(
+    result_path: Path, sim_data: dict[str, Any],
+    per_point_series: list[dict[str, Any]] | None,
+) -> str | None:
+    """``epfd_timeseries_per_point.csv`` — method_2/5 only: each system's
+    decimated EPFD-vs-time trace AT EACH ES×GSO grid point — the fixed
+    geometry's own per-system contribution, NOT convolved with the other
+    systems at that point (linear-power sum across systems, per point,
+    reproduces that point's convolved CCDF already in ``per_point``). Lets a
+    caller re-aggregate by hand (e.g. a different subset of systems) without
+    re-running the simulation.
+
+    ``per_point_series`` is passed separately from ``sim_data`` rather than
+    read off it — a fine world-wide grid × several systems multiplies into
+    far more raw samples than ``sim_data.json`` (loaded by the Results page)
+    should carry. One row per (grid point, system, time sample)."""
+    if not per_point_series:
+        return None
+    unit = _epfd_unit(sim_data)
+    lines = [
+        "# SHARC-Orbit per-system EPFD time series at each ES x GSO grid "
+        "point (method_2/5): each system's own decimated trace at that "
+        "point's fixed geometry, NOT convolved with the other systems there. "
+        "Sum linearly (in power) across systems, per point, to reproduce "
+        "that point's convolved CCDF (see per_point in sim_data.json).",
+        f"# units: es_lat_deg/es_lon_deg/gso_lon_deg [deg] · t_s [s] · "
+        f"epfd_db [{unit}] · duration_s [s]",
+        "grid_point_index,es_lat_deg,es_lon_deg,gso_lon_deg,"
+        "system_index,system_label,t_s,epfd_db,duration_s",
+    ]
+    n_rows = 0
+    for p in per_point_series:
+        pi = p.get("index")
+        es_lat = p.get("es_lat_deg")
+        es_lon = p.get("es_lon_deg")
+        gso_lon = p.get("gso_lon_deg")
+        for r in (p.get("per_system") or []):
+            t = r.get("timeseries_t_s") or []
+            e = r.get("timeseries_epfd_db") or []
+            d = r.get("timeseries_duration_s") or []
+            if not t or len(t) != len(e):
+                continue
+            if len(d) != len(t):
+                d = [float("nan")] * len(t)
+            label = str(r.get("label") or f"system_{r.get('system_index')}").replace(",", ";")
+            for ti, ei, di in zip(t, e, d):
+                n_rows += 1
+                lines.append(
+                    f"{pi},{float(es_lat):.4f},{float(es_lon):.4f},{float(gso_lon):.4f},"
+                    f"{r['system_index']},{label},{float(ti):.6g},{float(ei):.4f},{float(di):.6g}"
+                )
+    if n_rows == 0:
+        return None
+    payload = "\n".join(lines) + "\n"
+    # R16-style — compressed container for long traces (many points × systems).
+    if n_rows > 50_000:
+        import gzip
+        out = result_path / "epfd_timeseries_per_point.csv.gz"
+        out.write_bytes(gzip.compress(payload.encode("utf-8")))
+        return out.name
+    out = result_path / "epfd_timeseries_per_point.csv"
+    out.write_text(payload, encoding="utf-8")
+    return out.name
+
+
 def _mpl():
     import matplotlib
     matplotlib.use("Agg")

@@ -27,7 +27,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable
 
 from . import DATA_ROOT
 
@@ -146,6 +146,18 @@ def _ray_is_initialized_safe() -> bool:
         return False
 
 
+#: The runtime_env passed to the FIRST ensure_init() call in this process,
+#: reused by every later bare call. Needed because a caller upstream (e.g.
+#: ``_run()`` in s1588_worker.py) may pass the real runtime_env (py_modules +
+#: working_dir) and have that specific ray.init() attempt fail — e.g. the
+#: working_dir upload exceeding Ray's package size cap — while a LATER, bare
+#: ``ensure_init()`` call from deeper in the same job (assuming Ray is "already
+#: initialized") becomes the one that actually succeeds. Without this cache
+#: that success would silently carry no py_modules, and every remote task
+#: would crash with ``ModuleNotFoundError: No module named 'streamlit_app'``.
+_LAST_RUNTIME_ENV: dict[str, Any] | None = None
+
+
 def ensure_init(*, runtime_env: dict[str, Any] | None = None) -> dict[str, Any]:
     """Initialize Ray per saved cfg. Idempotent. Returns status dict.
 
@@ -157,8 +169,15 @@ def ensure_init(*, runtime_env: dict[str, Any] | None = None) -> dict[str, Any]:
     ``runtime_env`` is forwarded to ``ray.init`` — used by job workers
     that need to ship a ``working_dir`` (the SRS/mask MDBs) to every
     Ray node. Has no effect once Ray is already initialised in this
-    process (Ray locks the runtime_env at first init).
+    process (Ray locks the runtime_env at first init). A bare call
+    (``runtime_env=None``) reuses whatever runtime_env an earlier call in
+    this process supplied — see ``_LAST_RUNTIME_ENV``.
     """
+    global _LAST_RUNTIME_ENV
+    if runtime_env is not None:
+        _LAST_RUNTIME_ENV = runtime_env
+    elif _LAST_RUNTIME_ENV is not None:
+        runtime_env = _LAST_RUNTIME_ENV
     cfg = load()
     mode = cfg.get("mode", "standalone")
     if mode == "standalone":
@@ -625,25 +644,51 @@ def env_overlay() -> dict[str, str]:
     return overlay
 
 
+def _upload_hashes_for_filings(
+    filings: list[dict[str, Any]], uploads_dir: Path,
+) -> set[str] | None:
+    """Top-level ``uploads/<hash>`` folder names referenced by ``filings``.
+
+    Returns ``None`` (meaning "can't scope safely, ship everything") when any
+    filing's srs/mask file can't be mapped to an uploads subfolder — e.g. a
+    file living outside ``uploads_dir`` entirely.
+    """
+    keep: set[str] = set()
+    for filing in filings:
+        for rel_key, abs_key in (("srs_relpath", "srs_path"),
+                                   ("mask_relpath", "mask_path")):
+            rel = filing.get(rel_key)
+            if not rel:
+                abs_p = filing.get(abs_key)
+                if not abs_p:
+                    continue  # this filing has no file under this key at all
+                try:
+                    rel = str(Path(abs_p).resolve().relative_to(uploads_dir.resolve()))
+                except (OSError, ValueError):
+                    return None
+            top = str(rel).replace("\\", "/").split("/", 1)[0]
+            if top:
+                keep.add(top)
+    return keep or None
+
+
 def uploads_runtime_env(
-    *, size_limit_gb: float = 2.0, keep_subdirs: "Iterable[str] | None" = None,
+    *, filings: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Build a Ray runtime_env that ships:
 
     * ``streamlit_app/data/uploads/`` as ``working_dir`` (SRS/mask MDBs
-      accessible to tasks by relative path).
+      accessible to tasks by relative path) — scoped down to only the
+      upload folders ``filings`` actually references, when given. Ray's
+      GCS package transport is capped at 512 MiB; shipping *every* filing
+      ever uploaded (not just this job's) blows past that as uploads/
+      accumulates, so scope to what this job needs instead of trying to
+      raise the cap (the cap is the already-running cluster's C++ gRPC
+      limit — a process-startup config on the head/worker daemons, not
+      something a later env var on this driver can change).
     * ``src/`` and ``streamlit_app/`` as ``py_modules`` so the engine
       and helper packages are importable on every Ray worker, even when
       the worker host has no SHARC-Orbit checkout.
-
-    ``keep_subdirs``: upload paths (or their leading directory names) this run
-    actually needs. Every OTHER top-level upload directory is excluded, so the
-    shipped ``working_dir`` package carries this run's MDBs instead of the
-    whole upload library — which grows without bound and is re-zipped,
-    re-uploaded and re-unpacked on every worker node. A big package is also a
-    bigger target for a corrupt unpack (Ray reuses a content-hashed package,
-    so one bad zip keeps failing every task on that node). Falls back to
-    shipping everything when the list is empty.
 
     Returns ``None`` when Ray is unavailable / mode is standalone.
     """
@@ -651,9 +696,6 @@ def uploads_runtime_env(
     if cfg.get("mode") == "standalone" or not is_ray_available():
         return None
     from . import UPLOADS_DIR, REPO_ROOT
-    # Raise default working_dir size limit (Ray defaults to ~100 MB).
-    limit_bytes = int(float(size_limit_gb) * 1024 * 1024 * 1024)
-    os.environ["RAY_RUNTIME_ENV_WORKING_DIR_UPLOAD_SIZE_LIMIT_BYTES"] = str(limit_bytes)
 
     env: dict[str, Any] = {
         "py_modules": [
@@ -694,19 +736,12 @@ def uploads_runtime_env(
     }
     if UPLOADS_DIR.exists() and any(UPLOADS_DIR.rglob("*")):
         env["working_dir"] = str(UPLOADS_DIR.resolve())
-        # Ship only the upload dirs this run needs. Patterns are anchored to
-        # each uploaded root ("/name/**"), so they cannot touch the src/ and
-        # streamlit_app/ py_modules.
-        keep = {
-            str(s).replace("\\", "/").strip("/").split("/")[0]
-            for s in (keep_subdirs or []) if s
-        }
-        if keep:
-            env["excludes"] = list(env["excludes"]) + [
-                f"/{child.name}/**"
-                for child in sorted(UPLOADS_DIR.iterdir())
-                if child.is_dir() and child.name not in keep
-            ]
+        if filings:
+            keep = _upload_hashes_for_filings(filings, UPLOADS_DIR)
+            if keep is not None:
+                for child in UPLOADS_DIR.iterdir():
+                    if child.is_dir() and child.name not in keep:
+                        env["excludes"].append(f"{child.name}/**")
     return env
 
 

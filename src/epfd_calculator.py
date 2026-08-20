@@ -1541,16 +1541,6 @@ def _simulate_chunk_dual_ts(args):
     sin_min_el_arr = (
         np.sin(np.radians(min_el_all)) if min_el_all is not None else None
     )
-    # method_3 per-system decomposition in the SAME pass — mirrors the
-    # fixed-step chunk worker. Without this a dual-time-step joint run left
-    # ``acc.per_system`` empty, so the worker fell back to
-    # ``_decompose_by_resimulation`` (one full-length simulation PER SYSTEM,
-    # about as expensive as the joint run itself).
-    all_sids = (
-        np.unique(system_id_per_sat)
-        if (system_id_per_sat is not None and max_co_freq_by_system is not None)
-        else None
-    )
     _proxy = _DualTSProxy(
         dual_ts_mode, dual_ts_fine_s, dual_ts_coarse_s,
         dual_ts_ncoarse, dual_ts_gain_threshold_db,
@@ -1596,7 +1586,6 @@ def _simulate_chunk_dual_ts(args):
             if compute_elevation(es_ecef, gso_ecef, es_lat, es_lon) < float(gso_min_elevation_deg):
                 visible_idx = np.array([], dtype=np.int64)
 
-        per_system_step: dict[int, list] | None = {} if all_sids is not None else None
         standard_epfd, override_epfd, min_alpha, any_critical_gain = (
             _accumulate_epfd_visible_satellites(
                 visible_idx=visible_idx,
@@ -1627,7 +1616,6 @@ def _simulate_chunk_dual_ts(args):
                 max_co_freq_by_system=max_co_freq_by_system,
                 min_elevation_deg_all=min_el_all,
                 alpha0_deg_all=alpha0_all,
-                per_system_out=per_system_step,
             )
         )
 
@@ -1659,13 +1647,6 @@ def _simulate_chunk_dual_ts(args):
             min_alpha_deg=min_alpha,
             is_fine=(dt <= dual_ts_fine_s + 1e-12),
         )
-        if per_system_step is not None:
-            # Same clamped duration as the joint add above, so per-system
-            # CCDF denominators stay identical to the joint one.
-            _acc_add_per_system(
-                acc, per_system_step, all_sids, t_s, dt_weight, min_alpha,
-                is_fine=(dt <= dual_ts_fine_s + 1e-12),
-            )
         if results is not None:
             results.append(EPFDTimeStepResult(
                 time_s=t_s,
