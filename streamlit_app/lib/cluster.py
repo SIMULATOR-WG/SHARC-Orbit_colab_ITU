@@ -690,6 +690,15 @@ def uploads_runtime_env(
       and helper packages are importable on every Ray worker, even when
       the worker host has no SHARC-Orbit checkout.
 
+    ``filings`` scopes the shipped ``working_dir`` down to only the upload
+    folders this run's filings reference, instead of the whole upload
+    library — which grows without bound and is re-zipped, re-uploaded and
+    re-unpacked on every worker node. A smaller package is also a smaller
+    target for a corrupt unpack (Ray reuses a content-hashed package, so one
+    bad zip keeps failing every task on that node). Falls back to shipping
+    everything when ``filings`` is omitted or any filing's path can't be
+    safely mapped to an uploads subfolder.
+
     Returns ``None`` when Ray is unavailable / mode is standalone.
     """
     cfg = load()
@@ -739,9 +748,13 @@ def uploads_runtime_env(
         if filings:
             keep = _upload_hashes_for_filings(filings, UPLOADS_DIR)
             if keep is not None:
-                for child in UPLOADS_DIR.iterdir():
-                    if child.is_dir() and child.name not in keep:
-                        env["excludes"].append(f"{child.name}/**")
+                # Patterns are anchored to the uploaded root ("/name/**"), so
+                # they cannot touch the src/ and streamlit_app/ py_modules.
+                env["excludes"] = list(env["excludes"]) + [
+                    f"/{child.name}/**"
+                    for child in sorted(UPLOADS_DIR.iterdir())
+                    if child.is_dir() and child.name not in keep
+                ]
     return env
 
 

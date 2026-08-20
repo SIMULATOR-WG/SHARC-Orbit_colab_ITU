@@ -251,10 +251,18 @@ class PFDMaskXML(PFDMask):
         self._load_from_content(xml_content, mask_id)
         return self
 
+    #: Feed size for the incremental parser (see :meth:`_load_streaming`).
+    _STREAM_CHUNK = 1 << 22  # 4 MiB
+
     def _load(self, filepath: str, mask_id: int | None):
-        tree = ET.parse(filepath)
-        root = tree.getroot()
-        self._load_from_root(root, mask_id)
+        def _chunks():
+            with open(filepath, "rb") as fh:
+                while True:
+                    buf = fh.read(self._STREAM_CHUNK)
+                    if not buf:
+                        return
+                    yield buf
+        self._load_streaming(_chunks(), mask_id)
 
     def _load_from_content(self, xml_content: str | bytes, mask_id: int | None):
         if isinstance(xml_content, bytes):
@@ -264,8 +272,99 @@ class PFDMaskXML(PFDMask):
                 xml_text = xml_content.decode("latin1", errors="replace")
         else:
             xml_text = xml_content
-        root = ET.fromstring(xml_text)
-        self._load_from_root(root, mask_id)
+
+        def _chunks():
+            step = self._STREAM_CHUNK
+            for i in range(0, len(xml_text), step):
+                yield xml_text[i:i + step]
+        self._load_streaming(_chunks(), mask_id)
+
+    def _load_streaming(self, chunks, mask_id: int | None) -> None:
+        """Parse a PFD mask XML **incrementally**, one ``by_a`` block at a time.
+
+        Building the whole ElementTree first is not viable for real filings:
+        a USASAT-NGSO-3series mask is ~138 MB of XML holding a
+        179 × 147 × 147 grid, i.e. ~3.9 million ``<pfd>`` elements. Materialising
+        that tree peaks at ~3 GB of RSS to keep a 31 MB float grid, and since
+        glibc does not return the freed arenas, loading the filing's dozen
+        masks (which ``mask_lnk1`` per-satellite routing legitimately needs)
+        ratchets RSS until the process dies — observed as a SIGSEGV inside the
+        garbage collector (``visit_decref``) rather than a clean MemoryError.
+
+        Each ``by_a`` element is therefore consumed and cleared as soon as the
+        parser closes it, so peak memory is the source text plus one latitude
+        block. Extraction and the grid assembly are unchanged
+        (:meth:`_finalize_grid`), so the resulting mask is identical.
+        """
+        parser = ET.XMLPullParser(events=("start", "end"))
+        lat_set: set[float] = set()
+        alpha_set: set[float] = set()
+        dlon_set: set[float] = set()
+        raw_ab: dict[tuple[float, float], list[tuple[float, float]]] = {}
+        mask_elem: ET.Element | None = None
+        chosen = False
+        done = False
+
+        def _drain() -> bool:
+            """Consume pending events; True once the wanted mask is complete."""
+            nonlocal mask_elem, chosen, done
+            for event, elem in parser.read_events():
+                if event == "start":
+                    if elem.tag == "satellite_system":
+                        self.ntc_id = elem.get("ntc_id", "")
+                        self.sat_name = elem.get("sat_name", "")
+                    elif elem.tag == "pfd_mask" and not chosen:
+                        mid = int(elem.get("mask_id", "-1"))
+                        if mask_id is None or mid == mask_id:
+                            chosen = True
+                            mask_elem = elem
+                            self.mask_id = int(elem.get("mask_id", "0"))
+                            self.low_freq_mhz = float(elem.get("low_freq_mhz", "0"))
+                            self.high_freq_mhz = float(elem.get("high_freq_mhz", "0"))
+                            self.mask_type = elem.get("type", "alpha_deltaLongitude")
+                            self.refbw_khz = float(elem.get("refbw_khz", "40"))
+                            self.a_name = elem.get("a_name", "latitude")
+                            self.b_name = elem.get("b_name", "alpha")
+                            self.c_name = elem.get("c_name", "deltaLongitude")
+                    continue
+                # end events
+                if elem.tag == "by_a":
+                    if mask_elem is not None and not done:
+                        a_val = float(elem.get("a", "0"))
+                        lat_set.add(a_val)
+                        for by_b in elem.findall("by_b"):
+                            b_val = float(by_b.get("b", "0"))
+                            alpha_set.add(b_val)
+                            cp: list[tuple[float, float]] = []
+                            for pfd_elem in by_b.findall("pfd"):
+                                c_val = float(pfd_elem.get("c", "0"))
+                                pfd_val = float(pfd_elem.text.strip())
+                                dlon_set.add(c_val)
+                                cp.append((c_val, pfd_val))
+                            raw_ab[(a_val, b_val)] = sorted(cp, key=lambda x: x[0])
+                    # Release the block either way (a mask we are skipping
+                    # would otherwise accumulate just as much).
+                    elem.clear()
+                elif elem.tag == "pfd_mask":
+                    if mask_elem is not None and elem is mask_elem:
+                        done = True
+                        return True
+                    elem.clear()
+            return False
+
+        for chunk in chunks:
+            parser.feed(chunk)
+            if _drain():
+                break
+        else:
+            parser.close()
+            _drain()
+
+        if not chosen:
+            raise ValueError(
+                f"PFD mask mask_id={mask_id} not found in the XML."
+            )
+        self._finalize_grid(lat_set, alpha_set, dlon_set, raw_ab)
 
     def _load_from_root(self, root: ET.Element, mask_id: int | None):
         # satellite_system attributes
@@ -323,6 +422,20 @@ class PFDMaskXML(PFDMask):
                     cp.append((c_val, pfd_val))
                 raw_ab[(a_val, b_val)] = sorted(cp, key=lambda x: x[0])
 
+        self._finalize_grid(lat_set, alpha_set, dlon_set, raw_ab)
+
+    def _finalize_grid(
+        self,
+        lat_set: set[float],
+        alpha_set: set[float],
+        dlon_set: set[float],
+        raw_ab: dict[tuple[float, float], list[tuple[float, float]]],
+    ) -> None:
+        """Assemble the (a, b, c) grid from the extracted per-(a,b) profiles.
+
+        Shared by the tree-based :meth:`_load_from_root` and the incremental
+        :meth:`_load_streaming`, so both produce the same mask.
+        """
         # Sort global axes
         self._lat_vals = np.array(sorted(lat_set))
         self._alpha_vals = np.array(sorted(alpha_set))

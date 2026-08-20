@@ -1340,6 +1340,29 @@ def compute_s1503_time_reference(
     §D4.1 rule (smallest Δt, longest run). Used both by the engine assembly
     and by callers that must reproduce the *auto* time base a filing would
     get on an independent single-entry run. Falls back to ``(1.0, 1000)``.
+
+    See :func:`compute_s1503_dual_reference` for the same reference including
+    the §D4.7 dual-step ``Ncoarse``.
+    """
+    tstep, nsteps, _ncoarse = compute_s1503_dual_reference(
+        config, es_antenna=es_antenna, artificial_precession=artificial_precession,
+    )
+    return tstep, nsteps
+
+
+def compute_s1503_dual_reference(
+    config: dict,
+    *,
+    es_antenna: EarthStationAntenna | None = None,
+    artificial_precession: bool | None = None,
+) -> tuple[float, int, int]:
+    """§D4 reference ``(Δt_fine_s, NSTEPS, Ncoarse)``.
+
+    Same dimensioning as :func:`compute_s1503_time_reference`, additionally
+    returning the §D4.7 ``Ncoarse`` (coarse/fine step ratio) the filing would
+    get on an independent single-entry run — so aggregate callers can derive
+    that filing's *auto* coarse step as ``Δt_fine × Ncoarse`` instead of
+    re-implementing §D4.7. Falls back to ``(1.0, 1000, 1)``.
     """
     ngso_cfg = config["non_gso"]
     sim_cfg = config.get("simulation") or {}
@@ -1407,8 +1430,8 @@ def compute_s1503_time_reference(
         )
     except Exception as exc:  # noqa: BLE001 — conservative fallback
         logger.warning("Failed computing S.1503 time reference (%s).", exc)
-        return 1.0, 1000
-    return float(ref.tstep_s), int(ref.nsteps)
+        return 1.0, 1000, 1
+    return float(ref.tstep_s), int(ref.nsteps), max(1, int(ref.ncoarse))
 
 
 def resolve_time_base(config: dict) -> tuple[float, int]:
