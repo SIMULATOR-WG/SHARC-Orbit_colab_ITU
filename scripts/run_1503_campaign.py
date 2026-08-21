@@ -124,20 +124,31 @@ MATRIX: list[dict[str, Any]] = [
     _mk("B2-5", "B2", strategy="ref_vector", rv_el=90.0, rv_az=0.0, rv_T=12.0, rv_P=50.0, steps=STEPS_STRATEGY, diameter=DIAM_B2_STRATEGY),
 ]
 
-#: Approximate ES position of the 17.8-GHz WCG (campaign sheet, rounded).
-#: The AUTHORITATIVE geometry must come from a WCGA run of THIS
-#: implementation — resolve it with `geometry --bootstrap A` (runs the 0.1°
-#: WCGA here once) or `geometry --set A=lat,lon,gso` once confirmed. No
-#: default is pinned: running blocks A/B1 without resolving it is refused.
-GEOM_A_ES = (-0.445, -99.344)
+#: Block-A/B1 geometry: WCG found by THIS implementation's 0.1° WCGA on the
+#: campaign filing (bootstrap run c4ef4e570af6, 2026-08-21;
+#: 2h35 search). NOTE it differs from the sheet's cell (0.445°S, 99.344°W —
+#: presumably from the external A1 run): lat +0.5568 vs −0.445, lon −101.059
+#: vs −99.344. Self-consistency with this engine was chosen; override with
+#: `geometry --set A=lat,lon,gso` if comparability with the external A1
+#: matters more.
+GEOM_A_ES = (0.5567511283556237, -101.05927862619671)
+GEOM_A_DEFAULT = {"es_lat": 0.5567511283556237,
+                  "es_lon": -101.05927862619671,
+                  "gso_lon": -99.68304090542875,
+                  "source": "bootstrap WCGA run c4ef4e570af6 (pinned)"}
 
 
 # ─── State ───────────────────────────────────────────────────────────────────
 
 def _load_state() -> dict[str, Any]:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    return {"geometry": {}, "runs": {}}
+        st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    else:
+        st = {"geometry": {}, "runs": {}}
+    # Block A/B1 geometry defaults to the pinned bootstrap WCG; an explicit
+    # `geometry --set A=...` (stored in the local state) overrides it.
+    st.setdefault("geometry", {}).setdefault("A", dict(GEOM_A_DEFAULT))
+    return st
 
 
 def _save_state(st: dict[str, Any]) -> None:
