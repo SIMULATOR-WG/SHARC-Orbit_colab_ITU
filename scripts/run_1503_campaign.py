@@ -300,6 +300,7 @@ def _run_one(run_key: str, params: dict[str, Any],
         assert proc.stdout is not None
         for line in proc.stdout:
             lf.write(line)
+            lf.flush()  # tail-able live (default block buffering hides ~8KB)
             line = line.rstrip()
             now = time.time()
             if line.startswith("PROGRESS:"):
@@ -325,7 +326,9 @@ def _run_one(run_key: str, params: dict[str, Any],
                     last_pct, last_emit = pct, now
             elif line and any(k in line for k in (
                     "modification", "•", "DONE", "ERROR", "Artifacts",
-                    "scope:", "windowing ACTIVE", "SL2SL")):
+                    "scope:", "windowing ACTIVE", "SL2SL",
+                    "PHASE", "Evaluating WCG", "WCG found", "Worst-case",
+                    "Time step:", "Starting EPFD")):
                 print(f"  [{run_key}] {line}", flush=True)
         rc = proc.wait()
     dt = time.time() - t0
