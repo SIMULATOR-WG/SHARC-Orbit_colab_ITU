@@ -63,13 +63,18 @@ from .geometry import (
     compute_angular_separation_from_ref_vector,
 )
 from .pfd_mask import PFDMask
-from .antenna import EarthStationAntenna, s1503_or_condition_include
+from .antenna import (
+    EarthStationAntenna, s1503_or_condition_include,
+    s1503_gain_test_drops_gmax30 as _s1503_drop_gmax30,
+)
 from .time_step import DualTimeStep, TrackDurationWindows
 from .wcg_search import (
     WCGResult, _compute_pfd_3d, _relative_gain_batch,
     _compute_mask_az_el_per_sat_frame_batch,
 )
 from .epfd_stream_accumulator import EPFDStreamAccumulator, EPFDWindowStats
+from .sidelobe_epfd import SidelobeConfig, compute_sidelobe_epfd_step
+from .ES_deployer import generate_es_grid
 
 logger = logging.getLogger(__name__)
 
@@ -852,7 +857,11 @@ def _accumulate_epfd_visible_satellites(
                      else np.full(cand.size, alpha0_deg, dtype=float)),
                     theta_cand,
                 )
-                override[cand] = g_rel_arr[cand] > np.minimum(-30.0, g_rel_at_a0)
+                if _s1503_drop_gmax30():
+                    # Doc 4A/1029 §5 ablation: GRX(α₀) alone (α₀ always kept).
+                    override[cand] = g_rel_arr[cand] > g_rel_at_a0
+                else:
+                    override[cand] = g_rel_arr[cand] > np.minimum(-30.0, g_rel_at_a0)
         eligible = is_standard_arr | override
         if not np.any(eligible):
             return [], [], min_alpha, any_critical_gain
@@ -1464,6 +1473,15 @@ class EPFDSimulationResult:
     windows: "TrackDurationWindows | None" = None
     worst_window_index: int = -1
 
+    # SL2SL sidelobe study (non-normative, see src/sidelobe_epfd.py). None on
+    # a standard run. ``sl_acc`` holds the sidelobe-ONLY per-step EPFD;
+    # ``sl_tot_acc`` the per-step sum standard+sidelobe (the Doc 4A/461-style
+    # "total" view). Same time base as ``acc``, so the three CCDFs are
+    # comparable percentile-by-percentile.
+    sl_acc: "EPFDStreamAccumulator | None" = None
+    sl_tot_acc: "EPFDStreamAccumulator | None" = None
+    sidelobe_pattern: str | None = None
+
     def build_cdf(self):
         """Builds the CCDF from the accumulator (or from the history if retained).
 
@@ -1553,6 +1571,58 @@ class _DualTSProxy:
         return g_db > thr
 
 
+def _sidelobe_step_add(
+    sl_cfg: "SidelobeConfig",
+    sl_grid: np.ndarray,
+    sl_acc: EPFDStreamAccumulator,
+    sl_tot_acc: EPFDStreamAccumulator,
+    *,
+    pos_ecef_all: np.ndarray,
+    sin_el: np.ndarray,
+    es_ecef: np.ndarray,
+    es_lat_deg: float,
+    es_lon_deg: float,
+    gso_ecef: np.ndarray,
+    es_antenna: EarthStationAntenna,
+    alpha0_deg: float,
+    t_s: float,
+    duration_s: float,
+    standard_epfd_lin: float,
+) -> None:
+    """One step of the SL2SL study: aggregate the sidelobe links and feed the
+    sidelobe-only + standard+sidelobe accumulators (same time base as the
+    joint ``acc``). The victim gain is the RUN's own antenna, relative."""
+
+    def _vic_gain_rel_lin(sat_ecef: np.ndarray) -> float:
+        offaxis = compute_offaxis_angle(es_ecef, sat_ecef, gso_ecef)
+        theta_planar = None
+        if es_antenna.requires_planar_angle:
+            _, theta_planar = compute_offaxis_and_planar_angle(
+                es_ecef, sat_ecef, gso_ecef, es_lat_deg, es_lon_deg
+            )
+        return float(es_antenna.relative_gain_linear(offaxis, theta_planar))
+
+    sl_lin, n_links = compute_sidelobe_epfd_step(
+        sl_cfg, sl_grid, pos_ecef_all, sin_el, es_ecef,
+        _vic_gain_rel_lin, float(alpha0_deg), float(t_s),
+    )
+    sl_db = 10.0 * math.log10(sl_lin) if sl_lin > 0.0 else -999.0
+    sl_acc.add(
+        time_s=t_s, epfd_db=sl_db, duration_s=duration_s,
+        num_horizon_sats=0, num_visible_sats=0,
+        num_contributing_sats=int(n_links),
+        min_alpha_deg=180.0, is_fine=True,
+    )
+    tot_lin = float(standard_epfd_lin) + float(sl_lin)
+    tot_db = 10.0 * math.log10(tot_lin) if tot_lin > 0.0 else -999.0
+    sl_tot_acc.add(
+        time_s=t_s, epfd_db=tot_db, duration_s=duration_s,
+        num_horizon_sats=0, num_visible_sats=0,
+        num_contributing_sats=int(n_links),
+        min_alpha_deg=180.0, is_fine=True,
+    )
+
+
 def _acc_add_per_system(
     acc,
     per_system_step: dict[int, list],
@@ -1616,7 +1686,18 @@ def _simulate_chunk(args):
     min_el_all = None
     alpha0_all = None
     selection_config = None
-    if len(args) == 26:
+    sidelobe_config = None
+    sl_grid = None
+    if len(args) == 28:
+        (start_step, num_steps, t_start, tstep_s, constellation,
+         wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+         pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
+         min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
+         keep_full_history, system_id_per_sat, max_co_freq_by_system,
+         min_el_all, alpha0_all, selection_config,
+         sidelobe_config, sl_grid) = args
+    elif len(args) == 26:
         (start_step, num_steps, t_start, tstep_s, constellation,
          wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
          pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
@@ -1658,6 +1739,8 @@ def _simulate_chunk(args):
         constellation, wcg, pfd_mask, es_antenna)
 
     acc = EPFDStreamAccumulator()
+    sl_acc = EPFDStreamAccumulator() if sidelobe_config is not None else None
+    sl_tot_acc = EPFDStreamAccumulator() if sidelobe_config is not None else None
     results: list[EPFDTimeStepResult] | None = [] if keep_full_history else None
     t_s = t_start
 
@@ -1793,6 +1876,15 @@ def _simulate_chunk(args):
             contrib_sat_idx=_contrib_idx_arr,
             contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
         )
+        if sl_acc is not None:
+            _sidelobe_step_add(
+                sidelobe_config, sl_grid, sl_acc, sl_tot_acc,
+                pos_ecef_all=pos_ecef_all, sin_el=sin_el, es_ecef=es_ecef,
+                es_lat_deg=es_lat, es_lon_deg=es_lon, gso_ecef=gso_ecef,
+                es_antenna=es_antenna, alpha0_deg=alpha0_deg,
+                t_s=t_s, duration_s=tstep_s,
+                standard_epfd_lin=epfd_sum_linear,
+            )
         if per_system_step is not None:
             _acc_add_per_system(
                 acc, per_system_step, all_sids, t_s, tstep_s, min_alpha,
@@ -1810,7 +1902,7 @@ def _simulate_chunk(args):
             ))
         t_s += tstep_s
 
-    return {"acc": acc, "ts": results}
+    return {"acc": acc, "ts": results, "sl_acc": sl_acc, "sl_tot_acc": sl_tot_acc}
 
 
 def _simulate_chunk_dual_ts(args):
@@ -2695,6 +2787,7 @@ def run_epfd_simulation(
     on_chunk: "Callable[[EPFDStreamAccumulator, int, int], None] | None" = None,
     selection_config: "SelectionConfig | None" = None,
     alpha_tss: "object | None" = None,
+    sidelobe_config: "SidelobeConfig | None" = None,
 ) -> EPFDSimulationResult:
     """Runs the complete EPFD↓ time simulation.
 
@@ -2728,6 +2821,32 @@ def run_epfd_simulation(
     ``artifacts/WP4A_519_track_duration_consolidation_decision.md``.
     """
     result = EPFDSimulationResult(wcg=wcg, keep_full_history=keep_full_history)
+
+    # SL2SL sidelobe study (non-normative): a square grid of served ESs around
+    # the victim, radiating a constant pfd through the selected S.1528 pattern.
+    # Fixed time step only — the per-step link selection has no dual-step
+    # weighting semantics defined.
+    sl_grid: np.ndarray | None = None
+    if sidelobe_config is not None:
+        if dual_ts is not None:
+            raise ValueError(
+                "sidelobe (SL2SL) study requires a fixed time step — "
+                "set dual_time_step_mode=off"
+            )
+        sl_grid = generate_es_grid(
+            wcg.es_lat_deg, wcg.es_lon_deg,
+            sidelobe_config.grid_radius_km, sidelobe_config.grid_spacing_km,
+        )
+        result.sl_acc = EPFDStreamAccumulator()
+        result.sl_tot_acc = EPFDStreamAccumulator()
+        result.sidelobe_pattern = str(sidelobe_config.pattern)
+        logger.info(
+            "SL2SL sidelobe study ON: pattern S.1528-%s, grid %d ES "
+            "(radius %.0f km, spacing %.0f km), pfd %.1f dBW/m²",
+            sidelobe_config.pattern, len(sl_grid),
+            sidelobe_config.grid_radius_km, sidelobe_config.grid_spacing_km,
+            sidelobe_config.pfd_dbw_m2,
+        )
 
     _strategy = (
         getattr(selection_config, "strategy", "s1503")
@@ -2997,6 +3116,15 @@ def run_epfd_simulation(
                 contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
                 is_fine=_is_fine,
             )
+            if sl_grid is not None:
+                _sidelobe_step_add(
+                    sidelobe_config, sl_grid, result.sl_acc, result.sl_tot_acc,
+                    pos_ecef_all=pos_ecef_all, sin_el=sin_el, es_ecef=es_ecef,
+                    es_lat_deg=wcg.es_lat_deg, es_lon_deg=wcg.es_lon_deg,
+                    gso_ecef=gso_ecef, es_antenna=es_antenna,
+                    alpha0_deg=alpha0_deg, t_s=t_s, duration_s=dt,
+                    standard_epfd_lin=epfd_sum_linear,
+                )
             if per_system_step is not None:
                 _acc_add_per_system(
                     result.acc, per_system_step, all_sids_seq, t_s, dt, min_alpha,
@@ -3167,6 +3295,7 @@ def run_epfd_simulation(
                 system_id_per_sat, max_co_freq_by_system,
                 min_el_all, alpha0_all,
                 selection_config,
+                sidelobe_config, sl_grid,
             ))
             current_step += count
             current_t += count * tstep_s
@@ -3184,6 +3313,9 @@ def run_epfd_simulation(
             batch_acc = batch_res["acc"]
             done_steps += int(batch_acc.n_steps)
             result.acc.merge(batch_acc)
+            if result.sl_acc is not None and batch_res.get("sl_acc") is not None:
+                result.sl_acc.merge(batch_res["sl_acc"])
+                result.sl_tot_acc.merge(batch_res["sl_tot_acc"])
             if keep_full_history and batch_res["ts"]:
                 result.time_steps.extend(batch_res["ts"])
             pct = done_steps / max(1, nsteps) * 100.0
@@ -3231,6 +3363,9 @@ def run_epfd_simulation(
     # Sequential finalizes the decimated trace (parallel chunks already sort above).
     if n_jobs == 1:
         result.acc.finalize_decimated()
+    if result.sl_acc is not None:
+        result.sl_acc.finalize_decimated()
+        result.sl_tot_acc.finalize_decimated()
 
     # Build the CDF
     result.build_cdf()

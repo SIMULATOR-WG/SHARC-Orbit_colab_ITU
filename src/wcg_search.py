@@ -71,6 +71,7 @@ from .antenna import (
     ITURS1428Antenna,
     s1503_or_condition_include,
     s1503_or_criteria_log,
+    s1503_gain_test_drops_gmax30,
 )
 
 logger = logging.getLogger(__name__)
@@ -2433,7 +2434,11 @@ def _wcgd_check_case_batch(
         n_all = len(alpha_all)
         alpha0_arr = np.full(n_all, alpha0_deg, dtype=float)
         g_rel_at_a0 = _relative_gain_batch(es_antenna, alpha0_arr, theta_planar_all)
-        g_rel_thr = np.minimum(-30.0, g_rel_at_a0)
+        if s1503_gain_test_drops_gmax30():
+            # Doc 4A/1029 §5 ablation: GRX(α₀) alone (α₀ always kept).
+            g_rel_thr = g_rel_at_a0
+        else:
+            g_rel_thr = np.minimum(-30.0, g_rel_at_a0)
         g_rel_off = _relative_gain_batch(es_antenna, offaxis_all, theta_planar_all)
         or_branch = g_rel_off > g_rel_thr
     keep_mask = and_branch | or_branch

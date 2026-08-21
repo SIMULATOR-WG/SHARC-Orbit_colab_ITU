@@ -295,6 +295,27 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["ref_vec_el_deg"] = float(params.get("ref_vec_el_deg", 90.0))
         sim["ref_vec_time_window_P_pct"] = float(params.get("ref_vec_time_window_P_pct", 100.0))
 
+    # Step-18 gain-test ablation (Doc 4A/1029 §5): drop the Gmax−30 dB
+    # candidate; GRX(α₀) alone governs the OR branch (α₀ always kept). Env
+    # var, not a cfg key: the test sits deep in the WCGA + EPFD hot paths and
+    # the env is inherited by every multiprocessing pool child of this worker
+    # process. Ray remote workers get it via runtime_env below.
+    if params.get("drop_gmax30"):
+        os.environ["SHARC_S1503_DROP_GMAX30"] = "1"
+        _emit("S.1503 modification ON: Step-18 gain test without the "
+              "Gmax−30 dB candidate (GRX(α₀) alone governs)")
+
+    # SL2SL sidelobe study (non-normative; src/sidelobe_epfd.py).
+    if params.get("sidelobe_enabled"):
+        sim["sidelobe_enabled"] = True
+        sim["sidelobe_pattern"] = str(params.get("sidelobe_pattern", "1.4"))
+        for _k in ("sidelobe_pfd_dbw_m2", "sidelobe_grid_radius_km",
+                   "sidelobe_grid_spacing_km", "sidelobe_min_elevation_deg",
+                   "sidelobe_gso_arc_separation_deg", "sidelobe_gmax_dbi",
+                   "sidelobe_frequency_ghz"):
+            if params.get(_k) is not None:
+                sim[_k] = float(params[_k])
+
     # Manual WCG override
     if params.get("wcg_manual") and all(
         params.get(k) is not None for k in ("wcg_manual_es_lat", "wcg_manual_es_lon", "wcg_manual_gso_lon")
@@ -340,6 +361,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         rt_env = cluster.uploads_runtime_env(
             filings=[{"srs_path": srs_path, "mask_path": mask_path}],
         )
+        # Ray remote workers do not inherit this process's env — propagate the
+        # Step-18 ablation flag through the runtime_env (see drop_gmax30 above).
+        if rt_env is not None and os.environ.get("SHARC_S1503_DROP_GMAX30"):
+            rt_env.setdefault("env_vars", {})["SHARC_S1503_DROP_GMAX30"] = "1"
         wcga_on = wcga_cluster.enable(
             runtime_env=rt_env,
             on_progress=lambda i, n: _emit_progress(15 + 30.0 * i / max(1, n)),
@@ -590,6 +615,58 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
                 sim_data["percentiles"] = _extract_percentiles(bins, pct)
             except Exception as exc:  # noqa: BLE001
                 _emit(f"WARN: percentile extraction failed: {exc}")
+
+    # SL2SL sidelobe study (non-normative): sidelobe-only CCDF plus the
+    # per-step standard+sidelobe total, on the same time base as the headline.
+    _sl_acc = getattr(sim_result_dl, "sl_acc", None)
+    if _sl_acc is not None:
+        try:
+            _sb, _sp = _sl_acc.build_ccdf()
+            _tb, _tp = sim_result_dl.sl_tot_acc.build_ccdf()
+            sim_data["sidelobe"] = {
+                "pattern": getattr(sim_result_dl, "sidelobe_pattern", None),
+                "ccdf_bins_db": [float(x) for x in _sb],
+                "ccdf_pct": [float(x) for x in _sp],
+                "max_epfd_dbw": (float(_sb[0]) if len(_sb) else None),
+                "total_ccdf_bins_db": [float(x) for x in _tb],
+                "total_ccdf_pct": [float(x) for x in _tp],
+                "total_max_epfd_dbw": (float(_tb[0]) if len(_tb) else None),
+            }
+            _emit(
+                "Sidelobe (SL2SL) study: max sidelobe-only EPFD "
+                f"{sim_data['sidelobe']['max_epfd_dbw']} dBW · "
+                f"max standard+sidelobe {sim_data['sidelobe']['total_max_epfd_dbw']} dBW"
+            )
+        except Exception as exc:  # noqa: BLE001
+            _emit(f"WARN: sidelobe CCDF embed failed: {exc}")
+
+    # Self-describing record of the WP-4A study options active in this run
+    # (the "1503 proposal modifications" panel) — consumed by the Results page.
+    _mods: dict[str, Any] = {}
+    if bool(cfg.get("gso_es", {}).get("use_proposed_antenna")):
+        _mods["s1428_proposed_pattern"] = {
+            "variant": "A" if int(cfg["gso_es"].get("proposed_antenna_option", 1)) == 1 else "B",
+        }
+    _sel = sim.get("selection_strategy")
+    if _sel and _sel != "s1503":
+        _mods["selection_strategy"] = {
+            "strategy": _sel,
+            "top_n": sim.get("top_n"),
+            "n_select": sim.get("n_select"),
+            "seed": sim.get("seed"),
+        }
+    if sim.get("ref_vec_selection"):
+        _mods["ref_vec_selection"] = {
+            "az_deg": sim.get("ref_vec_az_deg"),
+            "el_deg": sim.get("ref_vec_el_deg"),
+            "time_window_P_pct": sim.get("ref_vec_time_window_P_pct"),
+        }
+    if os.environ.get("SHARC_S1503_DROP_GMAX30"):
+        _mods["drop_gmax30"] = True
+    if sim.get("sidelobe_enabled"):
+        _mods["sidelobe"] = {"pattern": sim.get("sidelobe_pattern", "1.4")}
+    if _mods:
+        sim_data["s1503_modifications"] = _mods
 
     # S.1503-4 §D5.1.4.2 track-duration variant: expose the window parameters and
     # per-slide-window-set CCDFs. The headline CCDF above is the worst-per-level

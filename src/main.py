@@ -2972,6 +2972,35 @@ def run_wcg_downlink(config: dict) -> tuple[
     ref_vec_el_deg = float(sim_cfg.get("ref_vec_el_deg", 90.0))
     ref_vec_time_window_P_pct = float(sim_cfg.get("ref_vec_time_window_P_pct", 100.0))
 
+    # SL2SL sidelobe study (non-normative; src/sidelobe_epfd.py). Grid and
+    # antenna parameters ride in config["simulation"]["sidelobe_*"]; the
+    # victim antenna is the run's own es_antenna and the exclusion gate is
+    # the run's alpha0 — both applied inside the engine.
+    sidelobe_config = None
+    if bool(sim_cfg.get("sidelobe_enabled", False)):
+        from .sidelobe_epfd import SidelobeConfig  # noqa: PLC0415
+        sidelobe_config = SidelobeConfig(
+            pattern=str(sim_cfg.get("sidelobe_pattern", "1.4")),
+            pfd_dbw_m2=float(sim_cfg.get("sidelobe_pfd_dbw_m2", -140.0)),
+            frequency_ghz=float(
+                sim_cfg.get("sidelobe_frequency_ghz")
+                or ngso_cfg.get("frequency_ghz")
+                or 17.8
+            ),
+            grid_radius_km=float(sim_cfg.get("sidelobe_grid_radius_km", 315.0)),
+            grid_spacing_km=float(sim_cfg.get("sidelobe_grid_spacing_km", 21.0)),
+            min_elevation_deg=float(sim_cfg.get("sidelobe_min_elevation_deg", 25.0)),
+            gso_arc_separation_deg=float(
+                sim_cfg.get("sidelobe_gso_arc_separation_deg", 20.0)
+            ),
+            interferer_gmax_dbi=float(sim_cfg.get("sidelobe_gmax_dbi", 45.0)),
+        )
+        if ref_vec_selection:
+            raise ValueError(
+                "sidelobe (SL2SL) study is not implemented together with "
+                "reference-vector selection — disable one of them"
+            )
+
     # ─── S.1503-4 §D5.1.4.2: track-duration (sliding-window) variant ───
     # Active when sat_oper declares MIN_DURATION != 0 at the ES latitude. The
     # variant is defined in fine time steps, so the dual time step (§D4.7.1)
@@ -3128,6 +3157,15 @@ def run_wcg_downlink(config: dict) -> tuple[
             approx_bytes_per_step, int(nsteps), approx_gb,
         )
     sim_t0 = time.perf_counter()
+    if sidelobe_config is not None and (
+        windows_main is not None or windows_static is not None
+        or selection_config.strategy == "alpha_table"
+    ):
+        raise ValueError(
+            "sidelobe (SL2SL) study is only implemented for the standard "
+            "fixed-step §D5.1.4.1 path — disable MIN_DURATION windowing / "
+            "reference-vector selection / alpha_table to combine it"
+        )
     if windows_main is not None or windows_static is not None:
         # ─── Track-duration windowing (§D5.1.4.2): each ES on its own path,
         # windowed when its latitude declares MIN_DURATION>0 (or always, for
@@ -3196,6 +3234,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
                 keep_full_history=keep_full_history,
                 selection_config=selection_config,
+                sidelobe_config=sidelobe_config,
             )
         sim_elapsed_s = time.perf_counter() - sim_t0
         if static_wcg is not None:
@@ -3252,12 +3291,15 @@ def run_wcg_downlink(config: dict) -> tuple[
                     t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
                     keep_full_history=keep_full_history,
                     selection_config=selection_config,
+                    # Grid auto-centres on THIS ES inside run_epfd_simulation.
+                    sidelobe_config=sidelobe_config,
                 )
             static_sim_elapsed_s = time.perf_counter() - static_t0
-    elif static_wcg is not None and dual_ts is None:
+    elif static_wcg is not None and dual_ts is None and sidelobe_config is None:
         # Shared-propagation fast path. Not reachable when ref_vec_selection=True
         # (windows_main is never None then, so the branch above is always taken
-        # instead) — run_epfd_simulation_multi_es has no reference-vector support.
+        # instead) — run_epfd_simulation_multi_es has no reference-vector support,
+        # nor SL2SL (sidelobe runs fall through to the separate-run else branch).
         logger.info("")
         logger.info(
             "  PHASE 3B: EPFD↓ simulation for the Static ES ("
@@ -3403,6 +3445,7 @@ def run_wcg_downlink(config: dict) -> tuple[
             gso_min_elevation_deg=gso_min_elev_effective_deg,
             keep_full_history=keep_full_history,
             selection_config=selection_config,
+            sidelobe_config=sidelobe_config,
         )
         sim_elapsed_s = time.perf_counter() - sim_t0
 
@@ -3447,6 +3490,8 @@ def run_wcg_downlink(config: dict) -> tuple[
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
                 keep_full_history=keep_full_history,
                 selection_config=selection_config,
+                # Grid auto-centres on THIS ES inside run_epfd_simulation.
+                sidelobe_config=sidelobe_config,
             )
             static_sim_elapsed_s = time.perf_counter() - static_t0
     # ================================================================

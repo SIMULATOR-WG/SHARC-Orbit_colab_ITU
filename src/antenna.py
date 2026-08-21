@@ -409,6 +409,31 @@ class ITUBO1443Antenna(EarthStationAntenna):
                 f"G_max={self.g_max:.1f}dBi)")
 
 
+def s1503_gain_test_drops_gmax30() -> bool:
+    """WP 4A study option (Doc 4A/1029 §5): drop the ``Gmax − 30 dB``
+    candidate from the Step 18 gain test, so the OR-branch threshold becomes
+    ``GRX(α₀)`` alone (the declared exclusion angle always governs — the
+    admission cone never extends beyond α₀). The geometric branch and the
+    gain test itself REMAIN; only the wider of the two candidates is removed.
+
+    Controlled by the ``SHARC_S1503_DROP_GMAX30`` environment variable
+    ("1"/"true" = on), set per run by the launcher/worker BEFORE the engine
+    runs. An env var (rather than a threaded parameter) because the test is
+    evaluated deep inside both the WCGA and EPFD hot paths, across
+    multiprocessing pool workers (env is inherited on spawn) and Ray remote
+    workers (propagated via runtime_env env_vars). Cached on first call per
+    process.
+    """
+    cached = getattr(s1503_gain_test_drops_gmax30, "_cached", None)
+    if cached is None:
+        import os
+        cached = os.environ.get(
+            "SHARC_S1503_DROP_GMAX30", ""
+        ).strip().lower() in ("1", "true", "yes", "on")
+        s1503_gain_test_drops_gmax30._cached = cached
+    return cached
+
+
 def s1503_or_condition_include(
     es_antenna: EarthStationAntenna,
     offaxis_deg: float,
@@ -440,7 +465,11 @@ def s1503_or_condition_include(
         return False
     g_rel = es_antenna.relative_gain(offaxis_deg, theta_deg)
     g_rel_at_alpha0 = es_antenna.relative_gain(alpha0_deg, theta_deg)
-    threshold_db = min(-30.0, g_rel_at_alpha0)
+    if s1503_gain_test_drops_gmax30():
+        # Doc 4A/1029 §5 ablation: GRX(α₀) alone governs (α₀ always kept).
+        threshold_db = g_rel_at_alpha0
+    else:
+        threshold_db = min(-30.0, g_rel_at_alpha0)
     return g_rel > threshold_db
 
 
