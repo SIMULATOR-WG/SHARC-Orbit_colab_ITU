@@ -3016,6 +3016,13 @@ def run_wcg_downlink(config: dict) -> tuple[
                 sim_cfg.get("sidelobe_gso_arc_separation_deg", 20.0)
             ),
             interferer_gmax_dbi=float(sim_cfg.get("sidelobe_gmax_dbi", 45.0)),
+            p12_near_lobe_level_db=float(
+                sim_cfg.get("sidelobe_p12_near_lobe_level_db", -15.0)
+            ),
+            p12_hpbw_deg=float(sim_cfg.get("sidelobe_p12_hpbw_deg", 3.1338)),
+            p14_n_sidelobes=int(sim_cfg.get("sidelobe_p14_n_sidelobes", 4)),
+            p14_slr_db=float(sim_cfg.get("sidelobe_p14_slr_db", 15.0)),
+            p14_aperture_m=float(sim_cfg.get("sidelobe_p14_aperture_m", 0.28873)),
         )
         if ref_vec_selection:
             raise ValueError(

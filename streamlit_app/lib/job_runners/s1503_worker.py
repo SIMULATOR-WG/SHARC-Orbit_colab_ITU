@@ -326,7 +326,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         for _k in ("sidelobe_pfd_dbw_m2", "sidelobe_grid_radius_km",
                    "sidelobe_grid_spacing_km", "sidelobe_min_elevation_deg",
                    "sidelobe_gso_arc_separation_deg", "sidelobe_gmax_dbi",
-                   "sidelobe_frequency_ghz"):
+                   "sidelobe_frequency_ghz",
+                   "sidelobe_p14_n_sidelobes", "sidelobe_p14_slr_db",
+                   "sidelobe_p14_aperture_m",
+                   "sidelobe_p12_near_lobe_level_db", "sidelobe_p12_hpbw_deg"):
             if params.get(_k) is not None:
                 sim[_k] = float(params[_k])
 
