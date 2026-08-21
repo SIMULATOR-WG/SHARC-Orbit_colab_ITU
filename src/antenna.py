@@ -108,7 +108,8 @@ class ITURS1428Antenna(EarthStationAntenna):
         phi = min(abs(off_axis_deg), 180.0)
 
         if phi < 1e-10:
-            _log.info("[S.1428 gain] phi=%.4f deg -> g_max=%.2f dBi (boresight)", phi, self.g_max)
+            # No logging here: this is a hot loop (per satellite per time
+            # step) — an INFO line per boresight sample floods worker logs.
             return self.g_max
 
         if self.regime in ("20_25", "25_100"):
@@ -252,7 +253,9 @@ class ITURS1428RevisionAntenna(EarthStationAntenna):
                     if phi <= 23.0:
                         return 22.0 - 25.0 * math.log10(phi)
                     return -12.0
-                elif self.proposed_option == 2:
+                else:
+                    # Variant B (any non-1 option, matching the other regimes'
+                    # bare-else convention — never fall through to None).
                     if phi <= 43.65:
                         return 29.0 - 25.0 * math.log10(phi)
                     return -12.0

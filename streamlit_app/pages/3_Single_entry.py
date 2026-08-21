@@ -452,20 +452,8 @@ with st.form("s1503_form"):
                  "picked in section 1.",
         )
         
-        use_proposed = st.checkbox(
-            "Use Proposed ITU-R S.1428-1 Modification (Experimental)",
-            value=bool(prev.get("use_proposed_antenna", False)),
-            help="If checked, uses the experimental gain rolls-offs from 4A1d-3 doc."
-        )
-        
-        prop_opt = 1
-        if use_proposed:
-            prop_opt = st.selectbox(
-                "Proposed Antenna Variation (Or condition)",
-                options=[1, 2],
-                index=int(prev.get("proposed_antenna_option", 1)) - 1,
-                help="Varies the gain rolloff plateaus (e.g. extending from 23° to 43.65° in the 15-30 GHz range)."
-            )
+        # Proposed S.1428 revision (A/B) moved to section 8 —
+        # "1503 proposal modifications" — where all WP-4A options live.
         _freq_default = (
             (f"{float(art22_leaf['frequency_run_ghz']):.6f}".rstrip("0").rstrip("."))
             if art22_leaf is not None and art22_leaf.get("frequency_run_ghz")
@@ -706,192 +694,282 @@ with st.form("s1503_form"):
                  "large MIN_DURATION with a small T_fine is expensive.",
         )
 
-    with st.expander("8. Satellite selection strategy", expanded=True):
+    with st.expander("8. 1503 proposal modifications (WP 4A studies)", expanded=False):
         st.caption(
-            "Method used to choose which satellites contribute to the aggregated EPFD↓. "
-            "The normative S.1503-4 rule picks the highest EPFD satellites. "
-            "Alternative strategies are experimental. All strategies run with the "
-            "§D4.7 dual time step (mode `s1503`) above — the random ones run serially "
-            "when it is on."
+            "Non-normative options under study for the revision of "
+            "Recommendation ITU-R S.1503-4. Tick the modifications to apply — "
+            "they combine, except where noted. Everything left unticked runs "
+            "the normative S.1503-4 algorithm."
         )
-        col_sel, col_n, col_seed = st.columns(3)
-        with col_sel:
-            selection_strategy = st.selectbox(
-                "Strategy",
-                options=["s1503", "top_n_elev_random", "hybrid_rand_he", "alpha_table"],
-                index=0,
-                key="sel_strategy",
-                help=(
-                    "`s1503` – normative rule (Steps 19–22): order by EPFD, apply MAX_CO_FREQ and MIN_ANGLE_AT_ES.\n"
-                    "`top_n_elev_random` – pick the Top-N highest-elevation satellites, then choose one at random.\n"
-                    "`hybrid_rand_he` – combine Nco random + Nco highest-elevation, then keep the Nco highest EPFD.\n"
-                    "`alpha_table` – deterministic quota selection over a declared α CDF (Doc 4A/312); "
-                    "runs the 7-table envelope. Needs a min/max α table file below.\n"
-                    "All four work with the dual time step (mode `s1503`): the random strategies "
-                    "run serially when it is on (per-step RNG needs a stable step index), and "
-                    "`alpha_table` scales its TSS credit by Δt/T_fine so the time-weighted α "
-                    "distribution still tracks the declared table."
+
+        # ── (a) GSO victim ES antenna: proposed S.1428 revision ────────────
+        use_proposed = st.checkbox(
+            "S.1428 proposed ES antenna pattern (doc 4A1d-3)",
+            value=bool(prev.get("use_proposed_antenna", False)),
+            help="Replaces the current ITU-R S.1428-1 victim antenna with the "
+                 "proposed side/back-lobe revision (15 < f \u2264 30 GHz). "
+                 "Engine keys: `use_proposed_antenna`, `proposed_antenna_option`.",
+        )
+        prop_opt = 1
+        if use_proposed:
+            prop_opt = st.radio(
+                "Proposed pattern variant",
+                options=[1, 2],
+                index=int(prev.get("proposed_antenna_option", 1)) - 1,
+                format_func=lambda v: (
+                    "Variant A — −12 dBi floor from 23° (Proposal 1)" if v == 1
+                    else "Variant B — floor from 43.65°/34.1° (Proposal 2, conservative)"
                 ),
+                horizontal=True,
             )
-        with col_n:
-            top_n = st.number_input(
-                "Top-N (for `top_n_elev_random`)",
-                min_value=1,
-                max_value=50,
-                value=5,
-                step=1,
-                help="Only used when strategy is `top_n_elev_random`. Number of highest-elevation satellites to consider.",
-            )
-        with col_seed:
-            seed = st.text_input(
-                "Random seed (optional)",
-                value="",
-                placeholder="e.g. 42",
-                help="Set a fixed seed for reproducibility (applies to random selections). Leave empty for non‑deterministic.",
-            )
+        st.divider()
 
-        n_select = st.number_input(
-            "n_select — satellites tracked (for `top_n_elev_random`)",
-            min_value=1,
-            max_value=50,
-            value=int(prev.get("n_select", 1)),
-            step=1,
-            help=(
-                "Only used when strategy is `top_n_elev_random`. Number of satellites "
-                "drawn at random from the Top-N pool. Effective count is "
-                "min(n_select, MAX_CO_FREQ), bounded by the pool size. Default 1 (paper)."
-            ),
+        # ── (b) Satellite selection strategy (Steps 19–22 replacement) ────
+        _nco_hint = None
+        try:
+            _nco_val = int(str(max_co_freq_override).strip())
+            if _nco_val > 0:
+                _nco_hint = _nco_val
+        except (ValueError, TypeError):
+            pass
+        mod_selection = st.checkbox(
+            "Alternative satellite selection strategy",
+            value=bool(prev.get("selection_strategy", "s1503") != "s1503"
+                       or prev.get("ref_vec_selection", False)),
+            help="Replaces the normative worst-case selection (Steps 19–21) "
+                 "in the EPFD↓ time simulation. The WCG search itself is a "
+                 "single-reference-satellite geometry hunt (§D3) — Steps 19–22 "
+                 "do not exist there, so strategies act on the time simulation "
+                 "by construction.",
         )
-
-        include_override = st.checkbox(
-            "Include override (OR condition) satellites",
-            value=prev.get("include_override", False),
-            help=(
-                "When enabled, satellites that violate α₀/ε₀ but have "
-                "GRX(φ) > min(Gmax-30, GRX(α₀)) are added to the EPFD sum "
-                "without the MAX_CO_FREQ cap (S.1503-4 Step 22). "
-                "When disabled (default), override satellites are ignored in "
-                "experimental strategies (normative behavior kept for 's1503')."
-            ),
-        )
-
-        # ── Alpha table (Doc 4A/312) — FIXED here for now (always visible) ──
-        st.markdown("**Alpha table (Doc 4A/312)** — deterministic quota over a declared α CDF")
-        st.caption("Used by the engine only when Strategy = `alpha_table`. Upload declared min/max CDF.")
-        alpha_bin_deg = st.number_input(
-            "α sub-bin width (deg) — 0 = normative",
-            min_value=0.0, max_value=10.0,
-            value=float(prev.get("alpha_bin_deg", 0.0)), step=0.5,
-            help=(
-                "0 (default) uses the normative TSS cases of Doc 4A/312 p. 110: "
-                "the declared intervals themselves, with an unbounded last case. "
-                "Any value > 0 subdivides each case into sub-bins, splitting its "
-                "credit among them — that changes the Step-20 'highest TSS' "
-                "comparison, so the run is NOT conforming. Sensitivity studies only "
-                "(Doc 4A/707 §4.1.3)."
-            ),
-        )
-        if float(alpha_bin_deg) > 0.0:
-            st.warning(
-                f"α sub-bin = {alpha_bin_deg}° subdivides the declared TSS cases — "
-                "this run does **not** conform to Doc 4A/312. Set 0 for the "
-                "normative granularity."
-            )
-        up = st.file_uploader(
-            "Alpha table file (JSON or YAML) — declared min/max CDF pairs",
-            type=["json", "yaml", "yml"],
-            help=(
-                "File with `min` and `max` lists of [angle_deg, probability] pairs; "
-                "probability is the CDF P(α ≤ angle), monotonically increasing. "
-                "NOT read from the .mdb."
-            ),
-        )
+        selection_strategy = "s1503"
+        ref_vec_selection = False
+        top_n, n_select, seed = 5, 1, ""
+        include_override = False
+        alpha_bin_deg = 0.0
         alpha_table_data = None
-        # Provenance: which declared table produced this run. The uploader hands
-        # over bytes, not a server-side path, so the original file name is the
-        # only identifier available — enough to tell sibling tables apart
-        # (e.g. examples/alpha_tables/03_wide_envelope.yaml vs 04_narrow_…).
         alpha_table_file = None
-
-        def _validate_cdf(pairs, who):
-            pa = pp = -1.0
-            for a, p in pairs:
-                a, p = float(a), float(p)
-                if a <= pa:
-                    raise ValueError(f"{who}: angles must strictly increase (got {a}° after {pa}°).")
-                if p < pp:
-                    raise ValueError(f"{who}: probabilities must be non-decreasing (CDF); got {p} after {pp}.")
-                if not (0.0 < p <= 1.0):
-                    raise ValueError(f"{who}: probability {p} out of (0, 1].")
-                pa, pp = a, p
-
-        if up is not None:
-            try:
-                raw = up.getvalue().decode("utf-8")
-                if up.name.lower().endswith((".yaml", ".yml")):
-                    import yaml as _yaml
-                    data = _yaml.safe_load(raw)
-                else:
-                    import json as _json
-                    data = _json.loads(raw)
-                _min = [[float(a), float(p)] for a, p in data["min"]]
-                _max = [[float(a), float(p)] for a, p in data["max"]]
-                _validate_cdf(_min, "min"); _validate_cdf(_max, "max")
-                alpha_table_data = {"min": _min, "max": _max}
-                alpha_table_file = up.name
-                st.success(
-                    f"Alpha table loaded from `{up.name}`: "
-                    f"{len(_min)} min pairs, {len(_max)} max pairs."
+        ref_vec_az_deg = float(prev.get("ref_vec_az_deg", 0.0))
+        ref_vec_el_deg = float(prev.get("ref_vec_el_deg", 90.0))
+        ref_vec_time_window_P_pct = float(prev.get("ref_vec_time_window_P_pct", 100.0))
+        if mod_selection:
+            _strat_prev = str(prev.get("selection_strategy", "s1503"))
+            if prev.get("ref_vec_selection"):
+                _strat_prev = "ref_vector"
+            _strat_opts = ["top_n_elev_random", "hybrid_rand_he", "ref_vector", "alpha_table"]
+            selection_strategy = st.radio(
+                "Strategy",
+                options=_strat_opts,
+                index=(_strat_opts.index(_strat_prev) if _strat_prev in _strat_opts else 0),
+                format_func=lambda v: {
+                    "top_n_elev_random": "Top-N highest elevation + random draw (Doc 4A/442)",
+                    "hybrid_rand_he": "Hybrid random + highest elevation (Doc 4A/493)",
+                    "ref_vector": "Reference vector + track duration (Doc 4A/519, US)",
+                    "alpha_table": "Alpha table — TSS quota (Doc 4A/312)",
+                }[v],
+            )
+            if selection_strategy == "top_n_elev_random":
+                col_n, col_m, col_s = st.columns(3)
+                with col_n:
+                    top_n = st.number_input(
+                        "N — highest-elevation pool",
+                        min_value=1,
+                        max_value=(_nco_hint if _nco_hint else 50),
+                        value=min(int(prev.get("top_n", 5)),
+                                  _nco_hint if _nco_hint else 50),
+                        step=1,
+                        help="Pool of the N highest-elevation Standard satellites. "
+                             + (f"Capped at Nco = {_nco_hint} (MAX_CO_FREQ override, section 7)."
+                                if _nco_hint else
+                                "Set a MAX_CO_FREQ override (section 7) to cap N at Nco; "
+                                "the engine always caps the drawn count at MAX_CO_FREQ."),
+                    )
+                with col_m:
+                    n_select = st.number_input(
+                        "M — satellites drawn (≤ N)",
+                        min_value=1, max_value=int(top_n),
+                        value=min(int(prev.get("n_select", 1)), int(top_n)),
+                        step=1,
+                        help="Drawn at random (no replacement) from the Top-N pool. "
+                             "M acts as an effective Nco′: the engine aggregates "
+                             "min(M, MAX_CO_FREQ) satellites per step.",
+                    )
+                with col_s:
+                    seed = st.text_input(
+                        "Random seed (optional)", value=str(prev.get("seed", "")),
+                        placeholder="e.g. 42",
+                        help="Fixed seed for reproducibility. Empty = OS entropy.",
+                    )
+            elif selection_strategy == "hybrid_rand_he":
+                seed = st.text_input(
+                    "Random seed (optional)", value=str(prev.get("seed", "")),
+                    placeholder="e.g. 42",
+                    help="Nco random + Nco highest-elevation lists, merged, ranked "
+                         "by EPFD, keep Nco (= MAX_CO_FREQ, section 7). Only the "
+                         "random list needs a seed.",
                 )
-            except Exception as exc:  # noqa: BLE001
-                st.error(f"Invalid alpha table: {exc}")
+            elif selection_strategy == "ref_vector":
+                ref_vec_selection = True
+                st.caption(
+                    "Hold duration comes from **MIN_DURATION** (track-duration "
+                    "override above) — no separate duration parameter. With no "
+                    "filing MIN_DURATION and no override, the hold degenerates "
+                    "to one fine step. Nco is **MAX_CO_FREQ** (section 7). "
+                    "Step 22 (OR) satellites are disabled in this mode."
+                )
+                col_rv1, col_rv2, col_rv3 = st.columns(3)
+                with col_rv1:
+                    ref_vec_az_deg = st.number_input(
+                        "Vector azimuth (°)",
+                        min_value=-180.0, max_value=360.0,
+                        value=float(prev.get("ref_vec_az_deg", 0.0)), step=1.0,
+                        help="Clockwise from North. 0°=North, 90°=East.",
+                    )
+                with col_rv2:
+                    ref_vec_el_deg = st.number_input(
+                        "Vector elevation (°)",
+                        min_value=0.0, max_value=90.0,
+                        value=float(prev.get("ref_vec_el_deg", 90.0)), step=1.0,
+                        help="90° = zenith ≡ highest-elevation selection.",
+                    )
+                with col_rv3:
+                    ref_vec_time_window_P_pct = st.number_input(
+                        "Time-window percentile P (%)",
+                        min_value=1.0, max_value=100.0,
+                        value=float(prev.get("ref_vec_time_window_P_pct", 100.0)),
+                        step=1.0,
+                        help="M = max(⌊N_SW × P/100⌋, 1) worst samples averaged "
+                             "per satellite when ranking.",
+                    )
+            elif selection_strategy == "alpha_table":
+                alpha_bin_deg = st.number_input(
+                    "α sub-bin width (deg) — 0 = normative",
+                    min_value=0.0, max_value=10.0,
+                    value=float(prev.get("alpha_bin_deg", 0.0)), step=0.5,
+                    help="0 uses the declared TSS cases of Doc 4A/312 p. 110. "
+                         ">0 subdivides each case (sensitivity studies only).",
+                )
+                if float(alpha_bin_deg) > 0.0:
+                    st.warning(
+                        f"α sub-bin = {alpha_bin_deg}° subdivides the declared "
+                        "TSS cases — non-conforming to Doc 4A/312."
+                    )
+                up = st.file_uploader(
+                    "Alpha table file (JSON or YAML) — declared min/max CDF pairs",
+                    type=["json", "yaml", "yml"],
+                    help="`min`/`max` lists of [angle_deg, probability] pairs "
+                         "(CDF, increasing). NOT read from the .mdb.",
+                )
 
-    with st.expander("9. Satellite selection (US proposal — optional)", expanded=False):
-        ref_vec_selection = st.checkbox(
-            "Use reference-vector selection (replaces S.1503-4 Steps 19–21)",
-            value=bool(prev.get("ref_vec_selection", False)),
-            help=(
-                "When enabled, the Nco active satellites are selected each hold period "
-                "by minimising the time-averaged angular separation from a reference "
-                "vector V=(az, el) in the ES local frame. "
-                "Based on US proposal R23-WP4A-C-0519. Default: off (normative S.1503-4 MAX_CO_FREQ)."
-            ),
+                def _validate_cdf(pairs, who):
+                    pa = pp = -1.0
+                    for a, p_ in pairs:
+                        a, p_ = float(a), float(p_)
+                        if a <= pa:
+                            raise ValueError(f"{who}: angles must strictly increase (got {a}° after {pa}°).")
+                        if p_ < pp:
+                            raise ValueError(f"{who}: probabilities must be non-decreasing (CDF); got {p_} after {pp}.")
+                        if not (0.0 < p_ <= 1.0):
+                            raise ValueError(f"{who}: probability {p_} out of (0, 1].")
+                        pa, pp = a, p_
+
+                if up is not None:
+                    try:
+                        raw = up.getvalue().decode("utf-8")
+                        if up.name.lower().endswith((".yaml", ".yml")):
+                            import yaml as _yaml
+                            data = _yaml.safe_load(raw)
+                        else:
+                            import json as _json
+                            data = _json.loads(raw)
+                        _min = [[float(a), float(p_)] for a, p_ in data["min"]]
+                        _max = [[float(a), float(p_)] for a, p_ in data["max"]]
+                        _validate_cdf(_min, "min"); _validate_cdf(_max, "max")
+                        alpha_table_data = {"min": _min, "max": _max}
+                        alpha_table_file = up.name
+                        st.success(
+                            f"Alpha table loaded from `{up.name}`: "
+                            f"{len(_min)} min pairs, {len(_max)} max pairs."
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Invalid alpha table: {exc}")
+        st.divider()
+
+        # ── (c) Step-18 gain test: drop the Gmax−30 dB candidate ──────────
+        drop_gmax30 = st.checkbox(
+            "Remove the Gmax−30 dB candidate from the Step-18 gain test (Doc 4A/1029 §5)",
+            value=bool(prev.get("drop_gmax30", False)),
+            help="The OR-branch threshold becomes GRX(α₀) alone — the declared "
+                 "exclusion angle α₀ ALWAYS remains; only the wider Gmax−30 "
+                 "candidate is removed (the admission cone never extends past "
+                 "α₀). Applies to BOTH the WCG search and the EPFD↓ simulation.",
         )
-        st.caption(
-            "Hold duration comes from **MIN_DURATION** (section 8 above) — there is "
-            "no separate duration parameter here. With no filing MIN_DURATION and no "
-            "override, the hold period degenerates to one fine step (re-select every "
-            "step, matching the proposal's own T=1 s case). Nco is **MAX_CO_FREQ** "
-            "(section 7 above)."
+        st.divider()
+
+        # ── (d) Sidelobe-to-sidelobe (SL2SL) contribution ───────────────────
+        sidelobe_enabled = st.checkbox(
+            "Sidelobe (SL2SL) contribution — S.1528 patterns 1.2/1.4",
+            value=bool(prev.get("sidelobe_enabled", False)),
+            help="Adds the side-lobe emissions of the visible non-Nco satellites "
+                 "serving a terrestrial grid of ESs around the victim "
+                 "(constant pfd toward each served cell). Outputs a "
+                 "sidelobe-only CCDF and a standard+sidelobe total CCDF. "
+                 "Fixed time step only.",
         )
-        col_rv1, col_rv2 = st.columns(2)
-        with col_rv1:
-            ref_vec_az_deg = st.number_input(
-                "Reference vector azimuth (°)",
-                min_value=-180.0, max_value=360.0,
-                value=float(prev.get("ref_vec_az_deg", 0.0)),
-                step=1.0,
-                help="Azimuth of the reference vector in the ES local frame, "
-                     "clockwise from North (°). 0°=North, 90°=East.",
-            )
-            ref_vec_el_deg = st.number_input(
-                "Reference vector elevation (°)",
-                min_value=0.0, max_value=90.0,
-                value=float(prev.get("ref_vec_el_deg", 90.0)),
-                step=1.0,
-                help="Elevation of the reference vector above the local horizontal "
-                     "plane (°). 90° = zenith = equivalent to highest-elevation selection.",
-            )
-        with col_rv2:
-            ref_vec_time_window_P_pct = st.number_input(
-                "Time-window percentile P (%)",
-                min_value=1.0, max_value=100.0,
-                value=float(prev.get("ref_vec_time_window_P_pct", 100.0)),
-                step=1.0,
-                help="M = max(floor(N_SW × P / 100), 1) worst-case samples are "
-                     "averaged per satellite when ranking, where N_SW is the "
-                     "MIN_DURATION-derived hold window (section 8). P=100% uses "
-                     "all N_SW samples.",
+        sidelobe_pattern = str(prev.get("sidelobe_pattern", "1.4"))
+        sidelobe_pfd_dbw_m2 = float(prev.get("sidelobe_pfd_dbw_m2", -140.0))
+        sidelobe_grid_radius_km = float(prev.get("sidelobe_grid_radius_km", 315.0))
+        sidelobe_grid_spacing_km = float(prev.get("sidelobe_grid_spacing_km", 21.0))
+        sidelobe_min_elevation_deg = float(prev.get("sidelobe_min_elevation_deg", 25.0))
+        sidelobe_gso_arc_separation_deg = float(prev.get("sidelobe_gso_arc_separation_deg", 20.0))
+        if sidelobe_enabled:
+            if selection_strategy in ("ref_vector", "alpha_table"):
+                st.error(
+                    "SL2SL is only implemented for the standard fixed-step path — "
+                    "not combinable with reference-vector or alpha-table selection. "
+                    "Untick one of them before launching."
+                )
+            col_sl1, col_sl2, col_sl3 = st.columns(3)
+            with col_sl1:
+                sidelobe_pattern = st.radio(
+                    "NGSO satellite pattern",
+                    options=["1.4", "1.2"],
+                    index=(0 if sidelobe_pattern != "1.2" else 1),
+                    format_func=lambda v: (
+                        "S.1528 rec 1.4 — Taylor (low side lobes)" if v == "1.4"
+                        else "S.1528 rec 1.2 — alternative (high side lobes)"
+                    ),
+                )
+                sidelobe_pfd_dbw_m2 = st.number_input(
+                    "pfd toward served cell (dBW/m²/40kHz)",
+                    min_value=-200.0, max_value=-80.0,
+                    value=sidelobe_pfd_dbw_m2, step=1.0,
+                )
+            with col_sl2:
+                sidelobe_grid_radius_km = st.number_input(
+                    "ES grid half-width (km)", min_value=50.0, max_value=2000.0,
+                    value=sidelobe_grid_radius_km, step=21.0,
+                )
+                sidelobe_grid_spacing_km = st.number_input(
+                    "ES grid spacing (km)", min_value=5.0, max_value=100.0,
+                    value=sidelobe_grid_spacing_km, step=1.0,
+                    help="≥ 20 km respects the minimum co-frequency beam separation.",
+                )
+            with col_sl3:
+                sidelobe_min_elevation_deg = st.number_input(
+                    "Serving-link min elevation (°)", min_value=0.0, max_value=90.0,
+                    value=sidelobe_min_elevation_deg, step=1.0,
+                )
+                sidelobe_gso_arc_separation_deg = st.number_input(
+                    "GSO-arc separation at served ES (°)",
+                    min_value=0.0, max_value=90.0,
+                    value=sidelobe_gso_arc_separation_deg, step=1.0,
+                )
+            _n_side = 2 * int(sidelobe_grid_radius_km / sidelobe_grid_spacing_km) + 1
+            st.caption(
+                f"Grid: {_n_side}×{_n_side}−1 = {_n_side * _n_side - 1} served ESs "
+                "centred on each simulated victim. Victim exclusion gate uses the "
+                "run's own α₀; the victim antenna is the run's ES antenna above."
             )
 
     # ── Workload + runtime estimate ────────────────────────────────────────
@@ -1102,6 +1180,17 @@ if submit:
     params["ref_vec_el_deg"] = float(ref_vec_el_deg)
     params["ref_vec_time_window_P_pct"] = float(ref_vec_time_window_P_pct)
 
+    # Step-18 gain-test ablation + SL2SL sidelobe study (section 8).
+    params["drop_gmax30"] = bool(drop_gmax30)
+    if sidelobe_enabled:
+        params["sidelobe_enabled"] = True
+        params["sidelobe_pattern"] = str(sidelobe_pattern)
+        params["sidelobe_pfd_dbw_m2"] = float(sidelobe_pfd_dbw_m2)
+        params["sidelobe_grid_radius_km"] = float(sidelobe_grid_radius_km)
+        params["sidelobe_grid_spacing_km"] = float(sidelobe_grid_spacing_km)
+        params["sidelobe_min_elevation_deg"] = float(sidelobe_min_elevation_deg)
+        params["sidelobe_gso_arc_separation_deg"] = float(sidelobe_gso_arc_separation_deg)
+
     # Article 22 scenario leaf overrides service / ES antenna / ref BW /
     # frequency run and pins the PFD mask (see section 1 selector).
     if art22_leaf is not None:
@@ -1189,6 +1278,14 @@ if submit:
         "ref_vec_az_deg": float(ref_vec_az_deg),
         "ref_vec_el_deg": float(ref_vec_el_deg),
         "ref_vec_time_window_P_pct": float(ref_vec_time_window_P_pct),
+        "drop_gmax30": bool(drop_gmax30),
+        "sidelobe_enabled": bool(sidelobe_enabled),
+        "sidelobe_pattern": str(sidelobe_pattern),
+        "sidelobe_pfd_dbw_m2": float(sidelobe_pfd_dbw_m2),
+        "sidelobe_grid_radius_km": float(sidelobe_grid_radius_km),
+        "sidelobe_grid_spacing_km": float(sidelobe_grid_spacing_km),
+        "sidelobe_min_elevation_deg": float(sidelobe_min_elevation_deg),
+        "sidelobe_gso_arc_separation_deg": float(sidelobe_gso_arc_separation_deg),
     })
 
     run_id = launcher.launch_s1503(system_id=sel_sys, params=params)

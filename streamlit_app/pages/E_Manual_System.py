@@ -231,6 +231,21 @@ with r3:
     diam_m = st.number_input("GSO ES antenna Ø (m)", 0.3, 18.0, 1.2, 0.1,
                              key="man_diam")
 
+# Proposed S.1428 revision (WP 4A doc 4A1d-3) — same option as Single-entry's
+# "1503 proposal modifications" section. The launch block below reads both
+# vars unconditionally, so they must exist even when unticked.
+use_proposed = st.checkbox(
+    "S.1428 proposed ES antenna pattern (doc 4A1d-3)",
+    value=False, key="man_use_proposed",
+)
+prop_opt = 1
+if use_proposed:
+    prop_opt = st.radio(
+        "Proposed pattern variant", options=[1, 2], horizontal=True,
+        format_func=lambda v: "Variant A" if v == 1 else "Variant B",
+        key="man_prop_opt",
+    )
+
 # ── Register as filing (hand-off to the Upload flow) ────────────────────────
 # Writes the manual pair into the uploads area and drops the user on Upload
 # Step 2 with both files pending, so the save/registration is confirmed

@@ -282,6 +282,40 @@ def write_per_point_timeseries_csv(
     return out.name
 
 
+def write_sidelobe_ccdf_csv(result_path: Path, sim_data: dict[str, Any]) -> str | None:
+    """``ccdf_sidelobe.csv`` — SL2SL study only: the sidelobe-only CCDF and
+    the per-step standard+sidelobe total CCDF, both on the same time base as
+    the headline CCDF. One row per (curve, CCDF point)."""
+    sl = sim_data.get("sidelobe") or {}
+    if not sl:
+        return None
+    unit = _epfd_unit(sim_data)
+    pattern = sl.get("pattern") or "?"
+    lines = [
+        "# SHARC-Orbit sidelobe (SL2SL) study CCDFs — non-normative WP 4A "
+        f"option, NGSO satellite pattern ITU-R S.1528 rec {pattern}. "
+        "curve=sidelobe_only: the sidelobe links alone; curve=total: "
+        "per-step sum standard(S.1503-4)+sidelobe (Doc 4A/461-style view).",
+        f"# units: epfd_db [{unit}] · pct_time_exceeded [% of simulated time]",
+        "curve,epfd_db,pct_time_exceeded",
+    ]
+    n = 0
+    for curve, bk, pk in (("sidelobe_only", "ccdf_bins_db", "ccdf_pct"),
+                          ("total", "total_ccdf_bins_db", "total_ccdf_pct")):
+        bins = sl.get(bk) or []
+        pct = sl.get(pk) or []
+        if not bins or len(bins) != len(pct):
+            continue
+        for b, p in zip(bins, pct):
+            n += 1
+            lines.append(f"{curve},{float(b):.1f},{float(p):.10g}")
+    if n == 0:
+        return None
+    out = result_path / "ccdf_sidelobe.csv"
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out.name
+
+
 def write_contributing_elevation_csv(result_path: Path, acc: Any | None) -> str | None:
     """``contributing_sat_elevations.csv`` — elevation of EPFD-contributing
     satellites over the same decimated time points as
@@ -673,6 +707,7 @@ def write_run_artifacts(result_path: Path, sim_data: dict[str, Any],
         lambda: write_per_system_ccdf_csv(result_path, sim_data),
         lambda: write_per_system_timeseries_csv(result_path, sim_data),
         lambda: write_contributing_elevation_csv(result_path, acc),
+        lambda: write_sidelobe_ccdf_csv(result_path, sim_data),
         lambda: write_table17_csv(result_path, sim_data),
         lambda: write_geometries_csv(result_path, sim_data),
         lambda: write_timebase_csv(result_path, sim_data),
