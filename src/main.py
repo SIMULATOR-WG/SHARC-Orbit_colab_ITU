@@ -2008,6 +2008,28 @@ def run_wcg_downlink(config: dict) -> tuple[
     logger.info(f"GSO ES antenna: {es_antenna}")
     logger.info(f"GSO ES service: {es_service}")
 
+    # "1503 proposal modifications" scope: by default they act on the EPFD↓
+    # time simulation only. mods_in_wcga=True extends them to the WCG search:
+    # the WCGA runs with the PROPOSED antenna (below), the Step-18 ablation
+    # applies there too (SHARC_S1503_DROP_GMAX30="both", set by the worker),
+    # and the found geometry is re-ranked by the strategy-aggregated instant
+    # EPFD over the search trail (Phase 1, further down).
+    mods_in_wcga = bool(config.get("simulation", {}).get("mods_in_wcga", False))
+    if use_proposed and not mods_in_wcga:
+        # WCGA keeps the normative victim antenna; only the sim sees the
+        # proposed pattern.
+        es_antenna_wcga = create_gso_es_antenna(
+            es_diameter, freq_ghz, es_efficiency, service=es_service,
+            use_proposed=False, proposed_option=1,
+        )
+        logger.info(
+            "  mods_in_wcga=False: WCG search uses the NORMATIVE antenna "
+            "(%s); the EPFD simulation uses the proposed pattern.",
+            es_antenna_wcga,
+        )
+    else:
+        es_antenna_wcga = es_antenna
+
     # ================================================================
     #  3. PFD mask
     # ================================================================
@@ -2407,7 +2429,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 oe_ref=sat_oe,
                 t_s=0.0,
                 pfd_mask=_ref_sat_mask,
-                es_antenna=es_antenna,
+                es_antenna=es_antenna_wcga,
                 alpha0_deg=alpha0_deg,
                 min_elevation_deg=min_elev_deg,
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
@@ -2542,7 +2564,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 ngso_sat_vel_eci=cand_vel_eci,
                 t_s=0.0,
                 pfd_mask=pfd_mask,
-                es_antenna=es_antenna,
+                es_antenna=es_antenna_wcga,
                 alpha0_deg=alpha0_deg,
                 min_elevation_deg=min_elev_deg,
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
@@ -3112,6 +3134,118 @@ def run_wcg_downlink(config: dict) -> tuple[
             "applied": False,
             "reason": "manual_wcg" if manual_enabled else "disabled_by_config",
         }
+
+    # ── mods_in_wcga: strategy-aware WCG re-ranking over the search trail ──
+    # The S.1503 WCGA is a single-reference-satellite geometry hunt (§D3) —
+    # Steps 19–22 do not exist inside it, so a selection strategy cannot act
+    # there directly. When mods_in_wcga=True and a strategy is selected, the
+    # normative WCGA still runs (it is what enumerates candidate geometries),
+    # and the FINAL geometry is then re-ranked among the top-K trail points by
+    # the strategy-aggregated instantaneous EPFD at t=0 — so the adopted WCG
+    # is the geometry that maximizes the interference AS THE STRATEGY COMPUTES
+    # IT, not as the normative worst-case rule does.
+    _mods_wcga_sel = bool(config.get("simulation", {}).get("mods_in_wcga", False))
+    _sel_strategy_cfg = str(config.get("simulation", {}).get("selection_strategy", "s1503"))
+    _ref_vec_cfg = bool(config.get("simulation", {}).get("ref_vec_selection", False))
+    if (
+        _mods_wcga_sel
+        and not manual_enabled
+        and (_sel_strategy_cfg in ("top_n_elev_random", "hybrid_rand_he") or _ref_vec_cfg)
+    ):
+        _trail = list(getattr(wcg_result, "search_trail", None) or [])
+        _ok = [p for p in _trail
+               if getattr(p, "status", "") == "ok" and p.epfd_dBW > -900.0]
+        if not _ok:
+            logger.warning(
+                "  mods_in_wcga: no usable WCG search trail (manual WCG or "
+                "trail disabled) — keeping the normative geometry."
+            )
+        else:
+            from .wcg_search import WCGResult as _WCGR  # noqa: PLC0415
+            _ok.sort(key=lambda p: p.epfd_dBW, reverse=True)
+            _K = 32
+            _cands = _ok[:_K]
+            _sc = selection_config if _sel_strategy_cfg != "s1503" else None
+            _rv = (
+                (float(sim_cfg.get("ref_vec_az_deg", 0.0)),
+                 float(sim_cfg.get("ref_vec_el_deg", 90.0)))
+                if _ref_vec_cfg else None
+            )
+            _best_db, _best_pt = -1e9, None
+            for _pt in _cands:
+                _cand_wcg = _WCGR(
+                    theta_deg=_pt.theta_deg, phi_deg=_pt.phi_deg,
+                    es_lat_deg=_pt.es_lat_deg, es_lon_deg=_pt.es_lon_deg,
+                    gso_lon_deg=(_pt.gso_lon_deg if _pt.gso_lon_deg is not None
+                                 else _pt.es_lon_deg),
+                    alpha_deg=_pt.alpha_deg, offaxis_deg=0.0, pfd_dBW=0.0,
+                    es_gain_rel_dB=0.0, epfd_dBW=_pt.epfd_dBW,
+                    elevation_deg=_pt.elevation_deg,
+                )
+                _db = epfd_aggregate_dBW_at_instant(
+                    constellation=constellation, t_s=0.0, wcg=_cand_wcg,
+                    pfd_mask=pfd_mask, es_antenna=es_antenna,
+                    alpha0_deg=alpha0_deg, min_elevation_deg=min_elev_deg,
+                    pfd_bw_correction_db=bw_correction_db,
+                    max_co_freq_by_lat=max_co_freq_by_lat,
+                    strict_max_co_freq_total=strict_max_co_freq_total,
+                    raan_dot_artificial_rad_s=raan_dot_artificial,
+                    raan_dot_override_rad_s=raan_dot_override_rad_s,
+                    strict_exclusion_zone=strict_exclusion_zone,
+                    wdelta_deg=0.0, t_run_s=0.0,
+                    min_angle_at_es_deg=min_angle_at_es_deg,
+                    gso_min_elevation_deg=gso_min_elev_effective_deg,
+                    selection_config=_sc, ref_vec=_rv,
+                )
+                if _db > _best_db:
+                    _best_db, _best_pt = _db, _pt
+            _moved = (
+                _best_pt is not None
+                and (abs(_best_pt.es_lat_deg - wcg_result.es_lat_deg) > 1e-6
+                     or abs(_best_pt.es_lon_deg - wcg_result.es_lon_deg) > 1e-6)
+            )
+            sim_meta["mods_in_wcga_rerank"] = {
+                "candidates": len(_cands),
+                "policy": ("ref_vector" if _ref_vec_cfg else _sel_strategy_cfg),
+                "normative_wcg": [wcg_result.es_lat_deg, wcg_result.es_lon_deg,
+                                   wcg_result.gso_lon_deg],
+                "adopted_epfd_at_t0_dbw": float(_best_db),
+                "moved": bool(_moved),
+            }
+            if _moved:
+                logger.info(
+                    "  mods_in_wcga: strategy-aggregated re-ranking MOVED the "
+                    "WCG: (%.3f, %.3f) → (%.3f, %.3f) [instant EPFD %.1f dBW]",
+                    wcg_result.es_lat_deg, wcg_result.es_lon_deg,
+                    _best_pt.es_lat_deg, _best_pt.es_lon_deg, _best_db,
+                )
+                _new_wcg = _WCGR(
+                    theta_deg=_best_pt.theta_deg, phi_deg=_best_pt.phi_deg,
+                    es_lat_deg=_best_pt.es_lat_deg,
+                    es_lon_deg=_best_pt.es_lon_deg,
+                    gso_lon_deg=(_best_pt.gso_lon_deg
+                                 if _best_pt.gso_lon_deg is not None
+                                 else _best_pt.es_lon_deg),
+                    alpha_deg=_best_pt.alpha_deg, offaxis_deg=0.0,
+                    pfd_dBW=0.0, es_gain_rel_dB=0.0,
+                    epfd_dBW=_best_pt.epfd_dBW,
+                    elevation_deg=_best_pt.elevation_deg,
+                )
+                _new_wcg.search_trail = wcg_result.search_trail
+                _new_wcg.search_trail_all = getattr(
+                    wcg_result, "search_trail_all", []
+                )
+                wcg_result = _new_wcg
+                sim_meta["mods_in_wcga_rerank"]["adopted_wcg"] = [
+                    wcg_result.es_lat_deg, wcg_result.es_lon_deg,
+                    wcg_result.gso_lon_deg,
+                ]
+            else:
+                logger.info(
+                    "  mods_in_wcga: strategy-aggregated re-ranking kept the "
+                    "normative WCG (instant EPFD %.1f dBW over %d candidates).",
+                    _best_db, len(_cands),
+                )
 
     # Aggregate EPFD↓ at t=0: same D.5 rule (MAX_CO_FREQ), but **without** the D6.3.4 Wdelta offset
     # in the propagator. With Wdelta>0, at t=0 the RAAN receives −Wdelta and the constellation does

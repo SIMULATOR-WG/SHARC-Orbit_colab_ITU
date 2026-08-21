@@ -1124,6 +1124,7 @@ def _evaluate_batch(args):
         or_branch = s1503_or_condition_include(
             es_antenna, offaxis, alpha0_deg, theta_planar,
             disable_or_condition=strict_exclusion_zone,
+            wcga_context=True,
         )
         if not (and_branch or or_branch):
             status = "low_elev" if (
@@ -1349,6 +1350,7 @@ def search_wcg(
         or_branch = s1503_or_condition_include(
             es_antenna, offaxis, alpha0_deg, theta_planar,
             disable_or_condition=strict_exclusion_zone,
+            wcga_context=True,
         )
         if and_branch or or_branch:
             status = "ok"
@@ -2177,6 +2179,7 @@ def _wcgd_check_case(
     or_branch = s1503_or_condition_include(
         es_antenna, offaxis, alpha0_deg, theta_planar,
         disable_or_condition=strict_exclusion_zone,
+        wcga_context=True,
     )
     if not (and_branch or or_branch):
         if (
@@ -2434,7 +2437,7 @@ def _wcgd_check_case_batch(
         n_all = len(alpha_all)
         alpha0_arr = np.full(n_all, alpha0_deg, dtype=float)
         g_rel_at_a0 = _relative_gain_batch(es_antenna, alpha0_arr, theta_planar_all)
-        if s1503_gain_test_drops_gmax30():
+        if s1503_gain_test_drops_gmax30("wcga"):
             # Doc 4A/1029 §5 ablation: GRX(α₀) alone (α₀ always kept).
             g_rel_thr = g_rel_at_a0
         else:

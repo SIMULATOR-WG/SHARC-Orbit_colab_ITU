@@ -701,6 +701,21 @@ with st.form("s1503_form"):
             "they combine, except where noted. Everything left unticked runs "
             "the normative S.1503-4 algorithm."
         )
+        mods_in_wcga = st.checkbox(
+            "Apply the ticked modifications in the WCG search too",
+            value=bool(prev.get("mods_in_wcga", False)),
+            help="OFF (default): the modifications change only the EPFD↓ time "
+                 "simulation — the worst-case geometry is found with the "
+                 "normative S.1503-4 WCGA. ON: the WCGA also runs with the "
+                 "proposed antenna and the Step-18 ablation, and (for the "
+                 "selection strategies / reference vector) the found geometry "
+                 "is re-ranked among the top WCGA candidates by the "
+                 "strategy-aggregated instantaneous EPFD at t=0 — so the WCG "
+                 "itself can move, as in the Doc 4A/1029 ablation study. "
+                 "The alpha-table strategy is excluded (its TSS quota is "
+                 "inherently temporal — undefined at a single instant).",
+        )
+        st.divider()
 
         # ── (a) GSO victim ES antenna: proposed S.1428 revision ────────────
         use_proposed = st.checkbox(
@@ -1186,6 +1201,7 @@ if submit:
     params["ref_vec_time_window_P_pct"] = float(ref_vec_time_window_P_pct)
 
     # Step-18 gain-test ablation + SL2SL sidelobe study (section 8).
+    params["mods_in_wcga"] = bool(mods_in_wcga)
     params["drop_gmax30"] = bool(drop_gmax30)
     if sidelobe_enabled:
         params["sidelobe_enabled"] = True
@@ -1283,6 +1299,7 @@ if submit:
         "ref_vec_az_deg": float(ref_vec_az_deg),
         "ref_vec_el_deg": float(ref_vec_el_deg),
         "ref_vec_time_window_P_pct": float(ref_vec_time_window_P_pct),
+        "mods_in_wcga": bool(mods_in_wcga),
         "drop_gmax30": bool(drop_gmax30),
         "sidelobe_enabled": bool(sidelobe_enabled),
         "sidelobe_pattern": str(sidelobe_pattern),

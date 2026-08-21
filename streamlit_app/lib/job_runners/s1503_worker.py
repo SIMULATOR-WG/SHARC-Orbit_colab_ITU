@@ -295,15 +295,29 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["ref_vec_el_deg"] = float(params.get("ref_vec_el_deg", 90.0))
         sim["ref_vec_time_window_P_pct"] = float(params.get("ref_vec_time_window_P_pct", 100.0))
 
+    # Scope of the "1503 proposal modifications": by default they act on the
+    # EPFD↓ simulation only; mods_in_wcga=True extends them to the WCG search
+    # (proposed antenna in the WCGA, Step-18 ablation there too, and
+    # strategy-aggregated re-ranking of the found geometry — see
+    # run_wcg_downlink).
+    _mods_in_wcga = bool(params.get("mods_in_wcga"))
+    if _mods_in_wcga:
+        sim["mods_in_wcga"] = True
+        _emit("S.1503 modifications scope: EPFD simulation AND WCG search")
+
     # Step-18 gain-test ablation (Doc 4A/1029 §5): drop the Gmax−30 dB
     # candidate; GRX(α₀) alone governs the OR branch (α₀ always kept). Env
     # var, not a cfg key: the test sits deep in the WCGA + EPFD hot paths and
     # the env is inherited by every multiprocessing pool child of this worker
-    # process. Ray remote workers get it via runtime_env below.
+    # process. Ray remote workers get it via runtime_env below. Value "both"
+    # applies it to the WCG search too; "epfd" keeps the WCGA normative.
     if params.get("drop_gmax30"):
-        os.environ["SHARC_S1503_DROP_GMAX30"] = "1"
+        os.environ["SHARC_S1503_DROP_GMAX30"] = (
+            "both" if _mods_in_wcga else "epfd"
+        )
         _emit("S.1503 modification ON: Step-18 gain test without the "
-              "Gmax−30 dB candidate (GRX(α₀) alone governs)")
+              "Gmax−30 dB candidate (GRX(α₀) alone governs) — scope: "
+              + ("EPFD + WCGA" if _mods_in_wcga else "EPFD only"))
 
     # SL2SL sidelobe study (non-normative; src/sidelobe_epfd.py).
     if params.get("sidelobe_enabled"):
@@ -666,13 +680,27 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     if sim.get("sidelobe_enabled"):
         _mods["sidelobe"] = {"pattern": sim.get("sidelobe_pattern", "1.4")}
     if _mods:
+        _mods["scope"] = (
+            "epfd_and_wcga" if sim.get("mods_in_wcga") else "epfd_only"
+        )
+        # Written back into cfg["simulation"] by run_wcg_downlink when the
+        # strategy-aggregated re-ranking ran over the WCGA trail.
+        if sim.get("mods_in_wcga_rerank"):
+            _mods["wcga_rerank"] = sim["mods_in_wcga_rerank"]
         sim_data["s1503_modifications"] = _mods
 
     # S.1503-4 §D5.1.4.2 track-duration variant: expose the window parameters and
     # per-slide-window-set CCDFs. The headline CCDF above is the worst-per-level
     # envelope across sets (go/no-go holds iff every set complies).
     _td = sim.get("_track_duration")
-    if _td and getattr(sim_result_dl, "window_stats", None):
+    # Reference-vector runs use the SAME MIN_DURATION/N_SW windowing as the
+    # hold-duration source but accumulate one continuous stream (no
+    # per-window-set stats) — surface the window parameters for them too, so
+    # the run is self-describing about the hold that was applied.
+    if _td and (
+        getattr(sim_result_dl, "window_stats", None)
+        or _td.get("ranking_policy") == "reference_vector"
+    ):
         sim_data["track_duration"] = _td
         try:
             per_window = []

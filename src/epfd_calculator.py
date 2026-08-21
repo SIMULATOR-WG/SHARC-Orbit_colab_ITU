@@ -857,7 +857,7 @@ def _accumulate_epfd_visible_satellites(
                      else np.full(cand.size, alpha0_deg, dtype=float)),
                     theta_cand,
                 )
-                if _s1503_drop_gmax30():
+                if _s1503_drop_gmax30("epfd"):
                     # Doc 4A/1029 §5 ablation: GRX(α₀) alone (α₀ always kept).
                     override[cand] = g_rel_arr[cand] > g_rel_at_a0
                 else:
@@ -1302,6 +1302,8 @@ def epfd_aggregate_dBW_at_instant(
     t_run_s: float = 0.0,
     min_angle_at_es_deg: float = 0.0,
     gso_min_elevation_deg: float = -90.0,
+    selection_config: "SelectionConfig | None" = None,
+    ref_vec: tuple[float, float] | None = None,
 ) -> float:
     """EPFD↓ aggregated at an instant, with the same rule as ``run_epfd_simulation`` / D.5.
 
@@ -1315,6 +1317,14 @@ def epfd_aggregate_dBW_at_instant(
     ``epfd_aggregate_dBW`` value reported alongside the **single-entry WCG**, use
     ``wdelta_deg=0`` and ``t_run_s=0`` to coincide with the Phase 1 orbit; the time
     series continues with Wdelta in the D.5 steps.
+
+    **Study modifications (mods_in_wcga re-ranking):** ``selection_config``
+    applies the alternative Steps 19–22 strategy to this instant (RNG keyed
+    (seed, step_index=0) — deterministic given a seed). ``ref_vec`` =
+    ``(az_deg, el_deg)`` applies the instantaneous reading of the
+    reference-vector policy instead: the up-to-Nco eligible satellites
+    (strict |α| > α₀, ε ≥ ε₀) closest to the vector, summed — the T→0 limit
+    of the Doc 4A/519 ranking (no hold window exists at a single instant).
     """
     es_lat = wcg.es_lat_deg
     es_lon = wcg.es_lon_deg
@@ -1360,6 +1370,55 @@ def epfd_aggregate_dBW_at_instant(
     n_sat_agg = int(pos_ecef_all.shape[0])
     min_h_agg = _min_operating_height_km_batch(constellation, n_sat_agg)
 
+    if ref_vec is not None:
+        # Instantaneous reference-vector policy (T→0 limit of Doc 4A/519):
+        # per-sat epfd via collect mode, then keep the up-to-Nco eligible
+        # satellites (strict |α| > α₀ ∧ ε ≥ ε₀, the branch's own boundary
+        # convention) with the smallest angular separation from the vector.
+        _ps: dict = {}
+        _accumulate_epfd_visible_satellites(
+            visible_idx=visible_idx,
+            pos_ecef_all=pos_ecef_all,
+            vel_ecef_all=vel_ecef_all,
+            es_ecef=es_ecef,
+            es_x=es_x, es_y=es_y, es_z=es_z,
+            es_lat_deg=es_lat, es_lon_deg=es_lon,
+            gso_ecef=gso_ecef,
+            alpha0_deg=alpha0_deg,
+            pfd_mask=pfd_mask,
+            es_antenna=es_antenna,
+            pfd_bw_correction_db=pfd_bw_correction_db,
+            max_co_freq=max_co_freq,
+            strict_max_co_freq_total=strict_max_co_freq_total,
+            subsat_lat_all=None, subsat_lon_all=None, sat_local_frames=None,
+            min_operating_height_km_all=min_h_agg,
+            dual_ts=None, t_s=t_s,
+            strict_exclusion_zone=strict_exclusion_zone,
+            min_angle_at_es_deg=min_angle_at_es_deg,
+            min_elevation_deg=min_elevation_deg,
+            sin_el_full=sin_el,
+            per_sat_out=_ps,
+        )
+        idx = np.asarray(_ps.get("idx", np.empty(0, dtype=np.int64)))
+        if idx.size == 0:
+            return -999.0
+        epfd_lin = np.asarray(_ps["epfd_lin"], dtype=np.float64)
+        std = np.asarray(_ps["std"], dtype=bool)
+        # ref-vec eligibility uses strict |α| > α₀ (vs ≥ on the std flag) —
+        # at a grid instant the boundary set has measure ~0; reuse std.
+        if not np.any(std):
+            return -999.0
+        sep = compute_angular_separation_from_ref_vector(
+            es_ecef, pos_ecef_all[idx[std]], es_lat, es_lon,
+            float(ref_vec[0]), float(ref_vec[1]),
+        )
+        vals = epfd_lin[std]
+        n_co = int(max_co_freq) if (max_co_freq and max_co_freq > 0) else 1
+        keep = np.argsort(sep)[:n_co]
+        epfd_sum_linear = float(np.sum(vals[keep]))
+        return (10.0 * math.log10(epfd_sum_linear)
+                if epfd_sum_linear > 0 else -999.0)
+
     standard_epfd, override_epfd, _, _ = _accumulate_epfd_visible_satellites(
         visible_idx=visible_idx,
         pos_ecef_all=pos_ecef_all,
@@ -1387,6 +1446,8 @@ def epfd_aggregate_dBW_at_instant(
         min_angle_at_es_deg=min_angle_at_es_deg,
         min_elevation_deg=min_elevation_deg,
         sin_el_full=sin_el,
+        selection_config=selection_config,
+        step_index=0,
     )
     epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
     epfd_agg_db = 10.0 * math.log10(epfd_sum_linear) if epfd_sum_linear > 0 else -999.0

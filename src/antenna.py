@@ -412,29 +412,45 @@ class ITUBO1443Antenna(EarthStationAntenna):
                 f"G_max={self.g_max:.1f}dBi)")
 
 
-def s1503_gain_test_drops_gmax30() -> bool:
+def s1503_gain_test_drops_gmax30(context: str = "epfd") -> bool:
     """WP 4A study option (Doc 4A/1029 §5): drop the ``Gmax − 30 dB``
     candidate from the Step 18 gain test, so the OR-branch threshold becomes
     ``GRX(α₀)`` alone (the declared exclusion angle always governs — the
     admission cone never extends beyond α₀). The geometric branch and the
     gain test itself REMAIN; only the wider of the two candidates is removed.
 
-    Controlled by the ``SHARC_S1503_DROP_GMAX30`` environment variable
-    ("1"/"true" = on), set per run by the launcher/worker BEFORE the engine
-    runs. An env var (rather than a threaded parameter) because the test is
-    evaluated deep inside both the WCGA and EPFD hot paths, across
-    multiprocessing pool workers (env is inherited on spawn) and Ray remote
-    workers (propagated via runtime_env env_vars). Cached on first call per
-    process.
+    Controlled by the ``SHARC_S1503_DROP_GMAX30`` environment variable, set
+    per run by the launcher/worker BEFORE the engine runs. Values:
+
+    * ``""``/unset — modification off everywhere (normative);
+    * ``"epfd"`` — applied to the EPFD↓ time simulation only; the WCG
+      search keeps the normative test (the run's "mods in EPFD only" mode);
+    * ``"both"`` (also ``"1"``/``"true"`` for back-compat) — applied to the
+      WCG search too (the geometry hunt sees the same rule, so the WCG can
+      move, cf. the ±36° displacement in the ablation study).
+
+    ``context`` says which caller is asking: ``"epfd"`` (default) or
+    ``"wcga"``. An env var (rather than a threaded parameter) because the
+    test is evaluated deep inside both hot paths, across multiprocessing
+    pool workers (env is inherited on spawn) and Ray remote workers
+    (propagated via runtime_env env_vars). Cached on first call per process.
     """
     cached = getattr(s1503_gain_test_drops_gmax30, "_cached", None)
     if cached is None:
         import os
-        cached = os.environ.get(
-            "SHARC_S1503_DROP_GMAX30", ""
-        ).strip().lower() in ("1", "true", "yes", "on")
+        raw = os.environ.get("SHARC_S1503_DROP_GMAX30", "").strip().lower()
+        if raw in ("1", "true", "yes", "on", "both"):
+            cached = "both"
+        elif raw == "epfd":
+            cached = "epfd"
+        else:
+            cached = ""
         s1503_gain_test_drops_gmax30._cached = cached
-    return cached
+    if cached == "both":
+        return True
+    if cached == "epfd":
+        return context == "epfd"
+    return False
 
 
 def s1503_or_condition_include(
@@ -444,6 +460,7 @@ def s1503_or_condition_include(
     theta_deg: float | None = None,
     *,
     disable_or_condition: bool = False,
+    wcga_context: bool = False,
 ) -> bool:
     """S.1503-4 D3.1.2 / D5.1 Step 18: gain OR condition in the zone |α| < α₀.
 
@@ -468,7 +485,7 @@ def s1503_or_condition_include(
         return False
     g_rel = es_antenna.relative_gain(offaxis_deg, theta_deg)
     g_rel_at_alpha0 = es_antenna.relative_gain(alpha0_deg, theta_deg)
-    if s1503_gain_test_drops_gmax30():
+    if s1503_gain_test_drops_gmax30("wcga" if wcga_context else "epfd"):
         # Doc 4A/1029 §5 ablation: GRX(α₀) alone governs (α₀ always kept).
         threshold_db = g_rel_at_alpha0
     else:
