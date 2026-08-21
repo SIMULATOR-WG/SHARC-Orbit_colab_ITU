@@ -124,16 +124,26 @@ MATRIX: list[dict[str, Any]] = [
     _mk("B2-5", "B2", strategy="ref_vector", rv_el=90.0, rv_az=0.0, rv_T=12.0, rv_P=50.0, steps=STEPS_STRATEGY, diameter=DIAM_B2_STRATEGY),
 ]
 
-#: Fixed ES position of the 17.8-GHz WCG (campaign sheet / PDF §5.4).
-GEOM_A_ES = (-0.445, -99.344)
+#: Pinned WCG of the 17.8-GHz baseline A1 (confirmed from the A1 run:
+#: ES 0.4498°S, 99.3766°W · GSO 100.3769°W — the sheet's 0.445°S/99.344°W is
+#: the rounded form). Used as the block-A/B1 default geometry on every
+#: machine; a `geometry --set A=...` in the local state still overrides.
+GEOM_A_ES = (-0.4498, -99.3766)
+GEOM_A_DEFAULT = {"es_lat": -0.4498, "es_lon": -99.3766,
+                  "gso_lon": -100.3769, "source": "A1 baseline (pinned)"}
 
 
 # ─── State ───────────────────────────────────────────────────────────────────
 
 def _load_state() -> dict[str, Any]:
     if STATE_PATH.exists():
-        return json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    return {"geometry": {}, "runs": {}}
+        st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    else:
+        st = {"geometry": {}, "runs": {}}
+    # Block A/B1 geometry defaults to the pinned A1 WCG; an explicit
+    # `geometry --set A=...` (stored in the state) overrides it.
+    st.setdefault("geometry", {}).setdefault("A", dict(GEOM_A_DEFAULT))
+    return st
 
 
 def _save_state(st: dict[str, Any]) -> None:
@@ -470,13 +480,6 @@ def cmd_geometry(args) -> None:
             }
         _save_state(state)
     print(json.dumps(state.get("geometry", {}), indent=2))
-    if "A" not in state.get("geometry", {}):
-        print(
-            f"\nBlock A/B1 geometry unresolved. The sheet pins the ES at "
-            f"{GEOM_A_ES} but the GSO longitude must come from the A1 "
-            "baseline: geometry --from-run A1=<run_dir>  (or --set "
-            "A=-0.445,-99.344,<gso_lon>)."
-        )
 
 
 # ─── Report ──────────────────────────────────────────────────────────────────

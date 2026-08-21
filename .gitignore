@@ -88,3 +88,4 @@ Thumbs.db
 .vscode/
 *.swp
 *~
+streamlit_app/data/campaigns/
