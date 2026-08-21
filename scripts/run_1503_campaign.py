@@ -93,7 +93,7 @@ def _mk(id_: str, block: str, **kw) -> dict[str, Any]:
 MATRIX: list[dict[str, Any]] = [
     # ── Block A: 324520180 @ 17.8 GHz, declared Nco=32, fixed WCG ──
     _mk("A1", "A", strategy="s1503", steps=STEPS_FULL_HIGH, note="Baseline (already done externally — kept for completeness; skipped unless --force)", done_externally=True),
-    _mk("A2", "A", strategy="s1503", steps=STEPS_FULL_HIGH, step22=False, emulate_s1503_2=True, note="Normative with the whole Step-18 gain test removed ('Neither', Sec. 5)"),
+    _mk("A2", "A", strategy="s1503", steps=STEPS_FULL_HIGH, step22=False, emulate_s1503_2=True, note="Normative with the whole Step-18 gain test removed ('Neither', Sec. 5). Sheet: already available (run externally); --force re-runs it here.", done_externally=True),
     _mk("A3a", "A", strategy="top_n_elev_random", top_n=32, n_select=32, steps=STEPS_STRATEGY, note="Deterministic limit: the 32 highest elevations"),
     _mk("A3b", "A", strategy="top_n_elev_random", top_n=64, n_select=32, steps=STEPS_STRATEGY),
     _mk("A3c", "A", strategy="top_n_elev_random", top_n=96, n_select=32, steps=STEPS_STRATEGY),
