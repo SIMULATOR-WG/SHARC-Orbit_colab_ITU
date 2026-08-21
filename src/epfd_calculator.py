@@ -2422,6 +2422,7 @@ def _get_lowest_avg_ref_vec_separation(
     wdelta_deg: float,
     t_run_s: float,
     _prop_cache=None,
+    force_wcg_sat: bool = False,
 ) -> list[int]:
     """Select up to *max_co_freq* satellites closest to the reference vector.
 
@@ -2435,8 +2436,13 @@ def _get_lowest_avg_ref_vec_separation(
     4. Keep the M largest (worst) samples per satellite, average them.
     5. Sort by ascending average separation; return the top *max_co_freq* indices.
 
-    The satellite that originated the WCG (``wcg_ref_sat_idx``) is always
-    included in the result if eligible, consuming one of the *max_co_freq* slots.
+    ``force_wcg_sat`` (default **False**): when True, the satellite that
+    originated the WCG (``wcg_ref_sat_idx``) is force-included if eligible,
+    consuming one of the *max_co_freq* slots. This force-inclusion is NOT
+    part of the US proposal — with Nco=1 it replaces the ranking entirely
+    whenever that satellite is eligible ("track the WCG satellite when
+    possible"), biasing the comparison upward — so the faithful 4A/519
+    reading (pure ranking) is the default.
     """
     N = len(constellation)
     if N == 0 or T_steps <= 0 or max_co_freq <= 0:
@@ -2495,30 +2501,26 @@ def _get_lowest_avg_ref_vec_separation(
         )
         sep_matrix[:, s] = sep
 
-    # For ineligible satellites, set separation to infinity so they sort last
+    # For ineligible satellites, set separation to infinity so they sort last.
+    # (This already covers the WCG reference satellite too — no special-case
+    # needed; the previous explicit avg_sep[wcg_ref_sat_idx]=inf was dead code.)
     sep_matrix[~eligible] = np.inf
 
     # Average of the M worst (largest) separation samples per satellite
     sep_sorted = np.sort(sep_matrix, axis=1)[:, ::-1]  # descending per row
     avg_sep = np.mean(sep_sorted[:, :M], axis=1)
 
-    # Force wcg_ref_sat_idx ineligibility to inf if truly ineligible
-    if not eligible[wcg_ref_sat_idx]:
-        avg_sep[wcg_ref_sat_idx] = np.inf
-
-    # Build ranked list: wcg_ref_sat_idx first (if eligible), then fill remaining slots
-    eligible_any = eligible.copy()
     ranked = list(np.argsort(avg_sep))
 
     result: list[int] = []
-    ref_eligible = bool(eligible_any[wcg_ref_sat_idx])
-    if ref_eligible:
+    if force_wcg_sat and bool(eligible[wcg_ref_sat_idx]):
+        # Conservative extension (off by default — see docstring).
         result.append(int(wcg_ref_sat_idx))
 
     for idx in ranked:
         if len(result) >= max_co_freq:
             break
-        if int(idx) == wcg_ref_sat_idx:
+        if force_wcg_sat and int(idx) == wcg_ref_sat_idx:
             continue
         if avg_sep[idx] < np.inf:
             result.append(int(idx))
@@ -2620,7 +2622,15 @@ def _simulate_ref_vec_window_block(args):
     ``artifacts/WP4A_519_track_duration_consolidation_decision.md``).
     """
     include_or_satellites = False
-    if len(args) == 20:
+    force_wcg_sat = False
+    if len(args) == 21:
+        (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
+         es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+         ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
+         raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, wdelta_deg, t_run_s,
+         include_or_satellites, force_wcg_sat) = args
+    elif len(args) == 20:
         (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
          es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
          ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
@@ -2691,6 +2701,7 @@ def _simulate_ref_vec_window_block(args):
             wdelta_deg=wdelta_deg,
             t_run_s=t_run_s,
             _prop_cache=_prop_cache,
+            force_wcg_sat=force_wcg_sat,
         )
         selected_arr = np.asarray(selected_idx, dtype=np.int64)
 
@@ -2817,6 +2828,7 @@ def run_epfd_simulation_ref_vec(
     ref_vec_time_window_P_pct: float = 100.0,
     wcg_ref_sat_idx: int = 0,
     include_or_satellites: bool = False,
+    force_wcg_ref_sat: bool = False,
 ) -> EPFDSimulationResult:
     """EPFD↓ with reference-vector satellite selection (US proposal
     R23-WP4A-C-0519), sharing the §D5.1.4.2 ``MIN_DURATION``/``N_SW``
@@ -2879,7 +2891,7 @@ def run_epfd_simulation_ref_vec(
             ref_vec_az_deg, ref_vec_el_deg, ref_vec_time_window_P_pct,
             wcg_ref_sat_idx, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
             max_co_freq_by_lat or [], wdelta_deg, t_run_s,
-            include_or_satellites,
+            include_or_satellites, force_wcg_ref_sat,
         ))
         b += cnt
 

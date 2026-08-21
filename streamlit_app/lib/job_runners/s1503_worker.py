@@ -296,6 +296,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["ref_vec_az_deg"] = float(params.get("ref_vec_az_deg", 0.0))
         sim["ref_vec_el_deg"] = float(params.get("ref_vec_el_deg", 90.0))
         sim["ref_vec_time_window_P_pct"] = float(params.get("ref_vec_time_window_P_pct", 100.0))
+        # Conservative extension (NOT in the US proposal): force-include the
+        # WCG-origin satellite when eligible, consuming an Nco slot. Default
+        # OFF — with Nco=1 it would replace the ranking entirely.
+        sim["ref_vec_force_wcg_sat"] = bool(params.get("ref_vec_force_wcg_sat", False))
 
     # Scope of the "1503 proposal modifications": by default they act on the
     # EPFD↓ simulation only; mods_in_wcga=True extends them to the WCG search
@@ -390,7 +394,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         _mod_lines.append(
             "selection strategy: reference vector "
             f"(az={sim.get('ref_vec_az_deg')}°, el={sim.get('ref_vec_el_deg')}°, "
-            f"P={sim.get('ref_vec_time_window_P_pct')}%)"
+            f"P={sim.get('ref_vec_time_window_P_pct')}%"
+            + (", WCG-sat force-include ON" if sim.get("ref_vec_force_wcg_sat")
+               else "")
+            + ")"
         )
     if (_sel0 and _sel0 in ("top_n_elev_random", "hybrid_rand_he")) or \
             sim.get("ref_vec_selection"):
@@ -734,6 +741,7 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             "el_deg": sim.get("ref_vec_el_deg"),
             "time_window_P_pct": sim.get("ref_vec_time_window_P_pct"),
             "include_step22_or": bool(sim.get("include_override")),
+            "force_wcg_sat": bool(sim.get("ref_vec_force_wcg_sat")),
         }
     if os.environ.get("SHARC_S1503_DROP_GMAX30"):
         _mods["drop_gmax30"] = True

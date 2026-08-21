@@ -327,7 +327,10 @@ def cmd_run(args) -> None:
     print(f"17.8 GHz filing: {sys_high['id']} ({Path(sys_high['srs_path']).name})")
     print(f"10.7 GHz filing: {sys_low['id']} ({Path(sys_low['srs_path']).name})")
 
-    todo = _expand_rows(args.only)
+    only = list(args.only or [])
+    if args.group:
+        only += [r["id"] for r in MATRIX if r["block"] in args.group]
+    todo = _expand_rows(only or None)
     # geometry-source baselines first, then the rest in sheet order
     todo.sort(key=lambda t: (not t[1].get("geometry_source", False),))
     for run_key, row, seed in todo:
@@ -483,6 +486,73 @@ def cmd_report(args) -> None:
     print(f"wrote {out} ({len(rows_out)} rows)")
 
 
+def cmd_import(args) -> None:
+    """Register run folders copied from another machine into THIS app's DB.
+
+    Copy the other machine's run folders (streamlit_app/data/runs/<id>/) into
+    this machine's runs directory (run ids are uuid4 — collision-free across
+    machines), then:
+
+        python scripts/run_1503_campaign.py import <dir-with-run-folders> ...
+
+    Each folder with a params.json is inserted into the runs table
+    (campaign_id=changes_1503, status from summary.json presence) and merged
+    into the campaign state. Also accepts the other machine's
+    campaign_state.json to recover the campaign-key ↔ run-id mapping (pass
+    it via --state).
+    """
+    import sqlite3  # noqa: PLC0415
+    state = _load_state()
+    other_keys: dict[str, str] = {}
+    if args.state:
+        other = json.loads(Path(args.state).read_text(encoding="utf-8"))
+        other_keys = {v["run_id"]: k for k, v in (other.get("runs") or {}).items()}
+    runs_dir = REPO / "streamlit_app" / "data" / "runs"
+    n_ok = n_skip = 0
+    for src in args.paths:
+        src = Path(src)
+        candidates = [src] if (src / "params.json").exists() else sorted(
+            d for d in src.iterdir() if d.is_dir() and (d / "params.json").exists()
+        )
+        for d in candidates:
+            rid = d.name
+            dest = runs_dir / rid
+            if not dest.exists():
+                import shutil  # noqa: PLC0415
+                shutil.copytree(d, dest)
+            params = json.loads((dest / "params.json").read_text(encoding="utf-8"))
+            ok = (dest / "summary.json").exists()
+            # Insert with the ORIGINAL id (create_run would mint a new one).
+            db = REPO / "streamlit_app" / "data" / "sharc_orbit.db"
+            storage.init_db()
+            with sqlite3.connect(db) as cx:
+                exists = cx.execute(
+                    "SELECT 1 FROM runs WHERE id=?", (rid,)).fetchone()
+                if exists:
+                    n_skip += 1
+                    continue
+                now = time.strftime("%Y-%m-%dT%H:%M:%S")
+                cx.execute(
+                    "INSERT INTO runs (id, kind, method, status, progress_pct, "
+                    "params_json, result_path, campaign_id, created_at, "
+                    "updated_at, finished_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (rid, "single", None,
+                     "success" if ok else "failed",
+                     100.0 if ok else 0.0,
+                     json.dumps(params), str(dest), CAMPAIGN_ID, now, now, now),
+                )
+            key = other_keys.get(rid, rid)
+            state["runs"][key] = {
+                "run_id": rid,
+                "status": "success" if ok else "failed",
+                "seed": params.get("seed"),
+            }
+            n_ok += 1
+            print(f"imported {key} -> {rid} ({'success' if ok else 'failed'})")
+    _save_state(state)
+    print(f"done: {n_ok} imported, {n_skip} already present")
+
+
 def cmd_list(_args) -> None:
     for run_key, row, seed in _expand_rows(None):
         bits = [row["strategy"]]
@@ -513,15 +583,25 @@ def main() -> None:
     g.add_argument("--from-run", nargs="*", metavar="BLK=run_dir")
     r = sub.add_parser("run")
     r.add_argument("--only", nargs="*", help="campaign IDs to run")
+    r.add_argument("--group", nargs="*", choices=["A", "B1", "B2"],
+                   help="run whole blocks (machine split): --group A")
     r.add_argument("--force", action="store_true")
     r.add_argument("--dry-run", action="store_true")
     r.add_argument("--keep-going", action="store_true")
     r.add_argument("--steps-override", type=int, default=None,
                    help="tiny step count for smoke testing the matrix")
     sub.add_parser("report")
+    imp = sub.add_parser("import")
+    imp.add_argument("paths", nargs="+",
+                     help="run folder(s) or a directory of run folders "
+                          "copied from another machine")
+    imp.add_argument("--state", default=None,
+                     help="the other machine's campaign_state.json (recovers "
+                          "the campaign-key mapping)")
     args = ap.parse_args()
     {"list": cmd_list, "geometry": cmd_geometry,
-     "run": cmd_run, "report": cmd_report}[args.cmd](args)
+     "run": cmd_run, "report": cmd_report,
+     "import": cmd_import}[args.cmd](args)
 
 
 if __name__ == "__main__":

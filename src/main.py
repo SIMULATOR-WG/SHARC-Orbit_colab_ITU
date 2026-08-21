@@ -3339,6 +3339,9 @@ def run_wcg_downlink(config: dict) -> tuple[
                     include_or_satellites=bool(
                         sim_cfg.get("include_override", False)
                     ),
+                    force_wcg_ref_sat=bool(
+                        sim_cfg.get("ref_vec_force_wcg_sat", False)
+                    ),
                 )
             else:
                 sim_result = run_epfd_simulation_windowed(
@@ -3406,6 +3409,9 @@ def run_wcg_downlink(config: dict) -> tuple[
                         wcg_ref_sat_idx=wcg_ref_sat_idx,
                         include_or_satellites=bool(
                             sim_cfg.get("include_override", False)
+                        ),
+                        force_wcg_ref_sat=bool(
+                            sim_cfg.get("ref_vec_force_wcg_sat", False)
                         ),
                     )
                 else:

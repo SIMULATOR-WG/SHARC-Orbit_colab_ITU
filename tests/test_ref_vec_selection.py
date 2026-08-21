@@ -124,15 +124,29 @@ def test_no_eligible_satellite_returns_empty_list():
     assert result == []
 
 
-# ── WCG reference satellite carve-out ───────────────────────────────────────
+# ── WCG reference satellite carve-out (opt-in; NOT in the US proposal) ──────
+# Default behaviour is now the pure 4A/519 ranking: the WCG-origin satellite
+# gets no special treatment (with Nco=1 the old always-on force-inclusion
+# replaced the ranking entirely whenever that satellite was eligible).
 
-def test_wcg_ref_satellite_forced_first_even_if_worst_ranked():
+def test_wcg_ref_satellite_not_forced_by_default():
+    # sat0 is the WCG ref satellite and the WORST ranked; default (no force)
+    # must select purely by ranking.
+    steps = [[10.0, 45.0, 80.0]]
+    result = _run_selection(
+        steps, n_sat=3, M=1, max_co_freq=2, wcg_ref_sat_idx=0,
+    )
+    assert result == [2, 1]
+
+
+def test_wcg_ref_satellite_forced_first_when_opted_in():
     # sat0: el=10 (separation 80 deg, worst) -- but it's the WCG ref satellite.
     # sat1: el=45 (separation 45 deg).
     # sat2: el=80 (separation 10 deg, best).
     steps = [[10.0, 45.0, 80.0]]
     result = _run_selection(
         steps, n_sat=3, M=1, max_co_freq=2, wcg_ref_sat_idx=0,
+        force_wcg_sat=True,
     )
     # ref satellite (0) forced in first, remaining single slot goes to the
     # best-ranked of the others (2), not sat1.
@@ -141,10 +155,11 @@ def test_wcg_ref_satellite_forced_first_even_if_worst_ranked():
 
 def test_wcg_ref_satellite_skipped_when_ineligible():
     # sat0 is the WCG ref satellite but never visible -> must not appear,
-    # and must not consume a slot.
+    # and must not consume a slot (even with the force-inclusion opted in).
     steps = [[-10.0, 45.0, 80.0]]
     result = _run_selection(
         steps, n_sat=3, M=1, max_co_freq=1, wcg_ref_sat_idx=0,
+        force_wcg_sat=True,
     )
     assert result == [2]
 

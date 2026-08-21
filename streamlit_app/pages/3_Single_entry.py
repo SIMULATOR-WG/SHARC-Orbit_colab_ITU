@@ -481,6 +481,7 @@ with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
         ref_vec_az_deg = float(prev.get("ref_vec_az_deg", 0.0))
         ref_vec_el_deg = float(prev.get("ref_vec_el_deg", 90.0))
         ref_vec_time_window_P_pct = float(prev.get("ref_vec_time_window_P_pct", 100.0))
+        ref_vec_force_wcg_sat = bool(prev.get("ref_vec_force_wcg_sat", False))
         if mod_selection:
             _strat_prev = str(prev.get("selection_strategy", "s1503"))
             if prev.get("ref_vec_selection"):
@@ -576,6 +577,17 @@ with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
                         help="M = max(⌊N_SW × P/100⌋, 1) worst samples "
                              "averaged per satellite when ranking.",
                     )
+                ref_vec_force_wcg_sat = st.checkbox(
+                    "Force-include the WCG-origin satellite (conservative "
+                    "extension — NOT in the US proposal)",
+                    value=bool(prev.get("ref_vec_force_wcg_sat", False)),
+                    key="m1503_rv_force",
+                    help="When eligible, the satellite that originated the "
+                         "WCG is placed first, consuming one Nco slot. OFF "
+                         "(default) = the pure Doc 4A/519 ranking. With "
+                         "Nco=1, turning this ON replaces the ranking "
+                         "entirely whenever that satellite is eligible.",
+                )
             elif sel_strategy_choice == "alpha_table":
                 col_ab, col_af = st.columns([1, 2])
                 with col_ab:
@@ -1372,6 +1384,7 @@ if submit:
     params["ref_vec_az_deg"] = float(ref_vec_az_deg)
     params["ref_vec_el_deg"] = float(ref_vec_el_deg)
     params["ref_vec_time_window_P_pct"] = float(ref_vec_time_window_P_pct)
+    params["ref_vec_force_wcg_sat"] = bool(ref_vec_force_wcg_sat)
 
     # Step-18 gain-test ablation + SL2SL sidelobe study (section 8).
     params["mods_in_wcga"] = bool(mods_in_wcga)
@@ -1479,6 +1492,7 @@ if submit:
         "ref_vec_az_deg": float(ref_vec_az_deg),
         "ref_vec_el_deg": float(ref_vec_el_deg),
         "ref_vec_time_window_P_pct": float(ref_vec_time_window_P_pct),
+        "ref_vec_force_wcg_sat": bool(ref_vec_force_wcg_sat),
         "mods_in_wcga": bool(mods_in_wcga),
         "drop_gmax30": bool(drop_gmax30),
         "sidelobe_enabled": bool(sidelobe_enabled),
