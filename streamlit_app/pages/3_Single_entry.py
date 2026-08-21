@@ -929,6 +929,11 @@ with st.form("s1503_form"):
                     "not combinable with reference-vector or alpha-table selection. "
                     "Untick one of them before launching."
                 )
+            if dual_mode != "off":
+                st.warning(
+                    "SL2SL requires a FIXED time step — set **Dual time step** "
+                    "to `off` (section 5 above) or the engine will refuse the run."
+                )
             col_sl1, col_sl2, col_sl3 = st.columns(3)
             with col_sl1:
                 sidelobe_pattern = st.radio(
