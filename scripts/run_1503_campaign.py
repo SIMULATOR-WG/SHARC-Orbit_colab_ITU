@@ -145,6 +145,10 @@ def _save_state(st: dict[str, Any]) -> None:
 
 def _resolve_system(ntc: str, srs_hint: str | None = None) -> dict[str, Any]:
     rows = [r for r in storage.list_systems() if str(r.get("ntc_id")) == ntc]
+    # Prefer the tracked campaign filings (registered by `setup`) — same
+    # bytes on every machine, checksum-verified.
+    camp = [r for r in rows if "campaign_data" in str(r.get("srs_path", ""))]
+    rows = camp or rows
     if srs_hint:
         hinted = [r for r in rows if srs_hint in str(r.get("srs_path", ""))]
         rows = hinted or rows
@@ -620,6 +624,53 @@ def cmd_import(args) -> None:
     print(f"done: {n_ok} imported, {n_skip} already present")
 
 
+CAMPAIGN_DATA = REPO / "campaign_data" / "changes_1503"
+#: Deterministic upload ids so `setup` is idempotent and every machine ends
+#: up with the SAME system ids (upload_id:ntc:_).
+UPLOAD_ID_HIGH = "c1503high178"
+UPLOAD_ID_LOW = "c1503low107"
+
+
+def cmd_setup(_args) -> None:
+    """Register the tracked campaign filings (campaign_data/changes_1503)
+    into this machine's app DB. Idempotent — INSERT OR REPLACE on fixed ids.
+    Verifies the SHA-256 checksums first, so every machine provably runs the
+    same bytes."""
+    import hashlib  # noqa: PLC0415
+    sums = {}
+    for line in (CAMPAIGN_DATA / "CHECKSUMS.sha256").read_text(
+            encoding="utf-8").splitlines():
+        if line.strip():
+            h, name = line.split(None, 1)
+            sums[name.strip()] = h
+    for name, want in sums.items():
+        got = hashlib.sha256((CAMPAIGN_DATA / name).read_bytes()).hexdigest()
+        if got != want:
+            raise SystemExit(f"CHECKSUM MISMATCH: {name} — re-pull the branch.")
+    print(f"checksums OK ({len(sums)} files)")
+
+    uid_h = storage.add_upload(
+        label="campaign changes_1503 · USASAT-NGSO-3X 17.8 GHz (324520180)",
+        srs_path=CAMPAIGN_DATA / "324520180 SRS.MDB",
+        mask_path=CAMPAIGN_DATA / "324520180 Masks.MDB",
+        upload_id=UPLOAD_ID_HIGH,
+    )
+    sid_h = storage.add_system(upload_id=uid_h, ntc_id=NTC_HIGH, mask_id=None,
+                               sat_name="USASAT-NGSO-3X")
+    uid_l = storage.add_upload(
+        label="campaign changes_1503 · USASAT-NGSO-3X 10.7 GHz (323520263)",
+        srs_path=CAMPAIGN_DATA / "323520263 USASAT-NGSO-3X SRS 10700 and 14000.MDB",
+        mask_path=CAMPAIGN_DATA / "323520263 USASAT-NGSO-3X Masks.MDB",
+        upload_id=UPLOAD_ID_LOW,
+    )
+    sid_l = storage.add_system(upload_id=uid_l, ntc_id=NTC_LOW, mask_id=None,
+                               sat_name="USASAT-NGSO-3X")
+    print(f"registered: {sid_h}")
+    print(f"registered: {sid_l}")
+    print("done — `run` will now resolve the campaign filings from "
+          "campaign_data/ on this machine.")
+
+
 def cmd_list(_args) -> None:
     for run_key, row, seed in _expand_rows(None):
         bits = [row["strategy"]]
@@ -645,6 +696,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
+    sub.add_parser("setup")
     g = sub.add_parser("geometry")
     g.add_argument("--set", nargs="*", metavar="BLK=lat,lon,gso")
     g.add_argument("--from-run", nargs="*", metavar="BLK=run_dir")
@@ -669,7 +721,7 @@ def main() -> None:
                      help="the other machine's campaign_state.json (recovers "
                           "the campaign-key mapping)")
     args = ap.parse_args()
-    {"list": cmd_list, "geometry": cmd_geometry,
+    {"list": cmd_list, "setup": cmd_setup, "geometry": cmd_geometry,
      "run": cmd_run, "report": cmd_report,
      "import": cmd_import}[args.cmd](args)
 

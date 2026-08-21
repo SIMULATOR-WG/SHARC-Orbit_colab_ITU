@@ -63,6 +63,10 @@ streamlit_app/data/cluster.json
 # …but keep the SRS/EPFD test fixtures under docs/ tracked
 !docs/test_data/*.MDB
 !docs/test_data/*.mdb
+# …and the pinned filings of the changes-1503 campaign (same bytes on every
+# machine; register locally via `scripts/run_1503_campaign.py setup`)
+!campaign_data/**/*.MDB
+!campaign_data/**/*.mdb
 # Large downloaded ITU filing fixtures — fetched from a GitHub release, not tracked
 docs/test_data/NGSO_CRC_filings/
 docs/test_data/STEAM_2-CRC-Notice_ID-121520026-IFIC-2985/
