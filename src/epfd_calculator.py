@@ -291,11 +291,15 @@ class SelectionConfig:
       - ``"top_n_elev_random"``: Top-N highest-elevation random selection
         (WP 4A Doc 4A/442-E). Rank the α₀/ε₀-eligible ("standard") satellites by
         elevation, keep the top ``top_n``, draw ``n_select`` at random (no
-        replacement). The OR branch (Step 22) is disabled for this strategy.
+        replacement). The OR branch (Step 22) is disabled by default for this
+        strategy (the source document does not model it) — set
+        ``include_override=True`` to keep the Step-22 satellites in the sum,
+        for comparison studies.
       - ``"hybrid_rand_he"``  : hybrid random + highest-elevation (WP 4A Doc
         4A/493-E). Draw Nco random + take Nco highest-elevation from the standard
         set, union them, then keep the Nco highest-epfd (Nco = MAX_CO_FREQ). OR
-        branch disabled. ``top_n`` / ``n_select`` are unused by this strategy.
+        branch disabled by default (``include_override`` re-enables it).
+        ``top_n`` / ``n_select`` are unused by this strategy.
       - ``"alpha_table"``     : deterministic quota selection (WP 4A Doc 4A/312).
         Driven by a per-sub-run ``TSSAccumulator`` (passed separately, since it is
         mutable state — not carried in this frozen config). The OR branch (Step
@@ -313,12 +317,20 @@ class SelectionConfig:
     ``seed`` seeds a per-time-step RNG keyed by ``(seed, step_index)`` so the
     result is reproducible **independently of chunking/parallelism**. ``None`` →
     non-deterministic (OS entropy).
+
+    ``include_override`` keeps the Step-22 (OR) satellites in the sum under
+    the non-normative strategies (top-N / hybrid; the reference-vector path
+    handles it separately). Which satellites pass the OR gate still follows
+    the Step-18 gain test — including the Gmax−30 ablation when that
+    modification is active, so the two study options combine freely. Ignored
+    by "s1503"/"alpha_table" (their OR branch is always on, normative loop).
     """
     strategy: str = "s1503"
     top_n: int = 5
     n_select: int = 1
     seed: int | None = None
     alpha_bin_deg: float = 0.0
+    include_override: bool = False
 
 
 def _rng_for_step(seed: int | None, step_index: int) -> np.random.Generator:
@@ -562,7 +574,14 @@ def _finalize_epfd_after_max_co_freq(
             n_sel,
             rng,
         )
-        # OR branch (Step 22) disabled for this strategy — see SelectionConfig.
+        # OR branch (Step 22): disabled by default for this strategy — see
+        # SelectionConfig. include_override=True keeps the Step-18 OR passers
+        # (whose gate already honours the Gmax−30 ablation) in the sum.
+        if selection_config.include_override:
+            return ([v for v, _k in chosen],
+                    [v for v, _k in override_items],
+                    [k for _v, k in chosen],
+                    [k for _v, k in override_items])
         return ([v for v, _k in chosen], [], [k for _v, k in chosen], [])
 
     if selection_config is not None and selection_config.strategy == "hybrid_rand_he":
@@ -575,7 +594,12 @@ def _finalize_epfd_after_max_co_freq(
             n_co,
             rng,
         )
-        # OR branch (Step 22) disabled for this strategy.
+        # OR branch (Step 22): disabled by default; include_override keeps it.
+        if selection_config.include_override:
+            return ([v for v, _k in chosen],
+                    [v for v, _k in override_items],
+                    [k for _v, k in chosen],
+                    [k for _v, k in override_items])
         return ([v for v, _k in chosen], [], [k for _v, k in chosen], [])
 
     if selection_config is not None and selection_config.strategy == "alpha_table":
@@ -2585,11 +2609,20 @@ def _simulate_ref_vec_window_block(args):
     N_TW sliding-window-set envelope (see
     ``artifacts/WP4A_519_track_duration_consolidation_decision.md``).
     """
-    (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
-     es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
-     ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
-     raan_dot_artificial_rad_s, raan_dot_override_rad_s,
-     max_co_freq_by_lat, wdelta_deg, t_run_s) = args
+    include_or_satellites = False
+    if len(args) == 20:
+        (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
+         es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+         ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
+         raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, wdelta_deg, t_run_s,
+         include_or_satellites) = args
+    else:
+        (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
+         es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+         ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
+         raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, wdelta_deg, t_run_s) = args
 
     constellation, wcg, pfd_mask, es_antenna = _epfd_shared_fields(
         constellation, wcg, pfd_mask, es_antenna)
@@ -2617,6 +2650,10 @@ def _simulate_ref_vec_window_block(args):
 
     _prop_cache = build_constellation_cache(
         constellation, raan_dot_override_rad_s=raan_dot_override_rad_s,
+    )
+    _min_h_or = (
+        _min_operating_height_km_batch(constellation, len(constellation))
+        if include_or_satellites else None
     )
 
     acc = EPFDStreamAccumulator()
@@ -2681,6 +2718,58 @@ def _simulate_ref_vec_window_block(args):
                 pfd_bw_correction_db=pfd_bw_correction_db,
                 t_s=t_s,
             )
+            step_contrib_arr = selected_arr
+            if include_or_satellites:
+                # Step-22 (OR) study add-on: satellites OUTSIDE the standard
+                # eligibility (inside the exclusion cone / below ε₀) whose
+                # receive gain passes the Step-18 gain test — which already
+                # honours the Gmax−30 ablation when that modification is on.
+                # No double counting: the held (selected) set is disjoint from
+                # the ¬standard set by construction.
+                _ps: dict = {}
+                _accumulate_epfd_visible_satellites(
+                    visible_idx=np.where(sin_el >= 0.0)[0],
+                    pos_ecef_all=pos_ecef_all,
+                    vel_ecef_all=vel_ecef_all,
+                    es_ecef=es_ecef,
+                    es_x=float(es_ecef[0]), es_y=float(es_ecef[1]),
+                    es_z=float(es_ecef[2]),
+                    es_lat_deg=es_lat, es_lon_deg=es_lon,
+                    gso_ecef=gso_ecef,
+                    alpha0_deg=alpha0_deg,
+                    pfd_mask=pfd_mask,
+                    es_antenna=es_antenna,
+                    pfd_bw_correction_db=pfd_bw_correction_db,
+                    max_co_freq=max_co_freq,
+                    strict_max_co_freq_total=False,
+                    subsat_lat_all=None, subsat_lon_all=None,
+                    sat_local_frames=None,
+                    min_operating_height_km_all=_min_h_or,
+                    dual_ts=None, t_s=t_s,
+                    min_angle_at_es_deg=0.0,
+                    min_elevation_deg=min_elevation_deg,
+                    sin_el_full=sin_el,
+                    per_sat_out=_ps,
+                )
+                _idx = np.asarray(_ps.get("idx", np.empty(0, dtype=np.int64)))
+                if _idx.size:
+                    _std = np.asarray(_ps["std"], dtype=bool)
+                    _orx = np.asarray(_ps["orx"], dtype=bool)
+                    _or_mask = (~_std) & _orx
+                    if np.any(_or_mask):
+                        _or_lin = float(np.sum(
+                            np.asarray(_ps["epfd_lin"], dtype=np.float64)[_or_mask]
+                        ))
+                        _base_lin = (10.0 ** (epfd_db / 10.0)
+                                     if epfd_db > -900.0 else 0.0)
+                        _tot = _base_lin + _or_lin
+                        epfd_db = (10.0 * math.log10(_tot)
+                                   if _tot > 0.0 else -999.0)
+                        _or_idx = _idx[_or_mask]
+                        num_contrib += int(_or_idx.size)
+                        step_contrib_arr = np.concatenate(
+                            [selected_arr, _or_idx.astype(np.int64)]
+                        )
             acc.add(
                 time_s=t_s,
                 epfd_db=epfd_db,
@@ -2690,9 +2779,9 @@ def _simulate_ref_vec_window_block(args):
                 num_contributing_sats=num_contrib,
                 min_alpha_deg=min_alpha,
                 is_fine=True,
-                contrib_sat_idx=selected_arr,
+                contrib_sat_idx=step_contrib_arr,
                 contrib_elev_deg=np.degrees(np.arcsin(
-                    np.clip(sin_el[selected_arr], -1.0, 1.0))),
+                    np.clip(sin_el[step_contrib_arr], -1.0, 1.0))),
             )
 
     return {"acc": acc}
@@ -2717,6 +2806,7 @@ def run_epfd_simulation_ref_vec(
     ref_vec_el_deg: float = 90.0,
     ref_vec_time_window_P_pct: float = 100.0,
     wcg_ref_sat_idx: int = 0,
+    include_or_satellites: bool = False,
 ) -> EPFDSimulationResult:
     """EPFD↓ with reference-vector satellite selection (US proposal
     R23-WP4A-C-0519), sharing the §D5.1.4.2 ``MIN_DURATION``/``N_SW``
@@ -2724,10 +2814,13 @@ def run_epfd_simulation_ref_vec(
     hold-duration source — see
     ``artifacts/WP4A_519_track_duration_consolidation_decision.md``.
 
-    Unlike the worst-case §D5.1.4.2 variant: no Step-22 OR/sidelobe branch
-    (the reference-vector selection is the operator's complete policy — see
-    ``_compute_epfd_for_selected_sats``), and no N_TW sliding-window-set
-    envelope (``windows`` must have ``n_tw == 1``; build it via
+    Unlike the worst-case §D5.1.4.2 variant: the Step-22 OR/sidelobe branch
+    is OFF by default (the reference-vector selection is the operator's
+    complete policy — see ``_compute_epfd_for_selected_sats``);
+    ``include_or_satellites=True`` re-adds the Step-18 OR passers per fine
+    step for comparison studies (their gate honours the Gmax−30 ablation
+    when that modification is active, so the two options combine). There is
+    also no N_TW sliding-window-set envelope (``windows`` must have ``n_tw == 1``; build it via
     ``compute_track_duration_windows(..., single_set=True)``).
 
     Parallelism is over **blocks of whole hold-windows**: each window's
@@ -2776,6 +2869,7 @@ def run_epfd_simulation_ref_vec(
             ref_vec_az_deg, ref_vec_el_deg, ref_vec_time_window_P_pct,
             wcg_ref_sat_idx, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
             max_co_freq_by_lat or [], wdelta_deg, t_run_s,
+            include_or_satellites,
         ))
         b += cnt
 

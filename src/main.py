@@ -1858,6 +1858,7 @@ def run_wcg_downlink(config: dict) -> tuple[
         n_select=int(sim_cfg.get("n_select", 1)),
         seed=sim_cfg.get("seed", None),
         alpha_bin_deg=float(sim_cfg.get("alpha_bin_deg", 0.0)),
+        include_override=bool(sim_cfg.get("include_override", False)),
     )
 
     gmst0_override_deg = sim_cfg.get("earth_rotation_initial_deg", None)
@@ -3334,6 +3335,9 @@ def run_wcg_downlink(config: dict) -> tuple[
                     ref_vec_el_deg=ref_vec_el_deg,
                     ref_vec_time_window_P_pct=ref_vec_time_window_P_pct,
                     wcg_ref_sat_idx=wcg_ref_sat_idx,
+                    include_or_satellites=bool(
+                        sim_cfg.get("include_override", False)
+                    ),
                 )
             else:
                 sim_result = run_epfd_simulation_windowed(
@@ -3399,6 +3403,9 @@ def run_wcg_downlink(config: dict) -> tuple[
                         ref_vec_az_deg=ref_vec_az_deg, ref_vec_el_deg=ref_vec_el_deg,
                         ref_vec_time_window_P_pct=ref_vec_time_window_P_pct,
                         wcg_ref_sat_idx=wcg_ref_sat_idx,
+                        include_or_satellites=bool(
+                            sim_cfg.get("include_override", False)
+                        ),
                     )
                 else:
                     static_sim_result = run_epfd_simulation_windowed(

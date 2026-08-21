@@ -365,6 +365,59 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     apply_resolution76_limits_to_config(cfg)
     _emit_progress(10)
 
+    # ── Consolidated "1503 proposal modifications" banner in the run log ──
+    _mod_lines: list[str] = []
+    if bool(cfg.get("gso_es", {}).get("use_proposed_antenna")):
+        _mod_lines.append(
+            "S.1428 proposed ES antenna — variant "
+            + ("A" if int(cfg["gso_es"].get("proposed_antenna_option", 1)) == 1
+               else "B")
+        )
+    _sel0 = sim.get("selection_strategy")
+    if _sel0 and _sel0 != "s1503":
+        _sel_extra = ""
+        if _sel0 == "top_n_elev_random":
+            _sel_extra = (f" (N={sim.get('top_n')}, M={sim.get('n_select')}, "
+                          f"seed={sim.get('seed')})")
+        elif _sel0 == "hybrid_rand_he":
+            _sel_extra = f" (seed={sim.get('seed')})"
+        elif _sel0 == "alpha_table":
+            _sel_extra = f" (α sub-bin={sim.get('alpha_bin_deg', 0.0)}°)"
+        _mod_lines.append(f"selection strategy: {_sel0}{_sel_extra}")
+    if sim.get("ref_vec_selection"):
+        _mod_lines.append(
+            "selection strategy: reference vector "
+            f"(az={sim.get('ref_vec_az_deg')}°, el={sim.get('ref_vec_el_deg')}°, "
+            f"P={sim.get('ref_vec_time_window_P_pct')}%)"
+        )
+    if (_sel0 and _sel0 in ("top_n_elev_random", "hybrid_rand_he")) or \
+            sim.get("ref_vec_selection"):
+        _mod_lines.append(
+            "Step-22 (OR) satellites: "
+            + ("INCLUDED" if sim.get("include_override") else "disabled")
+        )
+    if os.environ.get("SHARC_S1503_DROP_GMAX30"):
+        _mod_lines.append(
+            "Step-18 gain test WITHOUT the Gmax−30 dB candidate "
+            f"(scope: {os.environ['SHARC_S1503_DROP_GMAX30']})"
+        )
+    if sim.get("sidelobe_enabled"):
+        _mod_lines.append(
+            f"sidelobe SL2SL — S.1528 rec {sim.get('sidelobe_pattern', '1.4')}, "
+            f"pfd={sim.get('sidelobe_pfd_dbw_m2', -140.0)} dBW/m², "
+            f"grid {sim.get('sidelobe_grid_radius_km', 315.0):.0f} km / "
+            f"{sim.get('sidelobe_grid_spacing_km', 21.0):.0f} km"
+        )
+    if _mod_lines:
+        _emit("═══ 1503 proposal modifications ACTIVE ═══")
+        _emit("  scope: " + ("EPFD simulation AND WCG search"
+                             if sim.get("mods_in_wcga") else
+                             "EPFD simulation only (normative WCGA)"))
+        for _ln in _mod_lines:
+            _emit(f"  • {_ln}")
+    else:
+        _emit("1503 proposal modifications: none (normative S.1503-4 run)")
+
     _emit("Running WCGA + EPFD↓ simulation (this may take a while)")
     _emit_progress(15)
 
@@ -671,12 +724,14 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             "top_n": sim.get("top_n"),
             "n_select": sim.get("n_select"),
             "seed": sim.get("seed"),
+            "include_step22_or": bool(sim.get("include_override")),
         }
     if sim.get("ref_vec_selection"):
         _mods["ref_vec_selection"] = {
             "az_deg": sim.get("ref_vec_az_deg"),
             "el_deg": sim.get("ref_vec_el_deg"),
             "time_window_P_pct": sim.get("ref_vec_time_window_P_pct"),
+            "include_step22_or": bool(sim.get("include_override")),
         }
     if os.environ.get("SHARC_S1503_DROP_GMAX30"):
         _mods["drop_gmax30"] = True

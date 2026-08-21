@@ -403,6 +403,439 @@ if _carried_art22 is not None:
 _forced_service = str(art22_leaf["service"]).upper() if art22_leaf is not None else None
 _forced_diam_m = float(art22_leaf["rf_diam_m"]) if art22_leaf is not None else None
 
+# ─── S.1503 proposal modifications (WP 4A studies) ──────────────────────────
+# LIVE widgets (outside the form below): ticking an option re-runs the script,
+# so each modification reveals its own parameters. Values persist via explicit
+# keys and are read by the launch handler at the bottom of the page.
+with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
+    st.caption(
+        "Non-normative options under study for the revision of "
+        "Recommendation ITU-R S.1503-4. Tick a modification to reveal its "
+        "parameters — the options combine, except where noted; everything "
+        "left unticked runs the normative S.1503-4 algorithm."
+    )
+    mods_in_wcga = st.checkbox(
+        "Apply the enabled modifications in the WCG search too",
+        value=bool(prev.get("mods_in_wcga", False)),
+        key="m1503_wcga",
+        help="OFF (default): the modifications change only the EPFD↓ time "
+             "simulation — the worst-case geometry is found with the "
+             "normative S.1503-4 WCGA. ON: the WCGA also runs with the "
+             "proposed antenna and the Step-18 ablation, and (for the "
+             "selection strategies / reference vector) the found geometry is "
+             "re-ranked among the top WCGA candidates by the "
+             "strategy-aggregated instantaneous EPFD at t=0 — so the WCG "
+             "itself can move, as in the Doc 4A/1029 ablation study. The "
+             "alpha-table strategy is excluded (its TSS quota is inherently "
+             "temporal — undefined at a single instant).",
+    )
+
+    _tab_ant, _tab_sel, _tab_g30, _tab_sl = st.tabs([
+        "S.1428 ES antenna",
+        "Satellite selection",
+        "Step-18 · Gmax−30",
+        "Sidelobe (SL2SL)",
+    ])
+
+    # ── (a) proposed S.1428 victim antenna ─────────────────────────────────
+    with _tab_ant:
+        use_proposed = st.checkbox(
+            "Enable — proposed S.1428 pattern (doc 4A1d-3)",
+            value=bool(prev.get("use_proposed_antenna", False)),
+            key="m1503_ant_on",
+            help="Replaces the current ITU-R S.1428-1 victim ES antenna with "
+                 "the proposed side/back-lobe revision (15 < f ≤ 30 GHz).",
+        )
+        prop_opt = 1
+        if use_proposed:
+            prop_opt = st.radio(
+                "Pattern variant",
+                options=[1, 2],
+                index=int(prev.get("proposed_antenna_option", 1)) - 1,
+                key="m1503_ant_var",
+                format_func=lambda v: (
+                    "Variant A — −12 dBi floor from 23° (Proposal 1)" if v == 1
+                    else "Variant B — floor from 43.65°/34.1° (Proposal 2, conservative)"
+                ),
+                horizontal=True,
+            )
+
+    # ── (b) satellite selection strategy (Steps 19–22) ────────────────────
+    with _tab_sel:
+        mod_selection = st.checkbox(
+            "Enable — alternative satellite selection strategy",
+            value=bool(prev.get("selection_strategy", "s1503") != "s1503"
+                       or prev.get("ref_vec_selection", False)),
+            key="m1503_sel_on",
+            help="Replaces the normative worst-case selection (Steps 19–21) "
+                 "in the EPFD↓ time simulation. With 'Apply in the WCG "
+                 "search' ticked above, the found geometry is re-ranked by "
+                 "the strategy-aggregated instant EPFD.",
+        )
+        sel_strategy_choice = "top_n_elev_random"
+        top_n, n_select, seed = 5, 1, ""
+        include_override = False
+        alpha_bin_deg = 0.0
+        alpha_table_data = None
+        alpha_table_file = None
+        ref_vec_az_deg = float(prev.get("ref_vec_az_deg", 0.0))
+        ref_vec_el_deg = float(prev.get("ref_vec_el_deg", 90.0))
+        ref_vec_time_window_P_pct = float(prev.get("ref_vec_time_window_P_pct", 100.0))
+        if mod_selection:
+            _strat_prev = str(prev.get("selection_strategy", "s1503"))
+            if prev.get("ref_vec_selection"):
+                _strat_prev = "ref_vector"
+            _strat_opts = ["top_n_elev_random", "hybrid_rand_he",
+                           "ref_vector", "alpha_table"]
+            sel_strategy_choice = st.radio(
+                "Strategy",
+                options=_strat_opts,
+                index=(_strat_opts.index(_strat_prev)
+                       if _strat_prev in _strat_opts else 0),
+                key="m1503_sel_strategy",
+                format_func=lambda v: {
+                    "top_n_elev_random": "Top-N highest elevation + random draw (Doc 4A/442)",
+                    "hybrid_rand_he": "Hybrid random + highest elevation (Doc 4A/493)",
+                    "ref_vector": "Reference vector + track duration (Doc 4A/519, US)",
+                    "alpha_table": "Alpha table — TSS quota (Doc 4A/312)",
+                }[v],
+            )
+            if sel_strategy_choice == "top_n_elev_random":
+                col_n, col_m, col_s = st.columns(3)
+                with col_n:
+                    top_n = st.number_input(
+                        "N — highest-elevation pool",
+                        min_value=1, max_value=64,
+                        value=int(prev.get("top_n", 5)), step=1,
+                        key="m1503_top_n",
+                        help="Pool of the N highest-elevation Standard "
+                             "satellites. Clamped at launch to Nco when a "
+                             "MAX_CO_FREQ override (form below) is set — N "
+                             "never exceeds Nco.",
+                    )
+                with col_m:
+                    n_select = st.number_input(
+                        "M — satellites drawn",
+                        min_value=1, max_value=64,
+                        value=int(prev.get("n_select", 1)), step=1,
+                        key="m1503_n_select",
+                        help="Drawn at random (no replacement) from the "
+                             "Top-N pool. Clamped at launch to M ≤ N; the "
+                             "engine also caps the drawn count at "
+                             "MAX_CO_FREQ (M acts as an effective Nco′).",
+                    )
+                with col_s:
+                    seed = st.text_input(
+                        "Random seed (optional)",
+                        value=str(prev.get("seed", "")),
+                        placeholder="e.g. 42",
+                        key="m1503_seed",
+                        help="Reproducibility. Empty = OS entropy.",
+                    )
+            elif sel_strategy_choice == "hybrid_rand_he":
+                seed = st.text_input(
+                    "Random seed (optional)",
+                    value=str(prev.get("seed", "")),
+                    placeholder="e.g. 42",
+                    key="m1503_seed",
+                    help="Nco random + Nco highest-elevation lists, merged, "
+                         "ranked by EPFD, keep Nco (= MAX_CO_FREQ, form "
+                         "below). Only the random list needs a seed.",
+                )
+            elif sel_strategy_choice == "ref_vector":
+                st.caption(
+                    "Hold duration comes from **MIN_DURATION** "
+                    "(track-duration override in the form below) — no "
+                    "separate duration parameter. With no filing "
+                    "MIN_DURATION and no override, the hold degenerates to "
+                    "one fine step. Nco is **MAX_CO_FREQ** (form below)."
+                )
+                col_rv1, col_rv2, col_rv3 = st.columns(3)
+                with col_rv1:
+                    ref_vec_az_deg = st.number_input(
+                        "Vector azimuth (°)",
+                        min_value=-180.0, max_value=360.0,
+                        value=float(prev.get("ref_vec_az_deg", 0.0)),
+                        step=1.0, key="m1503_rv_az",
+                        help="Clockwise from North. 0°=North, 90°=East.",
+                    )
+                with col_rv2:
+                    ref_vec_el_deg = st.number_input(
+                        "Vector elevation (°)",
+                        min_value=0.0, max_value=90.0,
+                        value=float(prev.get("ref_vec_el_deg", 90.0)),
+                        step=1.0, key="m1503_rv_el",
+                        help="90° = zenith ≡ highest-elevation selection.",
+                    )
+                with col_rv3:
+                    ref_vec_time_window_P_pct = st.number_input(
+                        "Time-window percentile P (%)",
+                        min_value=1.0, max_value=100.0,
+                        value=float(prev.get("ref_vec_time_window_P_pct", 100.0)),
+                        step=1.0, key="m1503_rv_p",
+                        help="M = max(⌊N_SW × P/100⌋, 1) worst samples "
+                             "averaged per satellite when ranking.",
+                    )
+            elif sel_strategy_choice == "alpha_table":
+                col_ab, col_af = st.columns([1, 2])
+                with col_ab:
+                    alpha_bin_deg = st.number_input(
+                        "α sub-bin width (deg)",
+                        min_value=0.0, max_value=10.0,
+                        value=float(prev.get("alpha_bin_deg", 0.0)),
+                        step=0.5, key="m1503_alpha_bin",
+                        help="0 (normative) uses the declared TSS cases of "
+                             "Doc 4A/312 p. 110. > 0 subdivides each case — "
+                             "sensitivity studies only (non-conforming).",
+                    )
+                with col_af:
+                    up = st.file_uploader(
+                        "Alpha table file (JSON/YAML) — declared min/max CDF pairs",
+                        type=["json", "yaml", "yml"],
+                        key="m1503_alpha_file",
+                        help="`min`/`max` lists of [angle_deg, probability] "
+                             "pairs (CDF, increasing). NOT read from the .mdb.",
+                    )
+                if float(alpha_bin_deg) > 0.0:
+                    st.warning(
+                        f"α sub-bin = {alpha_bin_deg}° subdivides the "
+                        "declared TSS cases — NOT conforming to Doc 4A/312."
+                    )
+
+                def _validate_cdf(pairs, who):
+                    pa = pp = -1.0
+                    for a, p_ in pairs:
+                        a, p_ = float(a), float(p_)
+                        if a <= pa:
+                            raise ValueError(f"{who}: angles must strictly increase (got {a}° after {pa}°).")
+                        if p_ < pp:
+                            raise ValueError(f"{who}: probabilities must be non-decreasing (CDF); got {p_} after {pp}.")
+                        if not (0.0 < p_ <= 1.0):
+                            raise ValueError(f"{who}: probability {p_} out of (0, 1].")
+                        pa, pp = a, p_
+
+                if up is not None:
+                    try:
+                        raw = up.getvalue().decode("utf-8")
+                        if up.name.lower().endswith((".yaml", ".yml")):
+                            import yaml as _yaml
+                            data = _yaml.safe_load(raw)
+                        else:
+                            import json as _json
+                            data = _json.loads(raw)
+                        _min = [[float(a), float(p_)] for a, p_ in data["min"]]
+                        _max = [[float(a), float(p_)] for a, p_ in data["max"]]
+                        _validate_cdf(_min, "min"); _validate_cdf(_max, "max")
+                        alpha_table_data = {"min": _min, "max": _max}
+                        alpha_table_file = up.name
+                        st.success(
+                            f"Alpha table loaded from `{up.name}`: "
+                            f"{len(_min)} min pairs, {len(_max)} max pairs."
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Invalid alpha table: {exc}")
+
+            # Step-22 (OR) satellites — optional under the non-normative
+            # strategies, for comparison studies. Combines freely with the
+            # Gmax−30 ablation in the next tab (the OR gate follows the
+            # Step-18 test, ablated or not).
+            if sel_strategy_choice in ("top_n_elev_random", "hybrid_rand_he",
+                                        "ref_vector"):
+                include_override = st.checkbox(
+                    "Include the Step-22 (OR) satellites in the sum",
+                    value=bool(prev.get("include_override", False)),
+                    key="m1503_incl_or",
+                    help="The source documents of these strategies do not "
+                         "model the Step-22 branch, so it is OFF by default. "
+                         "Tick to keep the OR-condition satellites "
+                         "(GRX(φ) above the Step-18 gain threshold, inside "
+                         "the exclusion cone / below ε₀) in the aggregate — "
+                         "so you can compare with/without them, and with/"
+                         "without the Gmax−30 candidate (next tab), which "
+                         "changes WHICH satellites pass the OR gate.",
+                )
+            elif sel_strategy_choice == "alpha_table":
+                st.caption(
+                    "Step-22 (OR) satellites: **always included** for the "
+                    "alpha-table strategy (it runs inside the full normative "
+                    "loop)."
+                )
+
+    # ── (c) Step-18 gain test without Gmax−30 ─────────────────────────────
+    with _tab_g30:
+        drop_gmax30 = st.checkbox(
+            "Enable — remove the Gmax−30 dB candidate (Doc 4A/1029 §5)",
+            value=bool(prev.get("drop_gmax30", False)),
+            key="m1503_g30",
+            help="The Step-18 OR-branch threshold becomes GRX(α₀) alone.",
+        )
+        if drop_gmax30:
+            st.caption(
+                "The declared exclusion angle α₀ **always remains** — only "
+                "the wider Gmax−30 candidate is removed, so the admission "
+                "cone never extends past α₀. With 'Apply in the WCG search' "
+                "ticked above, the WCGA sees the same rule (the WCG can "
+                "move); otherwise only the EPFD↓ simulation is affected. "
+                "Combines with the Step-22 option in the previous tab: the "
+                "OR gate uses the ablated threshold when this is on."
+            )
+
+    # ── (d) sidelobe-to-sidelobe (SL2SL) contribution ─────────────────────
+    with _tab_sl:
+        sidelobe_enabled = st.checkbox(
+            "Enable — SL2SL contribution of the non-Nco satellites",
+            value=bool(prev.get("sidelobe_enabled", False)),
+            key="m1503_sl_on",
+            help="Adds the side-lobe emissions of the visible non-Nco "
+                 "satellites serving a terrestrial grid of ESs around the "
+                 "victim (constant pfd toward each served cell). Outputs a "
+                 "sidelobe-only CCDF and a standard+sidelobe total CCDF "
+                 "(ccdf_sidelobe.csv). Requires a FIXED time step (Dual "
+                 "time step = off in the form below) and is not combinable "
+                 "with the reference-vector / alpha-table strategies.",
+        )
+        sidelobe_pattern = str(prev.get("sidelobe_pattern", "1.4"))
+        sidelobe_pfd_dbw_m2 = float(prev.get("sidelobe_pfd_dbw_m2", -140.0))
+        sidelobe_grid_radius_km = float(prev.get("sidelobe_grid_radius_km", 315.0))
+        sidelobe_grid_spacing_km = float(prev.get("sidelobe_grid_spacing_km", 21.0))
+        sidelobe_min_elevation_deg = float(prev.get("sidelobe_min_elevation_deg", 25.0))
+        sidelobe_gso_arc_separation_deg = float(prev.get("sidelobe_gso_arc_separation_deg", 20.0))
+        sidelobe_gmax_dbi = float(prev.get("sidelobe_gmax_dbi", 45.0))
+        sidelobe_frequency_ghz = float(prev.get("sidelobe_frequency_ghz", 17.8))
+        sidelobe_p14_n_sidelobes = int(prev.get("sidelobe_p14_n_sidelobes", 4))
+        sidelobe_p14_slr_db = float(prev.get("sidelobe_p14_slr_db", 15.0))
+        sidelobe_p14_aperture_m = float(prev.get("sidelobe_p14_aperture_m", 0.28873))
+        sidelobe_p12_near_lobe_level_db = float(prev.get("sidelobe_p12_near_lobe_level_db", -15.0))
+        sidelobe_p12_hpbw_deg = float(prev.get("sidelobe_p12_hpbw_deg", 3.1338))
+        if sidelobe_enabled:
+            sidelobe_pattern = st.radio(
+                "NGSO satellite transmit pattern",
+                options=["1.4", "1.2"],
+                index=(0 if sidelobe_pattern != "1.2" else 1),
+                key="m1503_sl_pattern",
+                format_func=lambda v: (
+                    "S.1528 rec 1.4 — Taylor/Bessel (low side lobes)" if v == "1.4"
+                    else "S.1528 rec 1.2 — alternative model (high side lobes)"
+                ),
+                horizontal=True,
+            )
+            col_ia1, col_ia2 = st.columns(2)
+            with col_ia1:
+                sidelobe_gmax_dbi = st.number_input(
+                    "Interferer Gmax (dBi)", min_value=10.0, max_value=70.0,
+                    value=sidelobe_gmax_dbi, step=0.5, key="m1503_sl_gmax",
+                    help="Peak gain of the NGSO transmit antenna "
+                         "(both patterns).",
+                )
+            with col_ia2:
+                sidelobe_frequency_ghz = st.number_input(
+                    "Frequency (GHz)", min_value=1.0, max_value=60.0,
+                    value=sidelobe_frequency_ghz, step=0.1,
+                    key="m1503_sl_freq",
+                    help="Feeds the 1.4 (Taylor/Bessel) model; 1.2 is "
+                         "frequency-free.",
+                )
+            if sidelobe_pattern == "1.4":
+                st.markdown("**Rec 1.4 antenna parameters**")
+                col_a, col_b, col_c = st.columns(3)
+                with col_a:
+                    sidelobe_p14_n_sidelobes = st.number_input(
+                        "Side lobes (n)", min_value=1, max_value=10,
+                        value=sidelobe_p14_n_sidelobes, step=1,
+                        key="m1503_sl_p14n",
+                    )
+                with col_b:
+                    sidelobe_p14_slr_db = st.number_input(
+                        "Side-lobe ratio SLR (dB)",
+                        min_value=5.0, max_value=40.0,
+                        value=sidelobe_p14_slr_db, step=1.0,
+                        key="m1503_sl_p14slr",
+                    )
+                with col_c:
+                    sidelobe_p14_aperture_m = st.number_input(
+                        "Aperture l_r = l_t (m)",
+                        min_value=0.01, max_value=5.0,
+                        value=sidelobe_p14_aperture_m, step=0.01,
+                        format="%.5f", key="m1503_sl_p14ap",
+                        help="Circular radiating aperture "
+                             "(equal in both planes).",
+                    )
+            else:
+                st.markdown("**Rec 1.2 antenna parameters**")
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    sidelobe_p12_near_lobe_level_db = st.selectbox(
+                        "Near side-lobe level LN (dB)",
+                        options=[-15.0, -20.0, -25.0, -30.0],
+                        index=[-15.0, -20.0, -25.0, -30.0].index(
+                            sidelobe_p12_near_lobe_level_db
+                        ) if sidelobe_p12_near_lobe_level_db in
+                        (-15.0, -20.0, -25.0, -30.0) else 0,
+                        key="m1503_sl_p12ln",
+                        help="S.1528 rec 1.2 defines LN = −15/−20/−25/−30 dB "
+                             "only.",
+                    )
+                with col_b:
+                    sidelobe_p12_hpbw_deg = st.number_input(
+                        "HPBW (°)", min_value=0.1, max_value=30.0,
+                        value=sidelobe_p12_hpbw_deg, step=0.1,
+                        format="%.4f", key="m1503_sl_p12hpbw",
+                        help="Half-power beamwidth of the 1.2 pattern.",
+                    )
+            st.markdown("**Served-ES grid & link gates**")
+            col_sl1, col_sl2, col_sl3 = st.columns(3)
+            with col_sl1:
+                sidelobe_pfd_dbw_m2 = st.number_input(
+                    "pfd toward served cell (dBW/m²/40kHz)",
+                    min_value=-200.0, max_value=-80.0,
+                    value=sidelobe_pfd_dbw_m2, step=1.0, key="m1503_sl_pfd",
+                )
+                sidelobe_grid_radius_km = st.number_input(
+                    "Grid half-width (km)", min_value=50.0, max_value=2000.0,
+                    value=sidelobe_grid_radius_km, step=21.0,
+                    key="m1503_sl_rad",
+                )
+            with col_sl2:
+                sidelobe_grid_spacing_km = st.number_input(
+                    "Grid spacing (km)", min_value=5.0, max_value=100.0,
+                    value=sidelobe_grid_spacing_km, step=1.0,
+                    key="m1503_sl_spc",
+                    help="≥ 20 km respects the minimum co-frequency beam "
+                         "separation.",
+                )
+                sidelobe_min_elevation_deg = st.number_input(
+                    "Serving-link min elevation (°)",
+                    min_value=0.0, max_value=90.0,
+                    value=sidelobe_min_elevation_deg, step=1.0,
+                    key="m1503_sl_minel",
+                )
+            with col_sl3:
+                sidelobe_gso_arc_separation_deg = st.number_input(
+                    "GSO-arc separation at served ES (°)",
+                    min_value=0.0, max_value=90.0,
+                    value=sidelobe_gso_arc_separation_deg, step=1.0,
+                    key="m1503_sl_arc",
+                )
+            _n_side = 2 * int(sidelobe_grid_radius_km / sidelobe_grid_spacing_km) + 1
+            st.caption(
+                f"Grid: {_n_side}×{_n_side}−1 = {_n_side * _n_side - 1} "
+                "served ESs centred on each simulated victim. Victim "
+                "exclusion gate uses the run's own α₀; the victim antenna "
+                "is the run's ES antenna."
+            )
+
+# Effective selection flags. The 'ref_vector' radio choice maps to
+# ref_vec_selection=True with the engine strategy left at the normative
+# 's1503' (reference-vector selection is its own engine path, NOT a
+# SelectionConfig strategy).
+selection_strategy = (
+    sel_strategy_choice
+    if (mod_selection and sel_strategy_choice != "ref_vector")
+    else "s1503"
+)
+ref_vec_selection = bool(mod_selection and sel_strategy_choice == "ref_vector")
+
+
 with st.form("s1503_form"):
     st.subheader("2. Simulation parameters")
     st.caption("Empty fields = engine defaults (auto).")
@@ -693,347 +1126,6 @@ with st.form("s1503_form"):
                  "window. Cost scales with N_TW ≈ N_SW/N_MSL window sets — a "
                  "large MIN_DURATION with a small T_fine is expensive.",
         )
-
-    with st.expander("8. 1503 proposal modifications (WP 4A studies)", expanded=False):
-        st.caption(
-            "Non-normative options under study for the revision of "
-            "Recommendation ITU-R S.1503-4. Tick **Enable** inside each tab — "
-            "the options combine, except where noted; everything left "
-            "disabled runs the normative S.1503-4 algorithm. All parameters "
-            "are always editable (this page is a form: values are read when "
-            "you press *Launch run*)."
-        )
-        mods_in_wcga = st.checkbox(
-            "Apply the enabled modifications in the WCG search too",
-            value=bool(prev.get("mods_in_wcga", False)),
-            help="OFF (default): the modifications change only the EPFD↓ time "
-                 "simulation — the worst-case geometry is found with the "
-                 "normative S.1503-4 WCGA. ON: the WCGA also runs with the "
-                 "proposed antenna and the Step-18 ablation, and (for the "
-                 "selection strategies / reference vector) the found geometry "
-                 "is re-ranked among the top WCGA candidates by the "
-                 "strategy-aggregated instantaneous EPFD at t=0 — so the WCG "
-                 "itself can move, as in the Doc 4A/1029 ablation study. "
-                 "The alpha-table strategy is excluded (its TSS quota is "
-                 "inherently temporal — undefined at a single instant).",
-        )
-
-        _tab_ant, _tab_sel, _tab_g30, _tab_sl = st.tabs([
-            "S.1428 ES antenna",
-            "Satellite selection",
-            "Step-18 · Gmax−30",
-            "Sidelobe (SL2SL)",
-        ])
-
-        # ── Tab (a): proposed S.1428 victim antenna ────────────────────────
-        with _tab_ant:
-            use_proposed = st.checkbox(
-                "Enable — proposed S.1428 pattern (doc 4A1d-3)",
-                value=bool(prev.get("use_proposed_antenna", False)),
-                help="Replaces the current ITU-R S.1428-1 victim ES antenna "
-                     "with the proposed side/back-lobe revision "
-                     "(15 < f ≤ 30 GHz).",
-            )
-            prop_opt = st.radio(
-                "Pattern variant",
-                options=[1, 2],
-                index=int(prev.get("proposed_antenna_option", 1)) - 1,
-                format_func=lambda v: (
-                    "Variant A — −12 dBi floor from 23° (Proposal 1)" if v == 1
-                    else "Variant B — floor from 43.65°/34.1° (Proposal 2, conservative)"
-                ),
-                horizontal=True,
-            )
-
-        # ── Tab (b): satellite selection strategy (Steps 19–22) ───────────
-        with _tab_sel:
-            mod_selection = st.checkbox(
-                "Enable — alternative satellite selection strategy",
-                value=bool(prev.get("selection_strategy", "s1503") != "s1503"
-                           or prev.get("ref_vec_selection", False)),
-                help="Replaces the normative worst-case selection "
-                     "(Steps 19–21) in the EPFD↓ time simulation. The WCG "
-                     "search itself is a single-reference-satellite geometry "
-                     "hunt (§D3) — with 'Apply in the WCG search' ticked "
-                     "above, the found geometry is re-ranked by the "
-                     "strategy-aggregated instant EPFD.",
-            )
-            _strat_prev = str(prev.get("selection_strategy", "s1503"))
-            if prev.get("ref_vec_selection"):
-                _strat_prev = "ref_vector"
-            _strat_opts = ["top_n_elev_random", "hybrid_rand_he",
-                           "ref_vector", "alpha_table"]
-            sel_strategy_choice = st.radio(
-                "Strategy",
-                options=_strat_opts,
-                index=(_strat_opts.index(_strat_prev)
-                       if _strat_prev in _strat_opts else 0),
-                format_func=lambda v: {
-                    "top_n_elev_random": "Top-N highest elevation + random draw (Doc 4A/442)",
-                    "hybrid_rand_he": "Hybrid random + highest elevation (Doc 4A/493)",
-                    "ref_vector": "Reference vector + track duration (Doc 4A/519, US)",
-                    "alpha_table": "Alpha table — TSS quota (Doc 4A/312)",
-                }[v],
-            )
-            st.markdown("**Top-N + random draw** (used when that strategy is selected)")
-            col_n, col_m, col_s = st.columns(3)
-            with col_n:
-                top_n = st.number_input(
-                    "N — highest-elevation pool",
-                    min_value=1, max_value=64,
-                    value=int(prev.get("top_n", 5)), step=1,
-                    help="Pool of the N highest-elevation Standard "
-                         "satellites. Clamped at launch to Nco when a "
-                         "MAX_CO_FREQ override (section 7) is set — N is "
-                         "never allowed to exceed Nco.",
-                )
-            with col_m:
-                n_select = st.number_input(
-                    "M — satellites drawn",
-                    min_value=1, max_value=64,
-                    value=int(prev.get("n_select", 1)), step=1,
-                    help="Drawn at random (no replacement) from the Top-N "
-                         "pool. Clamped at launch to M ≤ N; the engine also "
-                         "caps the drawn count at MAX_CO_FREQ (M acts as an "
-                         "effective Nco′).",
-                )
-            with col_s:
-                seed = st.text_input(
-                    "Random seed (optional)",
-                    value=str(prev.get("seed", "")),
-                    placeholder="e.g. 42",
-                    help="Reproducibility for the random strategies "
-                         "(top-N draw and the hybrid's random list). "
-                         "Empty = OS entropy.",
-                )
-            st.caption(
-                "**Hybrid random + HE** uses Nco (= MAX_CO_FREQ, section 7) "
-                "for both lists and the seed above — no other parameter. "
-                "**Reference vector**: hold duration comes from MIN_DURATION "
-                "(section above); Step-22 (OR) satellites are disabled in "
-                "that mode."
-            )
-            st.markdown("**Reference vector** (used when that strategy is selected)")
-            col_rv1, col_rv2, col_rv3 = st.columns(3)
-            with col_rv1:
-                ref_vec_az_deg = st.number_input(
-                    "Vector azimuth (°)",
-                    min_value=-180.0, max_value=360.0,
-                    value=float(prev.get("ref_vec_az_deg", 0.0)), step=1.0,
-                    help="Clockwise from North. 0°=North, 90°=East.",
-                )
-            with col_rv2:
-                ref_vec_el_deg = st.number_input(
-                    "Vector elevation (°)",
-                    min_value=0.0, max_value=90.0,
-                    value=float(prev.get("ref_vec_el_deg", 90.0)), step=1.0,
-                    help="90° = zenith ≡ highest-elevation selection.",
-                )
-            with col_rv3:
-                ref_vec_time_window_P_pct = st.number_input(
-                    "Time-window percentile P (%)",
-                    min_value=1.0, max_value=100.0,
-                    value=float(prev.get("ref_vec_time_window_P_pct", 100.0)),
-                    step=1.0,
-                    help="M = max(⌊N_SW × P/100⌋, 1) worst samples averaged "
-                         "per satellite when ranking.",
-                )
-            st.markdown("**Alpha table** (used when that strategy is selected)")
-            col_ab, col_af = st.columns([1, 2])
-            with col_ab:
-                alpha_bin_deg = st.number_input(
-                    "α sub-bin width (deg)",
-                    min_value=0.0, max_value=10.0,
-                    value=float(prev.get("alpha_bin_deg", 0.0)), step=0.5,
-                    help="0 (normative) uses the declared TSS cases of "
-                         "Doc 4A/312 p. 110. Any value > 0 subdivides each "
-                         "case — sensitivity studies only, the run is NOT "
-                         "conforming to Doc 4A/312.",
-                )
-            with col_af:
-                up = st.file_uploader(
-                    "Alpha table file (JSON/YAML) — declared min/max CDF pairs",
-                    type=["json", "yaml", "yml"],
-                    help="`min`/`max` lists of [angle_deg, probability] pairs "
-                         "(CDF, increasing). NOT read from the .mdb. "
-                         "Required when the alpha-table strategy is selected.",
-                )
-            alpha_table_data = None
-            alpha_table_file = None
-
-            def _validate_cdf(pairs, who):
-                pa = pp = -1.0
-                for a, p_ in pairs:
-                    a, p_ = float(a), float(p_)
-                    if a <= pa:
-                        raise ValueError(f"{who}: angles must strictly increase (got {a}° after {pa}°).")
-                    if p_ < pp:
-                        raise ValueError(f"{who}: probabilities must be non-decreasing (CDF); got {p_} after {pp}.")
-                    if not (0.0 < p_ <= 1.0):
-                        raise ValueError(f"{who}: probability {p_} out of (0, 1].")
-                    pa, pp = a, p_
-
-            if up is not None:
-                try:
-                    raw = up.getvalue().decode("utf-8")
-                    if up.name.lower().endswith((".yaml", ".yml")):
-                        import yaml as _yaml
-                        data = _yaml.safe_load(raw)
-                    else:
-                        import json as _json
-                        data = _json.loads(raw)
-                    _min = [[float(a), float(p_)] for a, p_ in data["min"]]
-                    _max = [[float(a), float(p_)] for a, p_ in data["max"]]
-                    _validate_cdf(_min, "min"); _validate_cdf(_max, "max")
-                    alpha_table_data = {"min": _min, "max": _max}
-                    alpha_table_file = up.name
-                    st.success(
-                        f"Alpha table loaded from `{up.name}`: "
-                        f"{len(_min)} min pairs, {len(_max)} max pairs."
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    st.error(f"Invalid alpha table: {exc}")
-
-        # ── Tab (c): Step-18 gain test without Gmax−30 ────────────────────
-        with _tab_g30:
-            drop_gmax30 = st.checkbox(
-                "Enable — remove the Gmax−30 dB candidate (Doc 4A/1029 §5)",
-                value=bool(prev.get("drop_gmax30", False)),
-                help="The Step-18 OR-branch threshold becomes GRX(α₀) alone.",
-            )
-            st.caption(
-                "The declared exclusion angle α₀ **always remains** — only "
-                "the wider Gmax−30 candidate is removed, so the admission "
-                "cone never extends past α₀. With 'Apply in the WCG search' "
-                "ticked above, the WCGA sees the same rule (the WCG can "
-                "move); otherwise only the EPFD↓ simulation is affected."
-            )
-
-        # ── Tab (d): sidelobe-to-sidelobe (SL2SL) contribution ────────────
-        with _tab_sl:
-            sidelobe_enabled = st.checkbox(
-                "Enable — SL2SL contribution of the non-Nco satellites",
-                value=bool(prev.get("sidelobe_enabled", False)),
-                help="Adds the side-lobe emissions of the visible non-Nco "
-                     "satellites serving a terrestrial grid of ESs around "
-                     "the victim (constant pfd toward each served cell). "
-                     "Outputs a sidelobe-only CCDF and a standard+sidelobe "
-                     "total CCDF (ccdf_sidelobe.csv). Requires a FIXED time "
-                     "step (Dual time step = off, section 5) and is not "
-                     "combinable with the reference-vector / alpha-table "
-                     "strategies — both checked at launch.",
-            )
-            sidelobe_pattern = st.radio(
-                "NGSO satellite transmit pattern",
-                options=["1.4", "1.2"],
-                index=(0 if str(prev.get("sidelobe_pattern", "1.4")) != "1.2" else 1),
-                format_func=lambda v: (
-                    "S.1528 rec 1.4 — Taylor/Bessel (low side lobes)" if v == "1.4"
-                    else "S.1528 rec 1.2 — alternative model (high side lobes)"
-                ),
-                horizontal=True,
-            )
-            st.markdown("**Interferer antenna (common)**")
-            col_ia1, col_ia2 = st.columns(2)
-            with col_ia1:
-                sidelobe_gmax_dbi = st.number_input(
-                    "Gmax (dBi)", min_value=10.0, max_value=70.0,
-                    value=float(prev.get("sidelobe_gmax_dbi", 45.0)), step=0.5,
-                    help="Peak gain of the NGSO transmit antenna (both patterns).",
-                )
-            with col_ia2:
-                sidelobe_frequency_ghz = st.number_input(
-                    "Frequency (GHz)", min_value=1.0, max_value=60.0,
-                    value=float(prev.get("sidelobe_frequency_ghz", 17.8)),
-                    step=0.1,
-                    help="Feeds the 1.4 (Taylor/Bessel) model; 1.2 is "
-                         "frequency-free. Defaults to the run frequency.",
-                )
-            col_p14, col_p12 = st.columns(2)
-            with col_p14:
-                st.markdown("**Rec 1.4 parameters**")
-                sidelobe_p14_n_sidelobes = st.number_input(
-                    "Side lobes (n)", min_value=1, max_value=10,
-                    value=int(prev.get("sidelobe_p14_n_sidelobes", 4)), step=1,
-                )
-                sidelobe_p14_slr_db = st.number_input(
-                    "Side-lobe ratio SLR (dB)", min_value=5.0, max_value=40.0,
-                    value=float(prev.get("sidelobe_p14_slr_db", 15.0)), step=1.0,
-                )
-                sidelobe_p14_aperture_m = st.number_input(
-                    "Aperture l_r = l_t (m)", min_value=0.01, max_value=5.0,
-                    value=float(prev.get("sidelobe_p14_aperture_m", 0.28873)),
-                    step=0.01, format="%.5f",
-                    help="Circular radiating aperture (equal in both planes).",
-                )
-            with col_p12:
-                st.markdown("**Rec 1.2 parameters**")
-                sidelobe_p12_near_lobe_level_db = st.selectbox(
-                    "Near side-lobe level LN (dB)",
-                    options=[-15.0, -20.0, -25.0, -30.0],
-                    index=[-15.0, -20.0, -25.0, -30.0].index(
-                        float(prev.get("sidelobe_p12_near_lobe_level_db", -15.0))
-                    ),
-                    help="S.1528 rec 1.2 defines LN = −15/−20/−25/−30 dB only.",
-                )
-                sidelobe_p12_hpbw_deg = st.number_input(
-                    "HPBW ψ_b·2 (°)", min_value=0.1, max_value=30.0,
-                    value=float(prev.get("sidelobe_p12_hpbw_deg", 3.1338)),
-                    step=0.1, format="%.4f",
-                    help="Half-power beamwidth of the 1.2 pattern.",
-                )
-            st.markdown("**Served-ES grid & link gates**")
-            col_sl1, col_sl2, col_sl3 = st.columns(3)
-            with col_sl1:
-                sidelobe_pfd_dbw_m2 = st.number_input(
-                    "pfd toward served cell (dBW/m²/40kHz)",
-                    min_value=-200.0, max_value=-80.0,
-                    value=float(prev.get("sidelobe_pfd_dbw_m2", -140.0)),
-                    step=1.0,
-                )
-                sidelobe_grid_radius_km = st.number_input(
-                    "Grid half-width (km)", min_value=50.0, max_value=2000.0,
-                    value=float(prev.get("sidelobe_grid_radius_km", 315.0)),
-                    step=21.0,
-                )
-            with col_sl2:
-                sidelobe_grid_spacing_km = st.number_input(
-                    "Grid spacing (km)", min_value=5.0, max_value=100.0,
-                    value=float(prev.get("sidelobe_grid_spacing_km", 21.0)),
-                    step=1.0,
-                    help="≥ 20 km respects the minimum co-frequency beam "
-                         "separation.",
-                )
-                sidelobe_min_elevation_deg = st.number_input(
-                    "Serving-link min elevation (°)",
-                    min_value=0.0, max_value=90.0,
-                    value=float(prev.get("sidelobe_min_elevation_deg", 25.0)),
-                    step=1.0,
-                )
-            with col_sl3:
-                sidelobe_gso_arc_separation_deg = st.number_input(
-                    "GSO-arc separation at served ES (°)",
-                    min_value=0.0, max_value=90.0,
-                    value=float(prev.get("sidelobe_gso_arc_separation_deg", 20.0)),
-                    step=1.0,
-                )
-            st.caption(
-                "The grid is centred on each simulated victim; the victim "
-                "exclusion gate uses the run's own α₀ and the victim antenna "
-                "is the run's ES antenna (sections 2 and 8a)."
-            )
-
-    # Effective selection flags — resolved at submit time (the page is a
-    # form). The 'ref_vector' radio choice maps to ref_vec_selection=True with
-    # the engine strategy left at the normative 's1503' (reference-vector
-    # selection is its own engine path, NOT a SelectionConfig strategy).
-    selection_strategy = (
-        sel_strategy_choice
-        if (mod_selection and sel_strategy_choice != "ref_vector")
-        else "s1503"
-    )
-    ref_vec_selection = bool(mod_selection and sel_strategy_choice == "ref_vector")
-    include_override = False
 
     # ── Workload + runtime estimate ────────────────────────────────────────
     from lib import estimator as _est
