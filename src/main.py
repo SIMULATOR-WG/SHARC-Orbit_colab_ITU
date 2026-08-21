@@ -1859,6 +1859,7 @@ def run_wcg_downlink(config: dict) -> tuple[
         seed=sim_cfg.get("seed", None),
         alpha_bin_deg=float(sim_cfg.get("alpha_bin_deg", 0.0)),
         include_override=bool(sim_cfg.get("include_override", False)),
+        hybrid_list_size=int(sim_cfg.get("hybrid_list_size", 0) or 0),
     )
 
     gmst0_override_deg = sim_cfg.get("earth_rotation_initial_deg", None)

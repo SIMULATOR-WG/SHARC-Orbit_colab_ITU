@@ -254,6 +254,8 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["seed"] = int(params["seed"])
     if "include_override" in params:
         sim["include_override"] = bool(params["include_override"])
+    if params.get("hybrid_list_size"):
+        sim["hybrid_list_size"] = int(params["hybrid_list_size"])
     # Alpha table (Doc 4A/312): declared min/max CDF pairs come pre-parsed from
     # the UI (JSON/YAML) — NOT from the .mdb — and the α-bin width for the TSS
     # densification. run_wcg_downlink reads config["non_gso"]["alpha_table"].

@@ -331,6 +331,11 @@ class SelectionConfig:
     seed: int | None = None
     alpha_bin_deg: float = 0.0
     include_override: bool = False
+    #: hybrid_rand_he only — size of the two candidate lists (random and
+    #: highest-elevation). 0 (default) = Nco, the Doc 4A/493 formulation.
+    #: A larger value widens both lists while the final keep stays Nco —
+    #: e.g. "10 random + 10 highest elevation, keep the worst 1".
+    hybrid_list_size: int = 0
 
 
 def _rng_for_step(seed: int | None, step_index: int) -> np.random.Generator:
@@ -387,6 +392,7 @@ def _select_hybrid_rand_he(
     elev_by_k: dict[int, float],
     n_co: int,
     rng: np.random.Generator,
+    list_size: int = 0,
 ) -> list[tuple[float, int]]:
     """Hybrid random + highest-elevation selection (Doc 4A/493-E §3.1).
 
@@ -409,18 +415,21 @@ def _select_hybrid_rand_he(
     if not standard_items:
         return []
     n = max(1, int(n_co))
+    # List size: Doc 4A/493 uses Nco for both lists; ``list_size`` widens
+    # them (final keep stays n_co) for sensitivity studies.
+    nl = max(n, int(list_size)) if list_size else n
     m = len(standard_items)
-    # HE set: n_co highest by elevation (tie-break by k).
+    # HE set: nl highest by elevation (tie-break by k).
     he_ordered = sorted(
         standard_items,
         key=lambda it: (-elev_by_k.get(it[1], -90.0), it[1]),
     )
-    he_set = he_ordered[: min(n, m)]
-    # Random set: n_co drawn at random from all eligible.
-    if n >= m:
+    he_set = he_ordered[: min(nl, m)]
+    # Random set: nl drawn at random from all eligible.
+    if nl >= m:
         rand_set = list(standard_items)
     else:
-        pick = rng.choice(m, size=n, replace=False)
+        pick = rng.choice(m, size=nl, replace=False)
         rand_set = [standard_items[int(i)] for i in pick]
     # Union, de-duplicated by satellite index k.
     union: dict[int, float] = {}
@@ -593,6 +602,7 @@ def _finalize_epfd_after_max_co_freq(
             elev_by_k or {},
             n_co,
             rng,
+            list_size=int(getattr(selection_config, "hybrid_list_size", 0) or 0),
         )
         # OR branch (Step 22): disabled by default; include_override keeps it.
         if selection_config.include_override:
