@@ -536,11 +536,15 @@ def _build_mask_for_sats(cfg: dict[str, Any], mask_id_per_sat: list[int] | None)
 def _build_antenna(cfg: dict[str, Any]):
     from src.antenna import create_gso_es_antenna  # type: ignore[import]
     gso_es = cfg["gso_es"]
+    use_proposed = bool(gso_es.get("use_proposed_antenna", False))
+    prop_opt = int(gso_es.get("proposed_antenna_option", 1))
     return create_gso_es_antenna(
         float(gso_es["antenna_diameter_m"]),
         float(cfg["non_gso"]["frequency_ghz"]),
         float(gso_es.get("antenna_efficiency", 0.99)),
         service=str(gso_es.get("service", "FSS")).upper(),
+        use_proposed=use_proposed,
+        proposed_option=prop_opt,
     )
 
 

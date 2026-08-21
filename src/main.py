@@ -1528,7 +1528,12 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     es_diameter = gso_es_cfg["antenna_diameter_m"]
     es_efficiency = gso_es_cfg.get("antenna_efficiency", 0.99)
     es_service = str(gso_es_cfg.get("service", "FSS")).upper()
-    es_antenna = create_gso_es_antenna(es_diameter, freq_ghz, es_efficiency, service=es_service)
+    use_proposed = bool(gso_es_cfg.get("use_proposed_antenna", False))
+    prop_opt = int(gso_es_cfg.get("proposed_antenna_option", 1))
+    es_antenna = create_gso_es_antenna(
+        es_diameter, freq_ghz, es_efficiency, service=es_service,
+        use_proposed=use_proposed, proposed_option=prop_opt
+    )
 
     # PFD mask.
     mask_id = pfd_cfg.get("mask_id", None)
@@ -1795,7 +1800,12 @@ def run_wcg_downlink(config: dict) -> tuple[
     es_efficiency = gso_es_cfg.get("antenna_efficiency", 0.99)
 
     es_service = str(gso_es_cfg.get("service", "FSS")).upper()
-    es_antenna = create_gso_es_antenna(es_diameter, freq_ghz, es_efficiency, service=es_service)
+    use_proposed = bool(gso_es_cfg.get("use_proposed_antenna", False))
+    prop_opt = int(gso_es_cfg.get("proposed_antenna_option", 1))
+    es_antenna = create_gso_es_antenna(
+        es_diameter, freq_ghz, es_efficiency, service=es_service,
+        use_proposed=use_proposed, proposed_option=prop_opt
+    )
     logger.info(f"GSO ES antenna: {es_antenna}")
     logger.info(f"GSO ES service: {es_service}")
 
@@ -3467,6 +3477,14 @@ def main():
         )
     )
     parser.add_argument(
+        "--use-proposed-antenna", action="store_true",
+        help="Use the proposed experimental S.1428-1 antenna variation (4A1d-3 doc)."
+    )
+    parser.add_argument(
+        "--proposed-antenna-option", type=int, default=1, choices=[1, 2],
+        help="Proposed antenna variation alternative 1 or 2 (default: 1)."
+    )
+    parser.add_argument(
         "--reference-bandwidth-khz", type=float, default=None,
         help=(
             "Override the normative Art. 22 reference bandwidth "
@@ -3746,6 +3764,10 @@ def main():
             "ES antenna diameter overridden via --es-antenna-diameter: "
             f"{old_d:.3f} m → {args.es_antenna_diameter:.3f} m"
         )
+        
+    config.setdefault("gso_es", {})["use_proposed_antenna"] = args.use_proposed_antenna
+    config.setdefault("gso_es", {})["proposed_antenna_option"] = args.proposed_antenna_option
+
     if args.reference_bandwidth_khz is not None:
         if args.reference_bandwidth_khz <= 0.0:
             parser.error("--reference-bandwidth-khz must be > 0")

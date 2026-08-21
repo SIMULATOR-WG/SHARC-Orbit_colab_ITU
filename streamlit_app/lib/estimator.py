@@ -397,8 +397,11 @@ def preview_time_step(
     _reading_b = str(itu_software or "itu_epfd").lower().startswith(("transfinite", "itu"))
     try:
         from src.antenna import create_gso_es_antenna  # type: ignore[import]
+        use_proposed = False
+        prop_opt = 1
         es_ant = create_gso_es_antenna(
             float(diameter_m), float(frequency_ghz), float(efficiency), service=service,
+            use_proposed=use_proposed, proposed_option=prop_opt
         )
         theta_3db_deg = float(es_ant.theta_3db_deg)
     except Exception as exc:  # noqa: BLE001

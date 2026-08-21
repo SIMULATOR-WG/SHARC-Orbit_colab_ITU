@@ -80,6 +80,8 @@ def launch_s1503(*, system_id: str, params: dict[str, Any]) -> str:
                    else sys_row.get("mask_id"),
         "ntc_id": sys_row.get("ntc_id"),
         "system_id": system_id,
+        "use_proposed_antenna": params.get("use_proposed_antenna", False),
+        "proposed_antenna_option": params.get("proposed_antenna_option", 1),
     })
     run_id = storage.create_run(kind="single", method=None, params=full)
     pp = _params_path(run_id)

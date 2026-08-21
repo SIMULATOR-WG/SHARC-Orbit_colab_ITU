@@ -445,6 +445,21 @@ with st.form("s1503_form"):
                  "Set automatically by the Article 22 scenario when one is "
                  "picked in section 1.",
         )
+        
+        use_proposed = st.checkbox(
+            "Use Proposed ITU-R S.1428-1 Modification (Experimental)",
+            value=bool(prev.get("use_proposed_antenna", False)),
+            help="If checked, uses the experimental gain rolls-offs from 4A1d-3 doc."
+        )
+        
+        prop_opt = 1
+        if use_proposed:
+            prop_opt = st.selectbox(
+                "Proposed Antenna Variation (Or condition)",
+                options=[1, 2],
+                index=int(prev.get("proposed_antenna_option", 1)) - 1,
+                help="Varies the gain rolloff plateaus (e.g. extending from 23° to 43.65° in the 15-30 GHz range)."
+            )
         _freq_default = (
             (f"{float(art22_leaf['frequency_run_ghz']):.6f}".rstrip("0").rstrip("."))
             if art22_leaf is not None and art22_leaf.get("frequency_run_ghz")
@@ -805,6 +820,8 @@ if submit:
     d = _f(diam)
     if d is not None and d > 0:
         params["es_antenna_diameter_m"] = d
+    params["use_proposed_antenna"] = bool(use_proposed)
+    params["proposed_antenna_option"] = int(prop_opt)
     params["wcga_s1503"] = bool(wcga_s1503)
     _set("s1503_step_deg", _f(s1503_step))
     params["wcga_no_mask_symmetry"] = bool(wcga_no_mask_symmetry)
@@ -896,6 +913,8 @@ if submit:
         "num_time_steps": _i(num_steps), "time_step_s": _f(dt),
         "min_elevation_deg": _f(min_elev), "service": service,
         "es_antenna_diameter_m": _f(diam),
+        "use_proposed_antenna": bool(use_proposed),
+        "proposed_antenna_option": int(prop_opt),
         "wcga_s1503": bool(wcga_s1503), "s1503_step_deg": _f(s1503_step),
         "wcga_no_mask_symmetry": bool(wcga_no_mask_symmetry),
         "s1503_trail_all_points": bool(s1503_trail),

@@ -336,6 +336,8 @@ if st.button("Launch EPFD↓ run", type="primary", icon=":material/rocket_launch
         "num_time_steps": int(n_steps),
         "time_step_s": float(dt_s),
         "es_antenna_diameter_m": float(diam_m),
+        "use_proposed_antenna": bool(use_proposed),
+        "proposed_antenna_option": int(prop_opt),
     }
     run_id = launcher.launch_s1503_manual(manual_cfg=manual_cfg, params=params)
     set_current_run_id(run_id)

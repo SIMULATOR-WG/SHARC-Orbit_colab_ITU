@@ -167,6 +167,10 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim["keep_full_history"] = bool(params["keep_full_history"])
     if params.get("es_antenna_diameter_m"):
         gso_es["antenna_diameter_m"] = float(params["es_antenna_diameter_m"])
+    if "use_proposed_antenna" in params:
+        gso_es["use_proposed_antenna"] = bool(params["use_proposed_antenna"])
+    if "proposed_antenna_option" in params:
+        gso_es["proposed_antenna_option"] = int(params["proposed_antenna_option"])
     # WCGA: S.1503-4 §D.3.1 algorithm is the normative path. Default ON.
     wcg_search_cfg["use_s1503_algo"] = bool(params.get("wcga_s1503", True))
     if params.get("s1503_step_deg") is not None:

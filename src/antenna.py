@@ -17,8 +17,11 @@ parameter is only stored (ITU patterns are envelopes in D/λ, without η in the 
 """
 
 from __future__ import annotations
+import logging
 import math
 from .constants import C_M_S, DEG2RAD
+
+_log = logging.getLogger(__name__)
 
 
 class EarthStationAntenna:
@@ -105,6 +108,7 @@ class ITURS1428Antenna(EarthStationAntenna):
         phi = min(abs(off_axis_deg), 180.0)
 
         if phi < 1e-10:
+            _log.info("[S.1428 gain] phi=%.4f deg -> g_max=%.2f dBi (boresight)", phi, self.g_max)
             return self.g_max
 
         if self.regime in ("20_25", "25_100"):
@@ -140,6 +144,144 @@ class ITURS1428Antenna(EarthStationAntenna):
         return (f"ITURS1428Antenna(D={self.diameter:.2f}m, "
                 f"f={self.frequency:.2f}GHz, "
                 f"D/λ={self.d_over_lambda:.1f}, "
+                f"G_max={self.g_max:.1f}dBi)")
+
+
+class ITURS1428RevisionAntenna(EarthStationAntenna):
+    """Proposed experimental antenna pattern for ITU-R S.1503."""
+
+    def __init__(self, diameter_m: float, frequency_ghz: float,
+                 efficiency: float = 0.65, proposed_option: int = 1):
+        self.diameter = diameter_m
+        self.frequency = frequency_ghz
+        self.efficiency = efficiency
+        self.proposed_option = proposed_option
+
+        wavelength = C_M_S / (frequency_ghz * 1e9)
+        self.d_over_lambda = diameter_m / wavelength
+
+        if self.d_over_lambda < 20.0:
+            raise ValueError(
+                f"Rec. ITU-R S.1428-1 requires D/λ >= 20 (current: {self.d_over_lambda:.2f})"
+            )
+
+        self.is_low_band = (10.7 <= frequency_ghz <= 15.0)
+
+        # Normative bands of Rec. ITU-R S.1428-1 with proposed modifications.
+        if self.d_over_lambda <= 25.0:
+            self.regime = "20_25"
+            self.g_max = 20.0 * math.log10(self.d_over_lambda) + 7.7
+            self.g1 = 29.0 - 25.0 * math.log10(95.0 / self.d_over_lambda)
+            self.phi_m = 20.0 / self.d_over_lambda * math.sqrt(self.g_max - self.g1)
+            self.phi_plateau_max = 95.0 / self.d_over_lambda
+            self.phi_r = None
+        elif self.d_over_lambda <= 100.0:
+            self.regime = "25_100"
+            self.g_max = 20.0 * math.log10(self.d_over_lambda) + 7.7
+            if self.is_low_band:
+                self.g1 = 29.0 - 25.0 * math.log10(95.0 / self.d_over_lambda)
+                self.phi_plateau_max = 95.0 / self.d_over_lambda
+            else:
+                if self.proposed_option == 1:
+                    # A Variant
+                    self.g1 = 22.0 - 25.0 * math.log10(120.0 / self.d_over_lambda)
+                    self.phi_plateau_max = 120.0 / self.d_over_lambda
+                else:
+                    # B Variant
+                    self.g1 = 29.0 - 25.0 * math.log10(95.0 / self.d_over_lambda)
+                    self.phi_plateau_max = 95.0 / self.d_over_lambda
+            self.phi_m = 20.0 / self.d_over_lambda * math.sqrt(self.g_max - self.g1)
+            self.phi_r = None
+        else:
+            self.regime = "gt_100"
+            self.g_max = 20.0 * math.log10(self.d_over_lambda) + 8.4
+            self.g1 = -1.0 + 15.0 * math.log10(self.d_over_lambda)
+            self.phi_m = 20.0 / self.d_over_lambda * math.sqrt(self.g_max - self.g1)
+            self.phi_r = 15.85 * self.d_over_lambda ** (-0.6)
+            self.phi_plateau_max = None
+
+    def gain(self, off_axis_deg: float, theta_deg: float | None = None) -> float:
+        """Returns the gain (dBi) for the off-axis angle φ (degrees)."""
+        phi = min(abs(off_axis_deg), 180.0)
+
+        if phi < 1e-10:
+            return self.g_max
+
+        if self.is_low_band:
+            if self.regime in ("20_25", "25_100"):
+                if phi < self.phi_m:
+                    return self.g_max - 2.5e-3 * (self.d_over_lambda * phi) ** 2
+                if phi < self.phi_plateau_max:
+                    return self.g1
+                if phi <= 23.0:
+                    return 22.0 - 25.0 * math.log10(phi)
+                return -12.0
+            else:
+                if phi < self.phi_m:
+                    return self.g_max - 2.5e-3 * (self.d_over_lambda * phi) ** 2
+                if phi < self.phi_r:
+                    return self.g1
+                if phi < 3.0:
+                    return 29.0 - 25.0 * math.log10(phi)
+                if phi < 23.0:
+                    return 34.0 - 30.0 * math.log10(phi)
+                if phi < 80.0:
+                    return -12.0
+                if phi < 120.0:
+                    return -7.0
+                return -12.0
+        else:
+            # High frequency range (15 < f <= 30 GHz)
+            if self.regime == "20_25":
+                if phi < self.phi_m:
+                    return self.g_max - 2.5e-3 * (self.d_over_lambda * phi) ** 2
+                if phi < self.phi_plateau_max:
+                    return self.g1
+                if phi < 33.1:
+                    return 29.0 - 25.0 * math.log10(phi)
+                if phi <= 80.0:
+                    return -9.0
+                return -5.0
+            elif self.regime == "25_100":
+                if phi < self.phi_m:
+                    return self.g_max - 2.5e-3 * (self.d_over_lambda * phi) ** 2
+                if phi < self.phi_plateau_max:
+                    return self.g1
+                
+                if self.proposed_option == 1:
+                    if phi <= 23.0:
+                        return 22.0 - 25.0 * math.log10(phi)
+                    return -12.0
+                elif self.proposed_option == 2:
+                    if phi <= 43.65:
+                        return 29.0 - 25.0 * math.log10(phi)
+                    return -12.0
+            else:
+                if phi < self.phi_m:
+                    return self.g_max - 2.5e-3 * (self.d_over_lambda * phi) ** 2
+                if phi < self.phi_r:
+                    return self.g1
+                
+                if self.proposed_option == 1:
+                    # A Variant
+                    if phi < 3.0:
+                        return 29.0 - 25.0 * math.log10(phi)
+                    if phi < 23.0:
+                        return 32.0 - 32.0 * math.log10(phi)
+                    return -12.0
+                else:
+                    #B Variant
+                    if phi < 10.0:
+                        return 29.0 - 25.0 * math.log10(phi)
+                    if phi < 34.1:
+                        return 32.0 - 32.0 * math.log10(phi)
+                    return -12.0
+
+    def __repr__(self):
+        return (f"ITURS1428RevisionAntenna(D={self.diameter:.2f}m, "
+                f"f={self.frequency:.2f}GHz, "
+                f"D/λ={self.d_over_lambda:.1f}, "
+                f"opt={self.proposed_option}, "
                 f"G_max={self.g_max:.1f}dBi)")
 
 
@@ -368,9 +510,16 @@ def create_gso_es_antenna(
     frequency_ghz: float,
     efficiency: float = 0.65,
     service: str = "FSS",
+    use_proposed: bool = False,
+    proposed_option: int = 1,
 ) -> EarthStationAntenna:
     """Creates the standard GSO ES antenna according to the selected service."""
     service_norm = str(service or "FSS").strip().upper()
     if service_norm == "BSS":
         return ITUBO1443Antenna(diameter_m, frequency_ghz, efficiency)
+    
+    if use_proposed:
+        return ITURS1428RevisionAntenna(
+            diameter_m, frequency_ghz, efficiency, proposed_option=proposed_option
+        )
     return ITURS1428Antenna(diameter_m, frequency_ghz, efficiency)
