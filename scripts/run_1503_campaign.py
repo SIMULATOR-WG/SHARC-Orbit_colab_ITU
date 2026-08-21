@@ -252,7 +252,15 @@ def _expand_rows(only: list[str] | None) -> list[tuple[str, dict, int | None]]:
 
 # ─── Execution ───────────────────────────────────────────────────────────────
 
-def _run_one(run_key: str, params: dict[str, Any]) -> tuple[str, bool]:
+def _hms(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s_ = divmod(rem, 60)
+    return f"{h:d}h{m:02d}m" if h else f"{m:d}m{s_:02d}s"
+
+
+def _run_one(run_key: str, params: dict[str, Any],
+             position: str = "") -> tuple[str, bool]:
     run_id = storage.create_run(kind="single", method=None, params=params,
                                 campaign_id=CAMPAIGN_ID)
     run_dir = REPO / "streamlit_app" / "data" / "runs" / run_id
@@ -264,6 +272,15 @@ def _run_one(run_key: str, params: dict[str, Any]) -> tuple[str, bool]:
     log_path = run_dir / "worker.log"
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     t0 = time.time()
+    print(f"  [{run_key}]{position} started {time.strftime('%H:%M:%S')} · "
+          f"run {run_id} · full log: {log_path}")
+    # Console policy: one timestamped progress line per ≥5% advance or ≥120 s
+    # of silence, with elapsed + ETA. The ETA extrapolates linearly over the
+    # EPFD phase (progress ≥15%; 2–15% is loading/WCGA, non-linear).
+    last_pct = -1.0
+    last_emit = t0
+    sim_t0: float | None = None
+    sim_p0 = 0.0
     with open(log_path, "w", encoding="utf-8") as lf:
         proc = subprocess.Popen(
             [sys.executable, "-m",
@@ -276,20 +293,34 @@ def _run_one(run_key: str, params: dict[str, Any]) -> tuple[str, bool]:
         for line in proc.stdout:
             lf.write(line)
             line = line.rstrip()
+            now = time.time()
             if line.startswith("PROGRESS:"):
                 try:
                     pct = float(line.split(":", 1)[1])
-                    storage.update_run(run_id, progress_pct=pct)
-                    print(f"\r  [{run_key}] {pct:6.2f}%", end="", flush=True)
                 except ValueError:
-                    pass
-            elif line and not line.startswith(("PROGRESS", "  [")):
-                # keep the console readable: only banner/summary lines
-                if any(k in line for k in ("modification", "•", "DONE",
-                                           "ERROR", "Artifacts", "scope:")):
-                    print(f"\n  [{run_key}] {line}")
+                    continue
+                storage.update_run(run_id, progress_pct=pct)
+                if pct >= 15.0 and sim_t0 is None:
+                    sim_t0, sim_p0 = now, pct
+                if pct - last_pct >= 5.0 or (now - last_emit) >= 120.0:
+                    eta = ""
+                    if sim_t0 is not None and 100.0 > pct > sim_p0:
+                        rate = (pct - sim_p0) / max(1e-9, now - sim_t0)
+                        rem_s = (100.0 - pct) / rate
+                        eta = (f" · ETA ~{_hms(rem_s)} (~"
+                               + time.strftime(
+                                   "%H:%M", time.localtime(now + rem_s))
+                               + ")")
+                    print(f"  [{run_key}] {time.strftime('%H:%M:%S')} "
+                          f"{pct:6.2f}% · elapsed {_hms(now - t0)}{eta}",
+                          flush=True)
+                    last_pct, last_emit = pct, now
+            elif line and any(k in line for k in (
+                    "modification", "•", "DONE", "ERROR", "Artifacts",
+                    "scope:", "windowing ACTIVE", "SL2SL")):
+                print(f"  [{run_key}] {line}", flush=True)
         rc = proc.wait()
-    dt_min = (time.time() - t0) / 60.0
+    dt = time.time() - t0
     ok = (rc == 0 and (run_dir / "summary.json").exists())
     storage.update_run(
         run_id,
@@ -298,8 +329,8 @@ def _run_one(run_key: str, params: dict[str, Any]) -> tuple[str, bool]:
         error_message=("" if ok else f"exit code {rc}"),
         finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
-    print(f"\n  [{run_key}] {'OK' if ok else 'FAILED'} "
-          f"(run {run_id}, {dt_min:.1f} min) → {run_dir}")
+    print(f"  [{run_key}] {'OK' if ok else 'FAILED'} in {_hms(dt)} "
+          f"(run {run_id}) → {run_dir}")
     return run_id, ok
 
 
@@ -333,7 +364,11 @@ def cmd_run(args) -> None:
     todo = _expand_rows(only or None)
     # geometry-source baselines first, then the rest in sheet order
     todo.sort(key=lambda t: (not t[1].get("geometry_source", False),))
+    print(f"campaign: {len(todo)} run(s) queued · "
+          f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
+    _pos = 0
     for run_key, row, seed in todo:
+        _pos += 1
         rec = state["runs"].get(run_key)
         if rec and rec.get("status") == "success" and not args.force:
             print(f"[{run_key}] already done (run {rec['run_id']}) — skipping")
@@ -359,7 +394,8 @@ def cmd_run(args) -> None:
                 {k: v for k, v in params.items()
                  if k not in ("srs_path", "mask_path")}, indent=2))
             continue
-        run_id, ok = _run_one(run_key, params)
+        run_id, ok = _run_one(run_key, params,
+                              position=f" ({_pos}/{len(todo)})")
         state["runs"][run_key] = {
             "run_id": run_id,
             "status": "success" if ok else "failed",
@@ -378,6 +414,37 @@ def cmd_run(args) -> None:
 
 def cmd_geometry(args) -> None:
     state = _load_state()
+    if args.bootstrap:
+        # Resolve a block's geometry by running the WCGA here once (0.1° grid)
+        # with a token 8-step simulation — the search IS the expensive part;
+        # the sim after it is negligible. Captures the found WCG into state.
+        blk = args.bootstrap.upper()
+        if blk not in ("A", "B2"):
+            raise SystemExit("--bootstrap takes A or B2")
+        sys_row = (_resolve_system(NTC_HIGH) if blk == "A"
+                   else _resolve_system(NTC_LOW, NTC_LOW_SRS_HINT))
+        params: dict[str, Any] = {"service": "FSS", "run_static_es": False,
+                                  "num_time_steps": 8,
+                                  "wcga_s1503": True, "s1503_step_deg": 0.1,
+                                  "es_antenna_diameter_m": (
+                                      DIAM_HIGH if blk == "A"
+                                      else DIAM_B2_STRATEGY)}
+        params.update(_filing_params(sys_row))
+        print(f"bootstrapping geometry[{blk}] via a 0.1° WCGA on "
+              f"{Path(sys_row['srs_path']).name} (token 8-step sim)...")
+        run_id, ok = _run_one(f"geom-{blk}", params)
+        if not ok:
+            raise SystemExit("bootstrap run failed — see its worker.log")
+        run_dir = REPO / "streamlit_app" / "data" / "runs" / run_id
+        sim = json.loads((run_dir / "sim_data.json").read_text(encoding="utf-8"))
+        w = sim.get("wcg") or {}
+        state["geometry"][blk] = {
+            "es_lat": float(w["es_lat_deg"]),
+            "es_lon": float(w["es_lon_deg"]),
+            "gso_lon": float(w["gso_lon_deg"]),
+            "source": f"bootstrap run {run_id}",
+        }
+        _save_state(state)
     if args.set:
         for spec in args.set:
             blk, vals = spec.split("=", 1)
@@ -581,6 +648,9 @@ def main() -> None:
     g = sub.add_parser("geometry")
     g.add_argument("--set", nargs="*", metavar="BLK=lat,lon,gso")
     g.add_argument("--from-run", nargs="*", metavar="BLK=run_dir")
+    g.add_argument("--bootstrap", default=None, metavar="A|B2",
+                   help="resolve the block's WCG by running the 0.1° WCGA "
+                        "here once (token 8-step sim)")
     r = sub.add_parser("run")
     r.add_argument("--only", nargs="*", help="campaign IDs to run")
     r.add_argument("--group", nargs="*", choices=["A", "B1", "B2"],
