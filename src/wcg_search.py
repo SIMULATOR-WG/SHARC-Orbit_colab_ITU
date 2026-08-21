@@ -443,6 +443,64 @@ def _wcga_pool_worker(args: tuple) -> "_WCGState":
     return _wcgd_calc_at_lat(oe_ref, lat_deg, **common)
 
 
+# Large, call-invariant search inputs for _run_grid_search's batch dispatch
+# (constellation position/velocity + PFD mask), set once per worker instead
+# of being embedded in every batch task — was the IPC-bound refinement-phase
+# bottleneck (batch_size collapses to 1 when total_points <= n_jobs*4, so
+# these were re-pickled once per point instead of once per ~batch_size
+# points). See BACKLOG.md.
+_WCGA_GRID_GLOBALS: dict = {}
+
+
+def _set_wcga_grid_globals(
+    ngso_sat_eci: np.ndarray,
+    ngso_sat_vel_eci: np.ndarray,
+    t_s: float,
+    pfd_mask: PFDMask,
+    es_antenna: EarthStationAntenna,
+    alpha0_deg: float,
+    min_elevation_deg: float,
+    gso_min_elevation_deg: float,
+    pfd_bw_correction_db: float,
+    strict_exclusion_zone: bool,
+) -> None:
+    global _WCGA_GRID_GLOBALS
+    _WCGA_GRID_GLOBALS = dict(
+        ngso_sat_eci=ngso_sat_eci, ngso_sat_vel_eci=ngso_sat_vel_eci, t_s=t_s,
+        pfd_mask=pfd_mask, es_antenna=es_antenna, alpha0_deg=alpha0_deg,
+        min_elevation_deg=min_elevation_deg, gso_min_elevation_deg=gso_min_elevation_deg,
+        pfd_bw_correction_db=pfd_bw_correction_db, strict_exclusion_zone=strict_exclusion_zone,
+    )
+
+
+def _wcga_grid_pool_initializer(
+    numba_threads: int,
+    gmst0_deg: str,
+    main_pid: str,
+    gso_lon_mode: str,
+    grid_globals: dict,
+) -> None:
+    """Pool initializer for _run_grid_search: applies the small-scalar engine
+    globals (see _wcga_pool_initializer) and stashes the batch-invariant
+    search inputs once per worker process."""
+    _wcga_pool_initializer(numba_threads, gmst0_deg, main_pid, gso_lon_mode)
+    global _WCGA_GRID_GLOBALS
+    _WCGA_GRID_GLOBALS = grid_globals
+
+
+def _evaluate_batch_from_globals(points: list[tuple[float, float]]) -> list:
+    """Pool/sequential worker entry point for _run_grid_search: only the
+    batch of points travels per call — everything else comes from
+    _WCGA_GRID_GLOBALS (set once via _set_wcga_grid_globals /
+    _wcga_grid_pool_initializer)."""
+    g = _WCGA_GRID_GLOBALS
+    return _evaluate_batch((
+        points, g["ngso_sat_eci"], g["ngso_sat_vel_eci"], g["t_s"], g["pfd_mask"],
+        g["es_antenna"], g["alpha0_deg"], g["min_elevation_deg"],
+        g["gso_min_elevation_deg"], g["pfd_bw_correction_db"], g["strict_exclusion_zone"],
+    ))
+
+
 # Optional injected executor for the WCGA latitude sweep. When set, it
 # replaces the built-in multiprocessing.Pool so a single heavy WCGA can be
 # fanned out across a cluster. The engine never imports the executor —
@@ -1138,12 +1196,14 @@ def _run_grid_search(
     batches = [points_to_eval[i:i + batch_size] for i in range(0, total_points, batch_size)]
     total_batches = len(batches)
 
-    pool_args = [
-        (batch, ngso_sat_eci, ngso_sat_vel_eci, t_s, pfd_mask, es_antenna,
-         alpha0_deg, min_elevation_deg, gso_min_elevation_deg, pfd_bw_correction_db,
-         strict_exclusion_zone)
-        for batch in batches
-    ]
+    # ngso_sat_eci/vel/pfd_mask/es_antenna etc. are call-invariant across every
+    # batch — stash once (parent process, and again per Pool worker via the
+    # initializer below) instead of re-pickling them into every batch task.
+    _set_wcga_grid_globals(
+        ngso_sat_eci, ngso_sat_vel_eci, t_s, pfd_mask, es_antenna,
+        alpha0_deg, min_elevation_deg, gso_min_elevation_deg, pfd_bw_correction_db,
+        strict_exclusion_zone,
+    )
 
     def _process_batch(batch_res):
         trail.extend(batch_res)
@@ -1190,8 +1250,8 @@ def _run_grid_search(
         )
 
     if n_jobs == 1:
-        for args in pool_args:
-            batch_res = _evaluate_batch(args)
+        for batch in batches:
+            batch_res = _evaluate_batch_from_globals(batch)
             _process_batch(batch_res)
             done_batches += 1
             done_points += len(batch_res)
@@ -1203,15 +1263,16 @@ def _run_grid_search(
         gso_mode = get_gso_longitude_mode()
         with multiprocessing.Pool(
             processes=n_jobs,
-            initializer=_wcga_pool_initializer,
+            initializer=_wcga_grid_pool_initializer,
             initargs=(
                 get_numba_num_threads(),
                 gmst0_str,
                 main_pid_str,
                 gso_mode,
+                _WCGA_GRID_GLOBALS,
             ),
         ) as pool:
-            for batch_res in pool.imap_unordered(_evaluate_batch, pool_args):
+            for batch_res in pool.imap_unordered(_evaluate_batch_from_globals, batches):
                 _process_batch(batch_res)
                 done_batches += 1
                 done_points += len(batch_res)

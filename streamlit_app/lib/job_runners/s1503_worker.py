@@ -25,6 +25,9 @@ params.json fields (optional simulation overrides):
     alpha_bin_deg         — NON-NORMATIVE α sub-bin width inside each declared
                             TSS case. Default 0.0 = the normative declared
                             intervals of Doc 4A/312 p. 110.
+    max_co_freq           — overrides MAX_CO_FREQ (Steps 19-22 cap / Nco) for
+                            all latitudes; 0 = unlimited. Default: from the
+                            filing's sat_oper table.
 
 Outputs (written under result_path):
     sim_data.json         — CCDF, time series, max EPFD, percentiles, WCG,
@@ -78,6 +81,7 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
 
     from src.main import load_from_srs  # type: ignore[import]
     from src.main import run_wcg_downlink  # type: ignore[import]
+    from src.main import apply_max_co_freq_override_to_non_gso  # type: ignore[import]
     from src.exceptions import NoValidGeometry  # type: ignore[import]
     from src.article22_tables import apply_article22_limits_to_config  # type: ignore[import]
     from src.resolution76_tables import apply_resolution76_limits_to_config  # type: ignore[import]
@@ -269,6 +273,27 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             f"alpha_table: {len(_at['min'])} min / {len(_at['max'])} max pairs"
             + (f" from '{_at_file}'" if _at_file else " (source file not recorded)")
         )
+
+    # MAX_CO_FREQ override (S.1503-4 Steps 19-22 cap; also Nco for
+    # reference-vector selection below). None/absent = keep whatever the
+    # filing's sat_oper declares. 0 = unlimited (ignores sat_oper). >=1 forces
+    # a single [-90°, 90°] -> N range for every latitude.
+    _mcf = params.get("max_co_freq")
+    if _mcf is not None:
+        apply_max_co_freq_override_to_non_gso(ngso, int(_mcf))
+
+    # Reference-vector satellite selection (US proposal R23-WP4A-C-0519).
+    # Only written to the config when explicitly enabled so the engine default
+    # (normative MAX_CO_FREQ) is preserved when the key is absent. Hold
+    # duration comes solely from MIN_DURATION (the min_duration_s override
+    # above, or the filing's own sat_oper value) — see
+    # artifacts/WP4A_519_track_duration_consolidation_decision.md — so there
+    # is no separate ref_vec_track_duration_T_s param.
+    if params.get("ref_vec_selection"):
+        sim["ref_vec_selection"] = True
+        sim["ref_vec_az_deg"] = float(params.get("ref_vec_az_deg", 0.0))
+        sim["ref_vec_el_deg"] = float(params.get("ref_vec_el_deg", 90.0))
+        sim["ref_vec_time_window_P_pct"] = float(params.get("ref_vec_time_window_P_pct", 100.0))
 
     # Manual WCG override
     if params.get("wcg_manual") and all(

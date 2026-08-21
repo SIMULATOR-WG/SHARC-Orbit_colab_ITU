@@ -378,8 +378,8 @@ def run_vectorized_grid(
                 vals = epfd_lin_flat[k0:k1]
                 sats = nn[k0:k1]
                 std_items = list(zip(vals[flags].tolist(), sats[flags].tolist()))
-                ovr_items = vals[~flags].tolist()
-                std_epfd, ovr_epfd = _finalize_epfd_after_max_co_freq(
+                ovr_items = list(zip(vals[~flags].tolist(), sats[~flags].tolist()))
+                std_epfd, ovr_epfd, _std_idx, _ovr_idx = _finalize_epfd_after_max_co_freq(
                     std_items, ovr_items, int(max_cf[m]),
                     eng.strict_max_co_freq_total, eng.min_angle_at_es_deg,
                     es_ecef[m], pos,

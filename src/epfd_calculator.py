@@ -60,6 +60,7 @@ from .geometry import (
     set_gso_longitude_mode,
     get_alpha_method,
     set_alpha_method,
+    compute_angular_separation_from_ref_vector,
 )
 from .pfd_mask import PFDMask
 from .antenna import EarthStationAntenna, s1503_or_condition_include
@@ -112,6 +113,38 @@ def _apply_epfd_globals(init: dict) -> None:
     alpha = init.get("alpha_method")
     if alpha:
         set_alpha_method(alpha)
+    shared = init.get("shared")
+    if shared is not None:
+        global _EPFD_SHARED
+        _EPFD_SHARED = shared
+
+
+# Large, call-invariant simulation inputs (constellation, WCG, PFD mask, ES
+# antenna) for the currently-dispatched chunk/window-block sweep. Set once —
+# directly in the parent process (_set_epfd_shared) and once per Pool/executor
+# worker (_apply_epfd_globals, via the "shared" key of the init snapshot) —
+# instead of being embedded in every chunk/block task tuple. Re-pickling
+# those large objects per task (rather than once per worker) was the root
+# cause of the Phase 2/3 OOM crashes on large filings — see BACKLOG.md.
+_EPFD_SHARED: dict = {}
+
+
+def _set_epfd_shared(constellation, wcg, pfd_mask, es_antenna) -> None:
+    global _EPFD_SHARED
+    _EPFD_SHARED = dict(
+        constellation=constellation, wcg=wcg, pfd_mask=pfd_mask, es_antenna=es_antenna,
+    )
+
+
+def _epfd_shared_fields(constellation, wcg, pfd_mask, es_antenna):
+    """Resolves the 4 large call-invariant fields for a chunk/block worker:
+    the values as given when they're real (sequential path, direct/test
+    calls), else from ``_EPFD_SHARED`` when the task carried ``None``
+    placeholders (Pool/executor dispatch)."""
+    if constellation is not None:
+        return constellation, wcg, pfd_mask, es_antenna
+    g = _EPFD_SHARED
+    return g["constellation"], g["wcg"], g["pfd_mask"], g["es_antenna"]
 
 
 def _epfd_pool_initializer(init: dict) -> None:
@@ -148,23 +181,28 @@ def get_epfd_executor():
     return _EPFD_EXECUTOR
 
 
-def _epfd_global_snapshot(numba_threads: int) -> dict:
+def _epfd_global_snapshot(numba_threads: int, shared: dict | None = None) -> dict:
     """Snapshot of the engine global state a worker must re-apply, captured in
     the parent at dispatch time. ``numba_threads`` is parameterised so the
     built-in Pool keeps its computed per-worker thread budget while cluster
-    workers pin it to 1."""
-    return {
+    workers pin it to 1. ``shared``, when given, is the large call-invariant
+    payload (see ``_EPFD_SHARED``) applied once per worker instead of once
+    per task."""
+    snap = {
         "numba_threads": int(numba_threads),
         "gmst0_deg": get_earth_rotation_initial_deg(),
         "gso_mode": get_gso_longitude_mode(),
         "alpha_method": get_alpha_method(),
     }
+    if shared is not None:
+        snap["shared"] = shared
+    return snap
 
 
-def _epfd_executor_init() -> dict:
+def _epfd_executor_init(shared: dict | None = None) -> dict:
     """Snapshot for injected cluster executors: Numba pinned to 1 thread/worker
     (the executor controls task concurrency)."""
-    return _epfd_global_snapshot(1)
+    return _epfd_global_snapshot(1, shared=shared)
 
 
 def _compute_epfd_numba_threads(n_jobs: int) -> int:
@@ -298,7 +336,7 @@ def _select_top_n_elev_random(
     top_n: int,
     n_select: int,
     rng: np.random.Generator,
-) -> list[float]:
+) -> list[tuple[float, int]]:
     """Top-N highest-elevation random selection (Doc 4A/442-E §4.1).
 
     ``standard_items`` are the α₀/ε₀-eligible candidates ``(epfd↓ᵢ, k)``;
@@ -306,7 +344,8 @@ def _select_top_n_elev_random(
     elevation descending, deterministic tie-break by ``k`` ascending — so the
     Top-N set is reproducible *before* the random draw; (3) keep the top
     ``top_n``; (4) draw ``n_select`` distinct satellites at random. Returns
-    their epfd↓ᵢ (linear); the caller sums them (Step 23).
+    the chosen ``(epfd↓ᵢ linear, sat index)`` pairs; the caller sums the
+    values (Step 23) and may use the indices for per-sat diagnostics.
     """
     if not standard_items:
         return []
@@ -323,7 +362,7 @@ def _select_top_n_elev_random(
     else:
         pick = rng.choice(len(pool), size=n_eff, replace=False)
         chosen = [pool[int(i)] for i in pick]
-    return [float(epfd) for epfd, _k in chosen]
+    return [(float(epfd), int(k)) for epfd, k in chosen]
 
 
 def _select_hybrid_rand_he(
@@ -331,7 +370,7 @@ def _select_hybrid_rand_he(
     elev_by_k: dict[int, float],
     n_co: int,
     rng: np.random.Generator,
-) -> list[float]:
+) -> list[tuple[float, int]]:
     """Hybrid random + highest-elevation selection (Doc 4A/493-E §3.1).
 
     "Worst case between the two most common methods." Over the α₀/ε₀-eligible
@@ -344,10 +383,11 @@ def _select_hybrid_rand_he(
       3. union the two sets, de-duplicated by ``k`` (a high sat may also be drawn);
       4. rank the union by epfd↓ descending and keep the top ``n_co``.
 
-    Returns the kept epfd↓ᵢ (linear); the caller sums them (Step 23). More
-    conservative than random-only or HE-only, but bounded above by the full
-    worst-interferer rule (which ranks *all* visible sats, not just this union).
-    The OR branch (Step 22) is disabled for this strategy.
+    Returns the kept ``(epfd↓ᵢ linear, sat index)`` pairs; the caller sums the
+    values (Step 23). More conservative than random-only or HE-only, but
+    bounded above by the full worst-interferer rule (which ranks *all* visible
+    sats, not just this union). The OR branch (Step 22) is disabled for this
+    strategy.
     """
     if not standard_items:
         return []
@@ -373,7 +413,7 @@ def _select_hybrid_rand_he(
         union[int(k)] = float(epfd)
     # Rank by epfd desc (tie-break by k for determinism), keep top n_co.
     ranked = sorted(union.items(), key=lambda kv: (-kv[1], kv[0]))
-    return [float(epfd) for _k, epfd in ranked[:n]]
+    return [(float(epfd), int(k)) for k, epfd in ranked[:n]]
 
 
 def _select_standard_epfd_s1503_steps_20_21(
@@ -382,7 +422,7 @@ def _select_standard_epfd_s1503_steps_20_21(
     min_angle_at_es_deg: float,
     es_ecef: np.ndarray,
     pos_ecef_all: np.ndarray,
-) -> list[float]:
+) -> list[tuple[float, int]]:
     """S.1503-4 §D.5.1.4.1 Steps 19–21 among *standard* contributors (|α| ≥ α₀).
 
     Step 20: pick the standard satellite with the highest ``epfd↓``; Step 23 (sum)
@@ -398,18 +438,23 @@ def _select_standard_epfd_s1503_steps_20_21(
     ``max_co_freq <= 0`` means *no count cap* (Step 19 never stops the loop),
     but the Step 21 angular pruning still applies when
     ``min_angle_at_es_deg > 0``.
+
+    Returns ``(epfd, satellite_index)`` pairs (index into the constellation),
+    so callers that need to know *which* satellites survived selection (e.g.
+    for elevation logging) can recover it — plain-float callers just discard
+    the index.
     """
     if not items:
         return []
     if min_angle_at_es_deg <= 0.0:
         if max_co_freq <= 0:
-            return [float(epfd) for epfd, _k in items]
+            return [(float(epfd), int(k)) for epfd, k in items]
         pool = [(float(epfd), int(k)) for epfd, k in items]
-        out: list[float] = []
+        out: list[tuple[float, int]] = []
         while len(out) < max_co_freq and pool:
             j = max(range(len(pool)), key=lambda i: pool[i][0])
-            epfd, _k = pool.pop(j)
-            out.append(float(epfd))
+            epfd, k = pool.pop(j)
+            out.append((float(epfd), int(k)))
         return out
     pool: list[tuple[float, int]] = [(float(epfd), int(k)) for epfd, k in items]
     selected: list[tuple[float, int]] = []
@@ -425,12 +470,12 @@ def _select_standard_epfd_s1503_steps_20_21(
             if sep + 1e-12 >= min_ang:
                 new_pool.append((epfd, k))
         pool = new_pool
-    return [float(e) for e, _k in selected]
+    return [(float(e), int(k)) for e, k in selected]
 
 
 def _finalize_epfd_after_max_co_freq(
     standard_items: list[tuple[float, int]],
-    override_epfd: list[float],
+    override_items: list[tuple[float, int]],
     max_co_freq: int,
     strict_max_co_freq_total: bool,
     min_angle_at_es_deg: float,
@@ -439,7 +484,6 @@ def _finalize_epfd_after_max_co_freq(
     *,
     system_id_all: np.ndarray | None = None,
     max_co_freq_by_system: dict[int, int] | None = None,
-    override_items: list[tuple[float, int]] | None = None,
     per_system_out: dict[int, list] | None = None,
     selection_config: "SelectionConfig | None" = None,
     step_index: int = 0,
@@ -448,7 +492,7 @@ def _finalize_epfd_after_max_co_freq(
     alpha_tss: "object | None" = None,
     t_s: float = 0.0,
     alpha_step_weight: float = 1.0,
-) -> tuple[list[float], list[float]]:
+) -> tuple[list[float], list[float], list[int], list[int]]:
     """Steps 19–22 §D5.1.4.1: standard selection (20–21), then OR branch (22).
 
     **Non-normative strategies (``selection_config``):** when
@@ -491,6 +535,11 @@ def _finalize_epfd_after_max_co_freq(
     downstream while ``per_system_out`` already counted them all — the per-system
     split may then slightly over-count for such steps. The joint result is
     unaffected either way.
+
+    Returns ``(standard_epfd, override_epfd, standard_idx, override_idx)`` —
+    the value lists are the historical return shape; the index lists are
+    aligned 1:1 with them (same order) so callers that need to know which
+    satellites survived selection can zip them back together.
     """
     # --- Non-normative strategy dispatch (fixed- or dual-step, OR disabled) ---
     # Dispatched BEFORE the per-system OR attribution below: the strategies
@@ -501,7 +550,7 @@ def _finalize_epfd_after_max_co_freq(
         if max_co_freq and max_co_freq > 0:
             n_sel = min(n_sel, int(max_co_freq))  # never exceed the co-freq ceiling
         rng = _rng_for_step(selection_config.seed, step_index)
-        selected = _select_top_n_elev_random(
+        chosen = _select_top_n_elev_random(
             standard_items,
             elev_by_k or {},
             selection_config.top_n,
@@ -509,20 +558,20 @@ def _finalize_epfd_after_max_co_freq(
             rng,
         )
         # OR branch (Step 22) disabled for this strategy — see SelectionConfig.
-        return selected, []
+        return ([v for v, _k in chosen], [], [k for _v, k in chosen], [])
 
     if selection_config is not None and selection_config.strategy == "hybrid_rand_he":
         # Nco = number of co-frequency satellites (MAX_CO_FREQ); paper §3.1.
         n_co = int(max_co_freq) if (max_co_freq and max_co_freq > 0) else 1
         rng = _rng_for_step(selection_config.seed, step_index)
-        selected = _select_hybrid_rand_he(
+        chosen = _select_hybrid_rand_he(
             standard_items,
             elev_by_k or {},
             n_co,
             rng,
         )
         # OR branch (Step 22) disabled for this strategy.
-        return selected, []
+        return ([v for v, _k in chosen], [], [k for _v, k in chosen], [])
 
     if selection_config is not None and selection_config.strategy == "alpha_table":
         # Alpha table (Doc 4A/312): TSS quota selection. Unlike the two papers
@@ -548,11 +597,18 @@ def _finalize_epfd_after_max_co_freq(
                     + 1e-12 >= _ang
                 ]
 
+        sel_idx: list[int] = []
         selected = alpha_tss.select(
             standard_items, alpha_by_k or {}, float(t_s), prune,
             weight=float(alpha_step_weight),
+            selected_idx_out=sel_idx,
         )
-        return selected, override_epfd
+        return (
+            selected,
+            [v for v, _k in override_items],
+            sel_idx,
+            [k for _v, k in override_items],
+        )
 
     if per_system_out is not None and system_id_all is not None and override_items:
         # Step 22 (OR) values are kept in full in the normative path, so they
@@ -569,45 +625,54 @@ def _finalize_epfd_after_max_co_freq(
         for epfd, k in standard_items:
             sid = int(system_id_all[k])
             by_sys.setdefault(sid, []).append((float(epfd), int(k)))
-        standard_epfd = []
+        standard_pairs: list[tuple[float, int]] = []
         for sid, group in by_sys.items():
             n_sys = int(max_co_freq_by_system.get(sid, max_co_freq))
-            selected = _select_standard_epfd_s1503_steps_20_21(
+            sel_pairs = _select_standard_epfd_s1503_steps_20_21(
                 group, n_sys, min_angle_at_es_deg, es_ecef, pos_ecef_all,
             )
-            standard_epfd.extend(selected)
+            standard_pairs.extend(sel_pairs)
             if per_system_out is not None:
                 # The group IS one system, so every selected value belongs to
                 # `sid` — no index round-trip needed.
                 slot = per_system_out.setdefault(sid, [0.0, 0])
-                slot[0] += float(sum(selected))
-                slot[1] += len(selected)
+                slot[0] += float(sum(v for v, _k in sel_pairs))
+                slot[1] += len(sel_pairs)
         # OR (Step 22) is kept intact (normative). strict_total ignored.
-        return standard_epfd, list(override_epfd)
+        standard_epfd = [v for v, _k in standard_pairs]
+        standard_idx = [k for _v, k in standard_pairs]
+        override_epfd = [v for v, _k in override_items]
+        override_idx = [k for _v, k in override_items]
+        return standard_epfd, override_epfd, standard_idx, override_idx
 
-    standard_epfd = _select_standard_epfd_s1503_steps_20_21(
+    standard_pairs = _select_standard_epfd_s1503_steps_20_21(
         standard_items,
         max_co_freq,
         min_angle_at_es_deg,
         es_ecef,
         pos_ecef_all,
     )
-    ov = list(override_epfd)
+    standard_epfd = [v for v, _k in standard_pairs]
+    standard_idx = [k for _v, k in standard_pairs]
+    ov_epfd = [v for v, _k in override_items]
+    ov_idx = [k for _v, k in override_items]
     if max_co_freq <= 0:
-        return standard_epfd, ov
+        return standard_epfd, ov_epfd, standard_idx, ov_idx
     if strict_max_co_freq_total:
-        combined = [(float(v), False) for v in standard_epfd] + [
-            (float(v), True) for v in ov
+        combined = [(float(v), False, k) for v, k in standard_pairs] + [
+            (float(v), True, k) for v, k in override_items
         ]
         if len(combined) <= max_co_freq:
-            return standard_epfd, ov
+            return standard_epfd, ov_epfd, standard_idx, ov_idx
         combined.sort(key=lambda item: item[0], reverse=True)
         selected = combined[:max_co_freq]
         return (
-            [value for value, is_ov in selected if not is_ov],
-            [value for value, is_ov in selected if is_ov],
+            [value for value, is_ov, _k in selected if not is_ov],
+            [value for value, is_ov, _k in selected if is_ov],
+            [k for _value, is_ov, k in selected if not is_ov],
+            [k for _value, is_ov, k in selected if is_ov],
         )
-    return standard_epfd, ov
+    return standard_epfd, ov_epfd, standard_idx, ov_idx
 
 
 def _accumulate_epfd_visible_satellites(
@@ -647,6 +712,7 @@ def _accumulate_epfd_visible_satellites(
     alpha_step_weight: float = 1.0,
     per_sat_out: dict | None = None,
     per_system_out: dict[int, list] | None = None,
+    contributing_idx_out: list[int] | None = None,
 ) -> tuple[list[float], list[float], float, bool]:
     """Returns (standard_linear, override_linear, min_alpha_deg, any_critical_gain).
 
@@ -654,6 +720,12 @@ def _accumulate_epfd_visible_satellites(
     :func:`_finalize_epfd_after_max_co_freq` — filled with this step's linear
     EPFD per ``system_id``, so a joint run can accumulate per-system CCDFs in
     the same pass. Inert unless ``system_id_all`` is also given.
+
+    ``contributing_idx_out``: when a list is passed, it is extended with the
+    global satellite indices of every value in the returned
+    ``standard_linear + override_linear`` (same order), i.e. the satellites
+    that survived Steps 19–22 selection. Purely additive — does not change
+    selection behavior or the function's own return values.
 
     ``per_sat_out`` (track-duration collect mode, S.1503-4 §D5.1.4.2): when a
     dict is passed, the per-step MAX_CO_FREQ selection (Steps 19–22 of
@@ -683,8 +755,6 @@ def _accumulate_epfd_visible_satellites(
       - ``is_override = ¬is_standard ∧ GRX(φ) > min(Gmax−30, GRX(α₀))``
         → enters Step 22, without double counting.
     """
-    override_epfd: list[float] = []
-
     if per_sat_out is not None:
         per_sat_out["idx"] = np.empty(0, dtype=np.int64)
         per_sat_out["epfd_lin"] = np.empty(0, dtype=np.float64)
@@ -785,7 +855,7 @@ def _accumulate_epfd_visible_satellites(
                 override[cand] = g_rel_arr[cand] > np.minimum(-30.0, g_rel_at_a0)
         eligible = is_standard_arr | override
         if not np.any(eligible):
-            return [], override_epfd, min_alpha, any_critical_gain
+            return [], [], min_alpha, any_critical_gain
 
         elig_j = np.nonzero(eligible)[0]
         alpha_e = alpha_arr[elig_j]
@@ -858,17 +928,11 @@ def _accumulate_epfd_visible_satellites(
             for j in range(elig_j.size)
             if std_mask[j]
         ]
-        override_epfd = epfd_lin[~std_mask].tolist()
-        # Same values as `override_epfd`, paired with their satellite index —
-        # built only when the per-system split is requested (method_3).
-        override_items = (
-            [
-                (float(epfd_lin[j]), int(idx_k[j]))
-                for j in range(elig_j.size)
-                if not std_mask[j]
-            ]
-            if per_system_out is not None else None
-        )
+        override_items = [
+            (float(epfd_lin[j]), int(idx_k[j]))
+            for j in range(elig_j.size)
+            if not std_mask[j]
+        ]
 
         # Elevation-based strategies need elevation per standard candidate.
         elev_by_k = None
@@ -893,9 +957,9 @@ def _accumulate_epfd_visible_satellites(
                 if std_mask[j]
             }
 
-        standard_epfd, override_epfd = _finalize_epfd_after_max_co_freq(
+        standard_epfd, override_epfd, standard_idx, override_idx = _finalize_epfd_after_max_co_freq(
             standard_items,
-            override_epfd,
+            override_items,
             max_co_freq,
             strict_max_co_freq_total,
             min_angle_at_es_deg,
@@ -903,7 +967,6 @@ def _accumulate_epfd_visible_satellites(
             pos_ecef_all,
             system_id_all=system_id_all,
             max_co_freq_by_system=max_co_freq_by_system,
-            override_items=override_items,
             per_system_out=per_system_out,
             selection_config=selection_config,
             step_index=step_index,
@@ -913,6 +976,9 @@ def _accumulate_epfd_visible_satellites(
             t_s=t_s,
             alpha_step_weight=alpha_step_weight,
         )
+        if contributing_idx_out is not None:
+            contributing_idx_out.extend(standard_idx)
+            contributing_idx_out.extend(override_idx)
 
         return standard_epfd, override_epfd, min_alpha, any_critical_gain
 
@@ -920,9 +986,7 @@ def _accumulate_epfd_visible_satellites(
     min_alpha = 180.0
     any_critical_gain = False
     standard_items: list[tuple[float, int]] = []
-    # Step 22 (OR) values with their satellite index — only collected when the
-    # per-system split is requested (method_3); mirrors `override_epfd`.
-    _override_items_scalar: list[tuple[float, int]] = []
+    override_items: list[tuple[float, int]] = []
     _need_elev = (
         selection_config is not None
         and selection_config.strategy in ("top_n_elev_random", "hybrid_rand_he")
@@ -1020,9 +1084,7 @@ def _accumulate_epfd_visible_satellites(
             if alpha_by_k is not None:
                 alpha_by_k[int(k)] = float(abs(alpha))
         else:
-            override_epfd.append(epfd_i)
-            if per_system_out is not None:
-                _override_items_scalar.append((float(epfd_i), int(k)))
+            override_items.append((epfd_i, int(k)))
 
     if per_sat_out is not None:
         per_sat_out["idx"] = np.asarray(_ps_idx, dtype=np.int64)
@@ -1031,9 +1093,9 @@ def _accumulate_epfd_visible_satellites(
         per_sat_out["orx"] = np.asarray(_ps_orx, dtype=bool)
         return [], [], min_alpha, any_critical_gain
 
-    standard_epfd, override_epfd = _finalize_epfd_after_max_co_freq(
+    standard_epfd, override_epfd, standard_idx, override_idx = _finalize_epfd_after_max_co_freq(
         standard_items,
-        override_epfd,
+        override_items,
         max_co_freq,
         strict_max_co_freq_total,
         min_angle_at_es_deg,
@@ -1041,7 +1103,6 @@ def _accumulate_epfd_visible_satellites(
         pos_ecef_all,
         system_id_all=system_id_all,
         max_co_freq_by_system=max_co_freq_by_system,
-        override_items=(_override_items_scalar if per_system_out is not None else None),
         per_system_out=per_system_out,
         selection_config=selection_config,
         step_index=step_index,
@@ -1049,7 +1110,11 @@ def _accumulate_epfd_visible_satellites(
         alpha_by_k=alpha_by_k,
         alpha_tss=alpha_tss,
         t_s=t_s,
+        alpha_step_weight=alpha_step_weight,
     )
+    if contributing_idx_out is not None:
+        contributing_idx_out.extend(standard_idx)
+        contributing_idx_out.extend(override_idx)
 
     return standard_epfd, override_epfd, min_alpha, any_critical_gain
 
@@ -1126,7 +1191,7 @@ def _epfd_aggregate_dBW_at_instant_scalar_fallback(
             return -999.0
     max_co_freq = _resolve_max_co_freq(es_lat, max_co_freq_by_lat or [])
     standard_items: list[tuple[float, int]] = []
-    override_epfd: list[float] = []
+    override_items: list[tuple[float, int]] = []
 
     pos_ecef_all, vel_ecef_all = propagate_and_to_ecef_batch(
         constellation, t_s,
@@ -1194,11 +1259,11 @@ def _epfd_aggregate_dBW_at_instant_scalar_fallback(
         if is_standard:
             standard_items.append((epfd_i, k))
         else:
-            override_epfd.append(epfd_i)
+            override_items.append((epfd_i, k))
 
-    standard_epfd, override_epfd = _finalize_epfd_after_max_co_freq(
+    standard_epfd, override_epfd, _standard_idx, _override_idx = _finalize_epfd_after_max_co_freq(
         standard_items,
-        override_epfd,
+        override_items,
         max_co_freq,
         strict_max_co_freq_total,
         min_angle_at_es_deg,
@@ -1589,6 +1654,9 @@ def _simulate_chunk(args):
          min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg) = args
         keep_full_history = False
 
+    constellation, wcg, pfd_mask, es_antenna = _epfd_shared_fields(
+        constellation, wcg, pfd_mask, es_antenna)
+
     acc = EPFDStreamAccumulator()
     results: list[EPFDTimeStepResult] | None = [] if keep_full_history else None
     t_s = t_start
@@ -1668,6 +1736,7 @@ def _simulate_chunk(args):
         ))
 
         per_system_step: dict[int, list] | None = {} if all_sids is not None else None
+        _contrib_idx: list[int] = []
         standard_epfd, override_epfd, min_alpha, _ = _accumulate_epfd_visible_satellites(
             visible_idx=visible_idx,
             pos_ecef_all=pos_ecef_all,
@@ -1702,6 +1771,7 @@ def _simulate_chunk(args):
             per_system_out=per_system_step,
             selection_config=selection_config,
             step_index=_global_step,
+            contributing_idx_out=_contrib_idx,
         )
 
         epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -1710,6 +1780,7 @@ def _simulate_chunk(args):
         epfd_agg_db = (
             10.0 * math.log10(epfd_sum_linear) if epfd_sum_linear > 0 else -999.0
         )
+        _contrib_idx_arr = np.asarray(_contrib_idx, dtype=np.int64)
         acc.add(
             time_s=t_s,
             epfd_db=epfd_agg_db,
@@ -1719,6 +1790,8 @@ def _simulate_chunk(args):
             num_contributing_sats=num_contributing,
             min_alpha_deg=min_alpha,
             is_fine=True,  # fixed step: uniform Δt (no coarse)
+            contrib_sat_idx=_contrib_idx_arr,
+            contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
         )
         if per_system_step is not None:
             _acc_add_per_system(
@@ -1790,6 +1863,9 @@ def _simulate_chunk_dual_ts(args):
          max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
          min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg) = args
         keep_full_history = False
+
+    constellation, wcg, pfd_mask, es_antenna = _epfd_shared_fields(
+        constellation, wcg, pfd_mask, es_antenna)
 
     acc = EPFDStreamAccumulator()
     results: list[EPFDTimeStepResult] | None = [] if keep_full_history else None
@@ -1879,6 +1955,7 @@ def _simulate_chunk_dual_ts(args):
                 visible_idx = np.array([], dtype=np.int64)
 
         per_system_step: dict[int, list] | None = {} if all_sids is not None else None
+        _contrib_idx: list[int] = []
         standard_epfd, override_epfd, min_alpha, any_critical_gain = (
             _accumulate_epfd_visible_satellites(
                 visible_idx=visible_idx,
@@ -1910,6 +1987,7 @@ def _simulate_chunk_dual_ts(args):
                 min_elevation_deg_all=min_el_all,
                 alpha0_deg_all=alpha0_all,
                 per_system_out=per_system_step,
+                contributing_idx_out=_contrib_idx,
             )
         )
 
@@ -1931,6 +2009,7 @@ def _simulate_chunk_dual_ts(args):
                        else math.sin(math.radians(min_elevation_deg)))
         ))
         num_contributing = len(standard_epfd) + len(override_epfd)
+        _contrib_idx_arr = np.asarray(_contrib_idx, dtype=np.int64)
         acc.add(
             time_s=t_s,
             epfd_db=epfd_agg_db,
@@ -1940,6 +2019,8 @@ def _simulate_chunk_dual_ts(args):
             num_contributing_sats=num_contributing,
             min_alpha_deg=min_alpha,
             is_fine=(dt <= dual_ts_fine_s + 1e-12),
+            contrib_sat_idx=_contrib_idx_arr,
+            contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
         )
         if per_system_step is not None:
             # Same clamped duration as the joint add above, so per-system
@@ -1985,6 +2066,9 @@ def _simulate_chunk_multi_es(args):
          max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
          min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg) = args
         keep_full_history = False
+
+    constellation, wcgs, pfd_mask, es_antenna = _epfd_shared_fields(
+        constellation, wcgs, pfd_mask, es_antenna)
 
     n_wcg = len(wcgs)
     accs: list[EPFDStreamAccumulator] = [EPFDStreamAccumulator() for _ in range(n_wcg)]
@@ -2061,6 +2145,7 @@ def _simulate_chunk_multi_es(args):
 
             num_visible = int(np.count_nonzero(sin_el >= sin_min_el))
 
+            _contrib_idx: list[int] = []
             standard_epfd, override_epfd, min_alpha, _ = _accumulate_epfd_visible_satellites(
                 visible_idx=visible_idx,
                 pos_ecef_all=pos_ecef_all,
@@ -2088,6 +2173,7 @@ def _simulate_chunk_multi_es(args):
                 min_angle_at_es_deg=min_angle_at_es_deg,
                 min_elevation_deg=min_elevation_deg,
                 sin_el_full=sin_el,
+                contributing_idx_out=_contrib_idx,
             )
 
             epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -2096,6 +2182,7 @@ def _simulate_chunk_multi_es(args):
             epfd_agg_db = (
                 10.0 * math.log10(epfd_sum_linear) if epfd_sum_linear > 0 else -999.0
             )
+            _contrib_idx_arr = np.asarray(_contrib_idx, dtype=np.int64)
             accs[i].add(
                 time_s=t_s,
                 epfd_db=epfd_agg_db,
@@ -2105,6 +2192,8 @@ def _simulate_chunk_multi_es(args):
                 num_contributing_sats=num_contributing,
                 min_alpha_deg=min_alpha,
                 is_fine=True,  # fixed step (multi-ES): uniform Δt
+                contrib_sat_idx=_contrib_idx_arr,
+                contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
             )
             if results_by_wcg[i] is not None:
                 results_by_wcg[i].append(EPFDTimeStepResult(
@@ -2120,6 +2209,461 @@ def _simulate_chunk_multi_es(args):
         t_s += tstep_s
 
     return {"acc": accs, "ts": results_by_wcg}
+
+
+# =====================================================================
+#  Reference-vector satellite selection (US proposal R23-WP4A-C-0519)
+# =====================================================================
+
+def _get_lowest_avg_ref_vec_separation(
+    constellation: list,
+    t_s: float,
+    tstep_s: float,
+    T_steps: int,
+    M: int,
+    es_ecef: np.ndarray,
+    es_lat_deg: float,
+    es_lon_deg: float,
+    sin_min_el: float,
+    alpha0_deg: float,
+    ref_az_deg: float,
+    ref_el_deg: float,
+    max_co_freq: int,
+    wcg_ref_sat_idx: int,
+    raan_dot_artificial_rad_s: float,
+    raan_dot_override_rad_s: float | None,
+    wdelta_deg: float,
+    t_run_s: float,
+    _prop_cache=None,
+) -> list[int]:
+    """Select up to *max_co_freq* satellites closest to the reference vector.
+
+    Implements the GetLowestAvgRefVecSeparation algorithm from the US proposal
+    R23-WP4A-C-0519 (replacing S.1503-4 Steps 19–21 for the reference-vector
+    selection mode):
+
+    1. Propagate the constellation at T_steps future time steps.
+    2. Keep only satellites eligible (ε ≥ ε₀ AND α > α₀) at ALL future steps.
+    3. Compute angular separation from the reference vector at each future step.
+    4. Keep the M largest (worst) samples per satellite, average them.
+    5. Sort by ascending average separation; return the top *max_co_freq* indices.
+
+    The satellite that originated the WCG (``wcg_ref_sat_idx``) is always
+    included in the result if eligible, consuming one of the *max_co_freq* slots.
+    """
+    N = len(constellation)
+    if N == 0 or T_steps <= 0 or max_co_freq <= 0:
+        return []
+
+    M = max(1, min(M, T_steps))
+
+    # Compute ENU rotation matrix from ES lat/lon (same convention as _simulate_chunk)
+    lat_r = math.radians(es_lat_deg)
+    lon_r = math.radians(es_lon_deg)
+    sl, cl = math.sin(lat_r), math.cos(lat_r)
+    so, co = math.sin(lon_r), math.cos(lon_r)
+    R_enu = np.array([
+        [-so,        co,       0.0],
+        [-sl * co,  -sl * so,  cl ],
+        [ cl * co,   cl * so,  sl ],
+    ])
+
+    # Propagate constellation at T_steps future times and collect per-step data.
+    # sep_matrix[k, s] = angular separation of satellite k at step s (degrees)
+    # eligible[k] = True only if ε ≥ ε₀ AND α > α₀ at ALL future steps
+    sep_matrix = np.full((N, T_steps), 180.0, dtype=np.float64)
+    eligible = np.ones(N, dtype=bool)
+
+    for s in range(T_steps):
+        t_future = t_s + s * tstep_s
+        pos_future, _ = propagate_and_to_ecef_batch(
+            constellation, t_future,
+            raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
+            raan_dot_override_rad_s=raan_dot_override_rad_s,
+            _cache=_prop_cache,
+            wdelta_deg=wdelta_deg,
+            t_run_s=t_run_s,
+        )
+
+        # Elevation filter: sin_el = ENU_z / range
+        diff = pos_future - es_ecef
+        enu = (R_enu @ diff.T).T
+        ranges = np.linalg.norm(diff, axis=1)
+        ranges = np.maximum(ranges, 1e-15)
+        sin_el = enu[:, 2] / ranges
+        el_ok = sin_el >= sin_min_el
+
+        # Alpha filter: use the fast batch function
+        alpha_arr, _ = compute_alpha_and_optimal_gso_fixed_es_batch(
+            es_ecef, pos_future, es_lat_deg, es_lon_deg, step_deg=1.0,
+        )
+        alpha_ok = np.abs(alpha_arr) > alpha0_deg
+
+        # A satellite is eligible only if it passes BOTH criteria at every step
+        eligible &= el_ok & alpha_ok
+
+        # Angular separation from reference vector at this future step
+        sep = compute_angular_separation_from_ref_vector(
+            es_ecef, pos_future, es_lat_deg, es_lon_deg, ref_az_deg, ref_el_deg,
+        )
+        sep_matrix[:, s] = sep
+
+    # For ineligible satellites, set separation to infinity so they sort last
+    sep_matrix[~eligible] = np.inf
+
+    # Average of the M worst (largest) separation samples per satellite
+    sep_sorted = np.sort(sep_matrix, axis=1)[:, ::-1]  # descending per row
+    avg_sep = np.mean(sep_sorted[:, :M], axis=1)
+
+    # Force wcg_ref_sat_idx ineligibility to inf if truly ineligible
+    if not eligible[wcg_ref_sat_idx]:
+        avg_sep[wcg_ref_sat_idx] = np.inf
+
+    # Build ranked list: wcg_ref_sat_idx first (if eligible), then fill remaining slots
+    eligible_any = eligible.copy()
+    ranked = list(np.argsort(avg_sep))
+
+    result: list[int] = []
+    ref_eligible = bool(eligible_any[wcg_ref_sat_idx])
+    if ref_eligible:
+        result.append(int(wcg_ref_sat_idx))
+
+    for idx in ranked:
+        if len(result) >= max_co_freq:
+            break
+        if int(idx) == wcg_ref_sat_idx:
+            continue
+        if avg_sep[idx] < np.inf:
+            result.append(int(idx))
+
+    return result
+
+
+def _compute_epfd_for_selected_sats(
+    selected_idx: list[int],
+    pos_ecef_all: np.ndarray,
+    vel_ecef_all: np.ndarray,
+    es_ecef: np.ndarray,
+    es_lat_deg: float,
+    es_lon_deg: float,
+    gso_ecef: np.ndarray,
+    pfd_mask: PFDMask,
+    es_antenna: EarthStationAntenna,
+    pfd_bw_correction_db: float,
+    t_s: float,
+) -> tuple[float, float, int]:
+    """Compute aggregate EPFD↓ for a pre-selected, fixed set of satellites.
+
+    This is used when reference-vector selection is active: the satellite set was
+    chosen by ``_get_lowest_avg_ref_vec_separation`` and is held for T seconds.
+    There is no eligibility re-check, no MAX_CO_FREQ cap, and no OR condition —
+    the selection is already the operator's complete policy choice.
+
+    Returns ``(epfd_dBW, min_alpha_deg, num_contributing)``.
+    """
+    if not selected_idx:
+        return -999.0, 180.0, 0
+
+    epfd_sum = 0.0
+    min_alpha = 180.0
+    n_contrib = 0
+
+    for k in selected_idx:
+        pos_ecef = pos_ecef_all[k]
+        vel_ecef = vel_ecef_all[k]
+
+        alpha = compute_alpha_angle_fast_components(
+            es_x=float(es_ecef[0]),
+            es_y=float(es_ecef[1]),
+            es_z=float(es_ecef[2]),
+            ng_x=float(pos_ecef[0]),
+            ng_y=float(pos_ecef[1]),
+            ng_z=float(pos_ecef[2]),
+            es_lat_deg=es_lat_deg,
+            es_lon_deg=es_lon_deg,
+        )
+        if abs(alpha) < abs(min_alpha):
+            min_alpha = alpha
+
+        offaxis = compute_offaxis_angle(es_ecef, pos_ecef, gso_ecef)
+        theta_planar = None
+        if es_antenna.requires_planar_angle:
+            _, theta_planar = compute_offaxis_and_planar_angle(
+                es_ecef, pos_ecef, gso_ecef, es_lat_deg, es_lon_deg,
+            )
+
+        subsat_lat, subsat_lon, _ = ecef_to_lla(pos_ecef)
+        pfd_db = _compute_pfd_3d(
+            pfd_mask=pfd_mask,
+            alpha_deg=alpha,
+            ngso_sat_eci=pos_ecef,
+            ngso_sat_vel_eci=vel_ecef,
+            es_lon_deg=es_lon_deg,
+            t_s=t_s,
+            es_lat_deg=es_lat_deg,
+            gso_ecef=gso_ecef,
+            pfd_bw_correction_db=pfd_bw_correction_db,
+            ngso_sat_ecef=pos_ecef,
+            es_ecef_cached=es_ecef,
+            subsat_lat_deg=subsat_lat,
+            subsat_lon_deg=subsat_lon,
+            sat_local_frame=None,
+            sat_idx=int(k),
+        )
+        epfd_i = 10.0 ** (pfd_db / 10.0) * es_antenna.relative_gain_linear(offaxis, theta_planar)
+        epfd_sum += epfd_i
+        n_contrib += 1
+
+    epfd_db = 10.0 * math.log10(epfd_sum) if epfd_sum > 0.0 else -999.0
+    return epfd_db, min_alpha, n_contrib
+
+
+def _simulate_ref_vec_window_block(args):
+    """Chunk worker for reference-vector selection (US proposal R23-WP4A-C-0519),
+    parallel over blocks of whole hold-windows sized from MIN_DURATION/N_SW.
+
+    Each hold-window is self-contained: ``_get_lowest_avg_ref_vec_separation``
+    is a pure function of the window's own start time (no dependency on any
+    prior window's selection), so a block boundary landing on a window
+    boundary needs no halo/shared state — the same guarantee
+    ``_simulate_window_block`` already relies on for the worst-case §D5.1.4.2
+    variant. Returns ``{"acc": EPFDStreamAccumulator}`` — a single timeline,
+    not per-window-set stats, since reference-vector mode never uses the
+    N_TW sliding-window-set envelope (see
+    ``artifacts/WP4A_519_track_duration_consolidation_decision.md``).
+    """
+    (blk_win_start, blk_win_count, windows, constellation, wcg, pfd_mask,
+     es_antenna, alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+     ref_az_deg, ref_el_deg, ref_vec_time_window_P_pct, wcg_ref_sat_idx,
+     raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+     max_co_freq_by_lat, wdelta_deg, t_run_s) = args
+
+    constellation, wcg, pfd_mask, es_antenna = _epfd_shared_fields(
+        constellation, wcg, pfd_mask, es_antenna)
+
+    T_steps = windows.n_sw
+    t_fine = windows.t_fine_s
+    M = max(1, math.floor(T_steps * ref_vec_time_window_P_pct / 100.0))
+
+    es_lat = wcg.es_lat_deg
+    es_lon = wcg.es_lon_deg
+    gso_lon = wcg.gso_lon_deg
+    es_ecef = _es_ecef_from_wcg(wcg)
+
+    lat_r = math.radians(es_lat)
+    lon_r = math.radians(es_lon)
+    sl, cl = math.sin(lat_r), math.cos(lat_r)
+    so, co = math.sin(lon_r), math.cos(lon_r)
+    R_enu = np.array([
+        [-so,        co,       0.0],
+        [-sl * co,  -sl * so,  cl ],
+        [ cl * co,   cl * so,  sl ],
+    ])
+    sin_min_el = math.sin(math.radians(min_elevation_deg))
+    max_co_freq = _resolve_max_co_freq(es_lat, max_co_freq_by_lat or [])
+
+    _prop_cache = build_constellation_cache(
+        constellation, raan_dot_override_rad_s=raan_dot_override_rad_s,
+    )
+
+    acc = EPFDStreamAccumulator()
+    n_steps_total = windows.n_steps_stats
+
+    for win_idx in range(blk_win_start, blk_win_start + blk_win_count):
+        window_t0 = win_idx * T_steps * t_fine
+        selected_idx = _get_lowest_avg_ref_vec_separation(
+            constellation=constellation,
+            t_s=window_t0,
+            tstep_s=t_fine,
+            T_steps=T_steps,
+            M=M,
+            es_ecef=es_ecef,
+            es_lat_deg=es_lat,
+            es_lon_deg=es_lon,
+            sin_min_el=sin_min_el,
+            alpha0_deg=alpha0_deg,
+            ref_az_deg=ref_az_deg,
+            ref_el_deg=ref_el_deg,
+            max_co_freq=max_co_freq,
+            wcg_ref_sat_idx=wcg_ref_sat_idx,
+            raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
+            raan_dot_override_rad_s=raan_dot_override_rad_s,
+            wdelta_deg=wdelta_deg,
+            t_run_s=t_run_s,
+            _prop_cache=_prop_cache,
+        )
+        selected_arr = np.asarray(selected_idx, dtype=np.int64)
+
+        for s in range(T_steps):
+            g = win_idx * T_steps + s
+            if g >= n_steps_total:
+                break
+            t_s = g * t_fine
+            gso_ecef = gso_position_ecef(gso_lon, t_s)
+            pos_ecef_all, vel_ecef_all = propagate_and_to_ecef_batch(
+                constellation, t_s,
+                raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
+                raan_dot_override_rad_s=raan_dot_override_rad_s,
+                _cache=_prop_cache,
+                wdelta_deg=wdelta_deg,
+                t_run_s=t_run_s,
+            )
+            diff_all = pos_ecef_all - es_ecef
+            enu_all = (R_enu @ diff_all.T).T
+            ranges = np.linalg.norm(diff_all, axis=1)
+            sin_el = np.where(ranges > 1e-6, enu_all[:, 2] / ranges, -1.0)
+            num_horizon = int(np.count_nonzero(sin_el >= 0.0))
+            num_visible = int(np.count_nonzero(sin_el >= sin_min_el))
+
+            epfd_db, min_alpha, num_contrib = _compute_epfd_for_selected_sats(
+                selected_idx=selected_idx,
+                pos_ecef_all=pos_ecef_all,
+                vel_ecef_all=vel_ecef_all,
+                es_ecef=es_ecef,
+                es_lat_deg=es_lat,
+                es_lon_deg=es_lon,
+                gso_ecef=gso_ecef,
+                pfd_mask=pfd_mask,
+                es_antenna=es_antenna,
+                pfd_bw_correction_db=pfd_bw_correction_db,
+                t_s=t_s,
+            )
+            acc.add(
+                time_s=t_s,
+                epfd_db=epfd_db,
+                duration_s=t_fine,
+                num_horizon_sats=num_horizon,
+                num_visible_sats=num_visible,
+                num_contributing_sats=num_contrib,
+                min_alpha_deg=min_alpha,
+                is_fine=True,
+                contrib_sat_idx=selected_arr,
+                contrib_elev_deg=np.degrees(np.arcsin(
+                    np.clip(sin_el[selected_arr], -1.0, 1.0))),
+            )
+
+    return {"acc": acc}
+
+
+def run_epfd_simulation_ref_vec(
+    constellation: list[OrbitalElements],
+    wcg: WCGResult,
+    pfd_mask: PFDMask,
+    es_antenna: EarthStationAntenna,
+    alpha0_deg: float,
+    min_elevation_deg: float,
+    windows: TrackDurationWindows,
+    n_jobs: int = -1,
+    pfd_bw_correction_db: float = 0.0,
+    raan_dot_artificial_rad_s: float = 0.0,
+    raan_dot_override_rad_s: float | None = None,
+    max_co_freq_by_lat: list | None = None,
+    wdelta_deg: float = 0.0,
+    t_run_s: float = 0.0,
+    ref_vec_az_deg: float = 0.0,
+    ref_vec_el_deg: float = 90.0,
+    ref_vec_time_window_P_pct: float = 100.0,
+    wcg_ref_sat_idx: int = 0,
+) -> EPFDSimulationResult:
+    """EPFD↓ with reference-vector satellite selection (US proposal
+    R23-WP4A-C-0519), sharing the §D5.1.4.2 ``MIN_DURATION``/``N_SW``
+    windowing machinery with ``run_epfd_simulation_windowed`` as the sole
+    hold-duration source — see
+    ``artifacts/WP4A_519_track_duration_consolidation_decision.md``.
+
+    Unlike the worst-case §D5.1.4.2 variant: no Step-22 OR/sidelobe branch
+    (the reference-vector selection is the operator's complete policy — see
+    ``_compute_epfd_for_selected_sats``), and no N_TW sliding-window-set
+    envelope (``windows`` must have ``n_tw == 1``; build it via
+    ``compute_track_duration_windows(..., single_set=True)``).
+
+    Parallelism is over **blocks of whole hold-windows**: each window's
+    selection (``_get_lowest_avg_ref_vec_separation``) is a pure function of
+    its own start time, so blocks are fully self-contained — no cross-task
+    state, bit-identical whether run standalone, via a local Pool, or via an
+    injected cluster executor.
+    """
+    if windows.n_tw != 1:
+        raise ValueError(
+            "run_epfd_simulation_ref_vec requires a single-set TrackDurationWindows "
+            "(compute_track_duration_windows(..., single_set=True)); got "
+            f"n_tw={windows.n_tw}."
+        )
+
+    result = EPFDSimulationResult(wcg=wcg)
+    result.windows = windows
+
+    es_ecef = _es_ecef_from_wcg(wcg)
+    if np.linalg.norm(es_ecef) < RE_KM * 0.9:
+        logger.warning("ES position invalid, aborting reference-vector simulation.")
+        return result
+
+    import multiprocessing
+    if n_jobs < 1:
+        n_jobs = multiprocessing.cpu_count()
+
+    total_windows = windows.n_repeat
+    if n_jobs <= 1:
+        win_per_block = total_windows
+    else:
+        target_blocks = min(1024, max(n_jobs * 8, n_jobs))
+        win_per_block = max(1, int(math.ceil(total_windows / target_blocks)))
+
+    # constellation/wcg/pfd_mask/es_antenna are shipped once per worker (see
+    # _EPFD_SHARED) rather than embedded in every block task below.
+    _set_epfd_shared(constellation, wcg, pfd_mask, es_antenna)
+
+    tasks = []
+    b = 0
+    while b < total_windows:
+        cnt = min(win_per_block, total_windows - b)
+        tasks.append((
+            b, cnt, windows, None, None, None, None,
+            alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+            ref_vec_az_deg, ref_vec_el_deg, ref_vec_time_window_P_pct,
+            wcg_ref_sat_idx, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+            max_co_freq_by_lat or [], wdelta_deg, t_run_s,
+        ))
+        b += cnt
+
+    logger.info(
+        "Starting EPFD↓ reference-vector simulation (R23-WP4A-C-0519): "
+        "N_SW=%d (%.1fs hold), N_Repeat=%d windows, %d sats, T_fine=%.4fs, "
+        "%d parallel blocks (%d windows each) over %d jobs.",
+        windows.n_sw, windows.min_duration_s, windows.n_repeat,
+        len(constellation), windows.t_fine_s, len(tasks), win_per_block, n_jobs,
+    )
+
+    if n_jobs == 1:
+        for task in tasks:
+            result.acc.merge(_simulate_ref_vec_window_block(task)["acc"])
+    elif _EPFD_EXECUTOR is not None:
+        logger.info(
+            "  Reference-vector dispatch via injected executor (%d blocks)", len(tasks)
+        )
+        for res in _EPFD_EXECUTOR(
+            _simulate_ref_vec_window_block, tasks, _epfd_executor_init(shared=_EPFD_SHARED)
+        ):
+            result.acc.merge(res["acc"])
+    else:
+        numba_thr = _compute_epfd_numba_threads(n_jobs)
+        with multiprocessing.Pool(
+            processes=min(n_jobs, len(tasks)),
+            initializer=_epfd_pool_initializer,
+            initargs=(_epfd_global_snapshot(numba_thr, shared=_EPFD_SHARED),),
+        ) as pool:
+            for res in pool.imap(_simulate_ref_vec_window_block, tasks):
+                result.acc.merge(res["acc"])
+
+    result.acc.finalize_decimated()
+    result.build_cdf()
+
+    total_duration_s = windows.n_steps_stats * windows.t_fine_s
+    logger.info(
+        "Reference-vector simulation complete: %d steps, duration=%.1fs (%.2fh)",
+        result.acc.n_steps, total_duration_s, total_duration_s / 3600.0,
+    )
+    return result
 
 
 def run_epfd_simulation(
@@ -2175,6 +2719,13 @@ def run_epfd_simulation(
     ``TSSAccumulator`` (Doc 4A/312). It carries state across all steps, so the
     run is forced serial (``n_jobs = 1``); parallelism happens *between* the 7
     envelope tables, one accumulator each.
+
+    Reference-vector satellite selection (US proposal R23-WP4A-C-0519) is
+    handled by the separate ``run_epfd_simulation_ref_vec`` — it shares the
+    §D5.1.4.2 ``MIN_DURATION``/``N_SW`` windowing with
+    ``run_epfd_simulation_windowed`` rather than this function's own
+    per-step loop. See
+    ``artifacts/WP4A_519_track_duration_consolidation_decision.md``.
     """
     result = EPFDSimulationResult(wcg=wcg, keep_full_history=keep_full_history)
 
@@ -2384,6 +2935,7 @@ def run_epfd_simulation(
             per_system_step: dict[int, list] | None = (
                 {} if all_sids_seq is not None else None
             )
+            _contrib_idx: list[int] = []
             standard_epfd, override_epfd, min_alpha, any_critical_gain = (
                 _accumulate_epfd_visible_satellites(
                     visible_idx=visible_idx,
@@ -2421,15 +2973,15 @@ def run_epfd_simulation(
                     step_index=step_count,
                     alpha_tss=alpha_tss,
                     alpha_step_weight=alpha_step_weight,
+                    contributing_idx_out=_contrib_idx,
                 )
             )
-
             epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
             num_contributing = len(standard_epfd) + len(override_epfd)
-
             epfd_aggregate_dBW = (
                 10.0 * math.log10(epfd_sum_linear) if epfd_sum_linear > 0 else -999.0
             )
+            _contrib_idx_arr = np.asarray(_contrib_idx, dtype=np.int64)
             if dual_ts is not None and dual_ts.mode == "alpha_threshold":
                 dt = dual_ts.get_step(min_alpha)
             _is_fine = dual_ts is None or dt <= dual_ts.fine + 1e-12
@@ -2441,6 +2993,8 @@ def run_epfd_simulation(
                 num_visible_sats=num_visible,
                 num_contributing_sats=num_contributing,
                 min_alpha_deg=min_alpha,
+                contrib_sat_idx=_contrib_idx_arr,
+                contrib_elev_deg=np.degrees(np.arcsin(np.clip(sin_el[_contrib_idx_arr], -1.0, 1.0))),
                 is_fine=_is_fine,
             )
             if per_system_step is not None:
@@ -2499,6 +3053,8 @@ def run_epfd_simulation(
         chunk_dur = T_total / max(1, target_chunks)
         gain_thr = dual_ts._gain_threshold_db
 
+        _set_epfd_shared(constellation, wcg, pfd_mask, es_antenna)
+
         chunks_dts = []
         t_c = 0.0
         while t_c < T_total - 1e-9:
@@ -2507,7 +3063,7 @@ def run_epfd_simulation(
                 t_c, t_end_c,
                 dual_ts.mode, dual_ts.fine, dual_ts.coarse, dual_ts.ncoarse,
                 gain_thr, dual_ts.threshold,
-                constellation, wcg, pfd_mask, es_antenna,
+                None, None, None, None,
                 alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
                 raan_dot_artificial_rad_s, raan_dot_override_rad_s,
                 max_co_freq_by_lat or [], strict_max_co_freq_total,
@@ -2554,13 +3110,15 @@ def run_epfd_simulation(
             logger.info(
                 "  EPFD dispatch via injected executor (%d dual-ts chunks)", total_chunks
             )
-            for batch_res in _EPFD_EXECUTOR(_simulate_chunk_dual_ts, chunks_dts, _epfd_executor_init()):
+            for batch_res in _EPFD_EXECUTOR(
+                _simulate_chunk_dual_ts, chunks_dts, _epfd_executor_init(shared=_EPFD_SHARED)
+            ):
                 _consume_dual(batch_res)
         else:
             with multiprocessing.Pool(
                 processes=n_jobs,
                 initializer=_epfd_pool_initializer,
-                initargs=(_epfd_global_snapshot(numba_thr),),
+                initargs=(_epfd_global_snapshot(numba_thr, shared=_EPFD_SHARED),),
             ) as pool:
                 for batch_res in pool.imap(_simulate_chunk_dual_ts, chunks_dts):
                     _consume_dual(batch_res)
@@ -2587,15 +3145,17 @@ def run_epfd_simulation(
         min_chunk_steps = 1000
         target_chunks = min(max_chunks_cap, max(n_jobs * chunks_per_core, n_jobs))
         steps_per_job = max(min_chunk_steps, int(math.ceil(nsteps / max(1, target_chunks))))
+        _set_epfd_shared(constellation, wcg, pfd_mask, es_antenna)
+
         chunks = []
         current_step = 0
         current_t = 0.0
-        
+
         while current_step < nsteps:
             count = min(steps_per_job, nsteps - current_step)
             chunks.append((
                 current_step, count, current_t, tstep_s,
-                constellation, wcg, pfd_mask, es_antenna,
+                None, None, None, None,
                 alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
                 raan_dot_artificial_rad_s, raan_dot_override_rad_s,
                 max_co_freq_by_lat or [], strict_max_co_freq_total,
@@ -2647,13 +3207,15 @@ def run_epfd_simulation(
             logger.info(
                 "  EPFD dispatch via injected executor (%d chunks)", total_chunks
             )
-            for batch_res in _EPFD_EXECUTOR(_simulate_chunk, chunks, _epfd_executor_init()):
+            for batch_res in _EPFD_EXECUTOR(
+                _simulate_chunk, chunks, _epfd_executor_init(shared=_EPFD_SHARED)
+            ):
                 _consume_fixed(batch_res)
         else:
             with multiprocessing.Pool(
                 processes=n_jobs,
                 initializer=_epfd_pool_initializer,
-                initargs=(_epfd_global_snapshot(numba_thr),),
+                initargs=(_epfd_global_snapshot(numba_thr, shared=_EPFD_SHARED),),
             ) as pool:
                 for batch_res in pool.imap(_simulate_chunk, chunks):
                     _consume_fixed(batch_res)
@@ -2800,6 +3362,9 @@ def _simulate_window_block(args):
      max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
      min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
      system_id_per_sat, max_co_freq_by_system) = args
+
+    constellation, wcg, pfd_mask, es_antenna = _epfd_shared_fields(
+        constellation, wcg, pfd_mask, es_antenna)
 
     t_fine = windows.t_fine_s
     n_sw = windows.n_sw
@@ -3028,13 +3593,15 @@ def run_epfd_simulation_windowed(
         target_blocks = min(1024, max(n_jobs * 8, n_jobs))
         win_per_block = max(1, int(math.ceil(total_windows / target_blocks)))
 
+    _set_epfd_shared(constellation, wcg, pfd_mask, es_antenna)
+
     tasks = []
     for w in range(windows.n_tw):
         b = 0
         while b < windows.n_repeat:
             cnt = min(win_per_block, windows.n_repeat - b)
             tasks.append((
-                w, b, cnt, windows, constellation, wcg, pfd_mask, es_antenna,
+                w, b, cnt, windows, None, None, None, None,
                 alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
                 raan_dot_artificial_rad_s, raan_dot_override_rad_s,
                 max_co_freq_by_lat or [], strict_max_co_freq_total, strict_exclusion_zone,
@@ -3077,14 +3644,16 @@ def run_epfd_simulation_windowed(
             _consume(_simulate_window_block(task))
     elif _EPFD_EXECUTOR is not None:
         logger.info("  Windowed dispatch via injected executor (%d blocks)", len(tasks))
-        for res in _EPFD_EXECUTOR(_simulate_window_block, tasks, _epfd_executor_init()):
+        for res in _EPFD_EXECUTOR(
+            _simulate_window_block, tasks, _epfd_executor_init(shared=_EPFD_SHARED)
+        ):
             _consume(res)
     else:
         numba_thr = _compute_epfd_numba_threads(n_jobs)
         with multiprocessing.Pool(
             processes=min(n_jobs, len(tasks)),
             initializer=_epfd_pool_initializer,
-            initargs=(_epfd_global_snapshot(numba_thr),),
+            initargs=(_epfd_global_snapshot(numba_thr, shared=_EPFD_SHARED),),
         ) as pool:
             # Ordered imap: blocks merge in task order in every path (sequential,
             # Pool, executor) so statistics stay bit-identical across modes.
@@ -3271,6 +3840,8 @@ def run_epfd_simulation_multi_es(
         min_chunk_steps = 1000
         target_chunks = min(max_chunks_cap, max(n_jobs * chunks_per_core, n_jobs))
         steps_per_job = max(min_chunk_steps, int(math.ceil(nsteps / max(1, target_chunks))))
+        _set_epfd_shared(constellation, valid_wcgs, pfd_mask, es_antenna)
+
         chunks = []
         current_step = 0
         current_t = 0.0
@@ -3278,7 +3849,7 @@ def run_epfd_simulation_multi_es(
             count = min(steps_per_job, nsteps - current_step)
             chunks.append((
                 current_step, count, current_t, tstep_s,
-                constellation, valid_wcgs, pfd_mask, es_antenna,
+                None, None, None, None,
                 alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
                 raan_dot_artificial_rad_s, raan_dot_override_rad_s,
                 max_co_freq_by_lat or [], strict_max_co_freq_total,
@@ -3297,7 +3868,7 @@ def run_epfd_simulation_multi_es(
         with multiprocessing.Pool(
             processes=n_jobs,
             initializer=_epfd_pool_initializer,
-            initargs=(_epfd_global_snapshot(numba_thr),),
+            initargs=(_epfd_global_snapshot(numba_thr, shared=_EPFD_SHARED),),
         ) as pool:
             results_batches = pool.imap(_simulate_chunk_multi_es, chunks)
 

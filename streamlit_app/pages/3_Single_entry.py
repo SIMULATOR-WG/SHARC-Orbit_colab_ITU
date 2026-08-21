@@ -668,7 +668,26 @@ with st.form("s1503_form"):
                      "constellation.",
             )
 
-    with st.expander("7. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
+    with st.expander("7. MAX_CO_FREQ override (Steps 19–22 cap / Nco)", expanded=False):
+        st.caption(
+            "Caps the number of co-frequency satellites summed into the "
+            "aggregate — the same parameter as Nco for reference-vector "
+            "selection (section 9 below). Normally comes from the SRS "
+            "filing's `sat_oper` table per ES latitude. Set a value below to "
+            "**force** or **override** it for all latitudes (useful for "
+            "manual systems or what-if studies). Empty = use the filing's "
+            "own value (or unlimited for manual systems)."
+        )
+        max_co_freq_override = st.text_input(
+            "MAX_CO_FREQ — override",
+            value=str(prev.get("max_co_freq_override") or ""),
+            placeholder="auto (from SRS sat_oper; 0 = unlimited)",
+            help="Engine key: `max_co_freq`. 0 = unlimited (ignores "
+                 "sat_oper). ≥1 forces max_co_freq_by_lat = "
+                 "[(-90°, 90°, N)] for every latitude.",
+        )
+
+    with st.expander("8. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
         st.caption(
             "Sliding-window variant. When the SRS `sat_oper` declares "
             "MIN_DURATION ≠ 0 (minimum time the ES tracks a satellite), the "
@@ -826,6 +845,54 @@ with st.form("s1503_form"):
                 )
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Invalid alpha table: {exc}")
+
+    with st.expander("9. Satellite selection (US proposal — optional)", expanded=False):
+        ref_vec_selection = st.checkbox(
+            "Use reference-vector selection (replaces S.1503-4 Steps 19–21)",
+            value=bool(prev.get("ref_vec_selection", False)),
+            help=(
+                "When enabled, the Nco active satellites are selected each hold period "
+                "by minimising the time-averaged angular separation from a reference "
+                "vector V=(az, el) in the ES local frame. "
+                "Based on US proposal R23-WP4A-C-0519. Default: off (normative S.1503-4 MAX_CO_FREQ)."
+            ),
+        )
+        st.caption(
+            "Hold duration comes from **MIN_DURATION** (section 8 above) — there is "
+            "no separate duration parameter here. With no filing MIN_DURATION and no "
+            "override, the hold period degenerates to one fine step (re-select every "
+            "step, matching the proposal's own T=1 s case). Nco is **MAX_CO_FREQ** "
+            "(section 7 above)."
+        )
+        col_rv1, col_rv2 = st.columns(2)
+        with col_rv1:
+            ref_vec_az_deg = st.number_input(
+                "Reference vector azimuth (°)",
+                min_value=-180.0, max_value=360.0,
+                value=float(prev.get("ref_vec_az_deg", 0.0)),
+                step=1.0,
+                help="Azimuth of the reference vector in the ES local frame, "
+                     "clockwise from North (°). 0°=North, 90°=East.",
+            )
+            ref_vec_el_deg = st.number_input(
+                "Reference vector elevation (°)",
+                min_value=0.0, max_value=90.0,
+                value=float(prev.get("ref_vec_el_deg", 90.0)),
+                step=1.0,
+                help="Elevation of the reference vector above the local horizontal "
+                     "plane (°). 90° = zenith = equivalent to highest-elevation selection.",
+            )
+        with col_rv2:
+            ref_vec_time_window_P_pct = st.number_input(
+                "Time-window percentile P (%)",
+                min_value=1.0, max_value=100.0,
+                value=float(prev.get("ref_vec_time_window_P_pct", 100.0)),
+                step=1.0,
+                help="M = max(floor(N_SW × P / 100), 1) worst-case samples are "
+                     "averaged per satellite when ranking, where N_SW is the "
+                     "MIN_DURATION-derived hold window (section 8). P=100% uses "
+                     "all N_SW samples.",
+            )
 
     # ── Workload + runtime estimate ────────────────────────────────────────
     from lib import estimator as _est
@@ -985,6 +1052,12 @@ if submit:
     _md_val = _f(min_duration_s)
     if _md_val is not None and _md_val > 0:
         params["min_duration_s"] = _md_val
+    # MAX_CO_FREQ override (Steps 19-22 cap / Nco). 0 is a meaningful value
+    # (unlimited) distinct from "not set", so send whenever the field is
+    # non-empty rather than gating on > 0 like min_duration_s above.
+    _mcf_val = _i(max_co_freq_override)
+    if _mcf_val is not None:
+        params["max_co_freq"] = _mcf_val
     # Orbital dynamics. artificial_precession: only sent when forced (auto →
     # leave unset so the engine auto-detects from the SRS).
     if artificial_prec_mode == "on":
@@ -1020,6 +1093,14 @@ if submit:
             # pairs make the run reproducible, the name says which declared
             # table it was.
             params["alpha_table_file"] = alpha_table_file
+
+    # Reference-vector satellite selection (US proposal R23-WP4A-C-0519).
+    # Hold duration comes from MIN_DURATION (min_duration_s above) — no
+    # separate track-duration param.
+    params["ref_vec_selection"] = bool(ref_vec_selection)
+    params["ref_vec_az_deg"] = float(ref_vec_az_deg)
+    params["ref_vec_el_deg"] = float(ref_vec_el_deg)
+    params["ref_vec_time_window_P_pct"] = float(ref_vec_time_window_P_pct)
 
     # Article 22 scenario leaf overrides service / ES antenna / ref BW /
     # frequency run and pins the PFD mask (see section 1 selector).
@@ -1093,6 +1174,7 @@ if submit:
         "fine_time_step_s": fine_dt, "dual_time_step_mode": dual_mode,
         "itu_software": itu_software,
         "min_duration_s": min_duration_s,
+        "max_co_freq_override": max_co_freq_override,
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
@@ -1103,6 +1185,10 @@ if submit:
         "seed": seed.strip() if seed else "",
         "include_override": False,
         "alpha_bin_deg": float(alpha_bin_deg),
+        "ref_vec_selection": bool(ref_vec_selection),
+        "ref_vec_az_deg": float(ref_vec_az_deg),
+        "ref_vec_el_deg": float(ref_vec_el_deg),
+        "ref_vec_time_window_P_pct": float(ref_vec_time_window_P_pct),
     })
 
     run_id = launcher.launch_s1503(system_id=sel_sys, params=params)

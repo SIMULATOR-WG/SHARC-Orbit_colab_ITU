@@ -738,26 +738,42 @@ def compute_track_duration_windows(
     nsteps: int,
     min_orbital_period_s: float,
     n_satellites: int,
+    single_set: bool = False,
 ) -> TrackDurationWindows:
     """Window parameters per S.1503-4 §D5.1.3 for the §D5.1.4.2 variant.
 
     ``min_duration_s`` is the MIN_DURATION resolved at the ES latitude;
     ``t_fine_s``/``nsteps`` are the §D4 fine step and step count of the run.
+
+    ``single_set``: when True, skip the ``MIN_SLIDING_TIME`` phase-offset
+    formula entirely and force ``N_MSL = N_SW`` / ``N_TW = 1`` — one
+    unshifted window sequence, no worst-per-level envelope across
+    phase-shifted sets. ``MIN_SLIDING_TIME`` is a pure §D5.1.3 mechanical
+    formula (not an operator/filing-declared quantity) whose only purpose is
+    guarding against a *worst-case* statistic being an artifact of window
+    phase — a rationale that doesn't transfer to non-worst-case ranking
+    policies (e.g. reference-vector selection, R23-WP4A-C-0519), which
+    should not have that conservatism reintroduced by an unrelated
+    mechanism. See ``artifacts/WP4A_519_track_duration_consolidation_decision.md``.
     """
     if min_duration_s <= 0.0:
         raise ValueError("compute_track_duration_windows requires MIN_DURATION > 0")
     if t_fine_s <= 0.0 or nsteps <= 0 or n_satellites <= 0:
         raise ValueError("t_fine_s, nsteps and n_satellites must be positive")
 
-    mst_s = max(1.0, float(min_orbital_period_s) / (100.0 * float(n_satellites)))
-
     n_sw = int(math.floor(min_duration_s / t_fine_s + 1e-9))
     if n_sw < 1:
         # MIN_DURATION shorter than one fine step: the window degenerates to a
         # single step and the variant reduces to per-step selection.
         n_sw = 1
-    n_msl = max(1, int(math.ceil(mst_s / t_fine_s - 1e-9)))
-    n_tw = max(1, int(math.ceil(n_sw / n_msl - 1e-9)))
+
+    if single_set:
+        n_msl = n_sw
+        n_tw = 1
+    else:
+        mst_s = max(1.0, float(min_orbital_period_s) / (100.0 * float(n_satellites)))
+        n_msl = max(1, int(math.ceil(mst_s / t_fine_s - 1e-9)))
+        n_tw = max(1, int(math.ceil(n_sw / n_msl - 1e-9)))
     n_repeat = max(1, int(math.ceil(nsteps / n_sw - 1e-9)))
     n_total = n_repeat * n_sw + (n_tw - 1) * n_msl
 

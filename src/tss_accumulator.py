@@ -113,12 +113,15 @@ class TSSAccumulator:
         t_s: float,
         prune_fn: PruneFn = None,
         weight: float = 1.0,
+        selected_idx_out: list[int] | None = None,
     ) -> list[float]:
         """Return the selected satellites' epfd↓ᵢ (linear). ``standard_items`` are
         the α₀/ε₀-eligible candidates ``(epfd, k)``; ``alpha_by_k`` maps ``k`` →
         |α| (deg). ``prune_fn`` applies MIN_ANGLE_AT_ES after each pick.
         ``weight`` is the step's fine-equivalent duration ``Δt/T_fine`` and scales
-        the per-pick credit spend (Decision 8); ``1.0`` for a fixed/fine step."""
+        the per-pick credit spend (Decision 8); ``1.0`` for a fixed/fine step.
+        ``selected_idx_out``: optional list extended with the picked satellites'
+        global indices, aligned 1:1 with the returned values (diagnostics)."""
         w = float(weight)
         candidates: list[Candidate] = list(standard_items)
         selected: list[float] = []
@@ -134,6 +137,8 @@ class TSSAccumulator:
             for it in candidates:
                 if it[1] == self.wcg_ref_sat_idx:
                     selected.append(float(it[0]))
+                    if selected_idx_out is not None:
+                        selected_idx_out.append(int(it[1]))
                     candidates.remove(it)
                     slots -= 1
                     self.n_wcg_exception_hits += 1
@@ -157,6 +162,8 @@ class TSSAccumulator:
             # Within the bin, the highest single-entry epfd (worst-case in-bin).
             chosen = max(by_bin[best_bin], key=lambda it: it[0])
             selected.append(float(chosen[0]))
+            if selected_idx_out is not None:
+                selected_idx_out.append(int(chosen[1]))
             self.credits[best_bin] -= w            # Decision 2/8: spend w credit
             candidates.remove(chosen)
             slots -= 1

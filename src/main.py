@@ -45,6 +45,7 @@ from .time_step import (
 )
 from .epfd_calculator import (
     run_epfd_simulation, run_epfd_simulation_multi_es, run_epfd_simulation_windowed,
+    run_epfd_simulation_ref_vec,
     check_article22_compliance, EPFDSimulationResult, ComplianceResult,
     epfd_aggregate_dBW_at_instant, _resolve_min_duration, SelectionConfig,
     _resolve_max_co_freq, _apply_epfd_globals, _epfd_global_snapshot,
@@ -54,6 +55,7 @@ from .alpha_table import (
     validate_alpha_pairs, build_tss_cases, generate_seven_tables,
 )
 from .constants import MU_KM3_S2
+from .epfd_stream_accumulator import format_contributing_elevation_csv
 from .time_step import compute_track_duration_windows
 from .coordinates import (
     lla_to_ecef, gso_position_ecef, eci_to_ecef, eci_vel_to_ecef,
@@ -2959,14 +2961,43 @@ def run_wcg_downlink(config: dict) -> tuple[
     sim_meta["_wdelta_deg"] = wdelta_deg
     sim_meta["_wdelta_deg_requested"] = wdelta_deg_requested
 
+    # Reference-vector satellite selection (US proposal R23-WP4A-C-0519) —
+    # read before deciding windowing: since the consolidation (see
+    # artifacts/WP4A_519_track_duration_consolidation_decision.md),
+    # reference-vector mode shares MIN_DURATION/N_SW as its sole
+    # hold-duration source, so it needs to be known before `_windows_for_es`
+    # runs, not after (as it was before the consolidation).
+    ref_vec_selection = bool(sim_cfg.get("ref_vec_selection", False))
+    ref_vec_az_deg = float(sim_cfg.get("ref_vec_az_deg", 0.0))
+    ref_vec_el_deg = float(sim_cfg.get("ref_vec_el_deg", 90.0))
+    ref_vec_time_window_P_pct = float(sim_cfg.get("ref_vec_time_window_P_pct", 100.0))
+
     # ─── S.1503-4 §D5.1.4.2: track-duration (sliding-window) variant ───
     # Active when sat_oper declares MIN_DURATION != 0 at the ES latitude. The
     # variant is defined in fine time steps, so the dual time step (§D4.7.1)
     # does not apply — it is disabled while this variant runs.
     _min_dur_by_lat = ngso_cfg.get("min_duration_by_lat", []) or []
 
-    def _windows_for_es(es_lat_deg: float):
+    def _windows_for_es(es_lat_deg: float, ref_vec: bool = False):
         md = _resolve_min_duration(es_lat_deg, _min_dur_by_lat)
+        if ref_vec:
+            # Reference-vector selection has no separate duration parameter —
+            # MIN_DURATION/N_SW is its only hold-duration source. Unlike the
+            # worst-case variant, N_SW == 1 (no MIN_DURATION declared, or one
+            # shorter than a fine step) is not a "fall back to a cheaper
+            # equivalent path" case — there is no other path — it's the
+            # proposal's own documented "re-select every step" degeneracy.
+            # No N_TW envelope either (single_set=True): see the consolidation
+            # decision doc.
+            md_eff = md if md > 0.0 else tstep
+            min_orb_s = min(
+                (compute_orbital_period(oe.a) for oe in constellation), default=T_orb
+            )
+            return compute_track_duration_windows(
+                min_duration_s=md_eff, t_fine_s=tstep, nsteps=nsteps,
+                min_orbital_period_s=min_orb_s, n_satellites=len(constellation),
+                single_set=True,
+            )
         if md <= 0.0:
             return None
         min_orb_s = min(
@@ -2992,20 +3023,22 @@ def run_wcg_downlink(config: dict) -> tuple[
             return None
         return w
 
-    windows_main = _windows_for_es(wcg_result.es_lat_deg)
+    windows_main = _windows_for_es(wcg_result.es_lat_deg, ref_vec=ref_vec_selection)
     if windows_main is not None:
         _md_req = _resolve_min_duration(wcg_result.es_lat_deg, _min_dur_by_lat)
+        _ranking = "reference-vector (R23-WP4A-C-0519)" if ref_vec_selection else "worst-case (§D5.1.4.2 Step 20)"
         logger.info(
-            "  §D5.1.4.2 track-duration variant ACTIVE at ES lat %.2f°: "
-            "MIN_DURATION requested=%.0fs, T_fine=%.3fs → N_SW=%d "
+            "  §D5.1.4.2 track-duration windowing ACTIVE at ES lat %.2f° "
+            "[ranking: %s]: MIN_DURATION requested=%.0fs, T_fine=%.3fs → N_SW=%d "
             "(effective window=%.0fs), N_MSL=%d, N_TW=%d sets, N_Repeat=%d, "
             "N_TotalSteps=%d (dual time step disabled for this variant).",
-            wcg_result.es_lat_deg, _md_req, windows_main.t_fine_s, windows_main.n_sw,
+            wcg_result.es_lat_deg, _ranking, _md_req, windows_main.t_fine_s, windows_main.n_sw,
             windows_main.min_duration_s, windows_main.n_msl, windows_main.n_tw,
             windows_main.n_repeat, windows_main.n_total_steps,
         )
         sim_meta["_track_duration"] = {
             "active": True,
+            "ranking_policy": "reference_vector" if ref_vec_selection else "worst_case",
             "min_duration_requested_s": _md_req,
             "min_duration_s": windows_main.min_duration_s,
             "min_sliding_time_s": windows_main.min_sliding_time_s,
@@ -3021,7 +3054,8 @@ def run_wcg_downlink(config: dict) -> tuple[
     # its MIN_DURATION independently — a filing can require the variant for one
     # ES and not the other (MIN_DURATION varies only by latitude, §D5.1.4).
     windows_static = (
-        _windows_for_es(static_wcg.es_lat_deg) if static_wcg is not None else None
+        _windows_for_es(static_wcg.es_lat_deg, ref_vec=ref_vec_selection)
+        if static_wcg is not None else None
     )
     if windows_static is not None and windows_main is None:
         logger.info(
@@ -3095,33 +3129,59 @@ def run_wcg_downlink(config: dict) -> tuple[
         )
     sim_t0 = time.perf_counter()
     if windows_main is not None or windows_static is not None:
-        # ─── Track-duration variant (§D5.1.4.2): each ES on its own path,
-        # windowed when its latitude declares MIN_DURATION>0, standard otherwise.
+        # ─── Track-duration windowing (§D5.1.4.2): each ES on its own path,
+        # windowed when its latitude declares MIN_DURATION>0 (or always, for
+        # reference-vector selection, which has no other duration source —
+        # see artifacts/WP4A_519_track_duration_consolidation_decision.md).
+        # windows_main is only ever None here when ref_vec_selection=False.
         if windows_main is not None:
-            sim_result = run_epfd_simulation_windowed(
-                constellation=constellation,
-                wcg=wcg_result,
-                pfd_mask=pfd_mask,
-                es_antenna=es_antenna,
-                alpha0_deg=alpha0_deg,
-                min_elevation_deg=min_elev_deg,
-                windows=windows_main,
-                n_jobs=n_jobs,
-                pfd_bw_correction_db=bw_correction_db,
-                raan_dot_artificial_rad_s=raan_dot_artificial,
-                raan_dot_override_rad_s=raan_dot_override_rad_s,
-                max_co_freq_by_lat=max_co_freq_by_lat,
-                strict_max_co_freq_total=strict_max_co_freq_total,
-                strict_exclusion_zone=strict_exclusion_zone,
-                min_angle_at_es_deg=min_angle_at_es_deg,
-                wdelta_deg=wdelta_deg,
-                t_run_s=t_run_s,
-                gso_min_elevation_deg=gso_min_elev_effective_deg,
-                selection_config=selection_config,
-            )
+            if ref_vec_selection:
+                sim_result = run_epfd_simulation_ref_vec(
+                    constellation=constellation,
+                    wcg=wcg_result,
+                    pfd_mask=pfd_mask,
+                    es_antenna=es_antenna,
+                    alpha0_deg=alpha0_deg,
+                    min_elevation_deg=min_elev_deg,
+                    windows=windows_main,
+                    n_jobs=n_jobs,
+                    pfd_bw_correction_db=bw_correction_db,
+                    raan_dot_artificial_rad_s=raan_dot_artificial,
+                    raan_dot_override_rad_s=raan_dot_override_rad_s,
+                    max_co_freq_by_lat=max_co_freq_by_lat,
+                    wdelta_deg=wdelta_deg,
+                    t_run_s=t_run_s,
+                    ref_vec_az_deg=ref_vec_az_deg,
+                    ref_vec_el_deg=ref_vec_el_deg,
+                    ref_vec_time_window_P_pct=ref_vec_time_window_P_pct,
+                    wcg_ref_sat_idx=wcg_ref_sat_idx,
+                )
+            else:
+                sim_result = run_epfd_simulation_windowed(
+                    constellation=constellation,
+                    wcg=wcg_result,
+                    pfd_mask=pfd_mask,
+                    es_antenna=es_antenna,
+                    alpha0_deg=alpha0_deg,
+                    min_elevation_deg=min_elev_deg,
+                    windows=windows_main,
+                    n_jobs=n_jobs,
+                    pfd_bw_correction_db=bw_correction_db,
+                    raan_dot_artificial_rad_s=raan_dot_artificial,
+                    raan_dot_override_rad_s=raan_dot_override_rad_s,
+                    max_co_freq_by_lat=max_co_freq_by_lat,
+                    strict_max_co_freq_total=strict_max_co_freq_total,
+                    strict_exclusion_zone=strict_exclusion_zone,
+                    min_angle_at_es_deg=min_angle_at_es_deg,
+                    wdelta_deg=wdelta_deg,
+                    t_run_s=t_run_s,
+                    gso_min_elevation_deg=gso_min_elev_effective_deg,
+                    selection_config=selection_config,
+                )
         else:
             # Main WCG ES has MIN_DURATION=0 → standard path (only the static ES
-            # needs the windowed variant here).
+            # needs the windowed variant here). Not reachable when
+            # ref_vec_selection=True (windows_main is never None then).
             sim_result = run_epfd_simulation(
                 constellation=constellation, wcg=wcg_result, pfd_mask=pfd_mask,
                 es_antenna=es_antenna, alpha0_deg=alpha0_deg,
@@ -3146,22 +3206,38 @@ def run_wcg_downlink(config: dict) -> tuple[
             )
             static_t0 = time.perf_counter()
             if windows_static is not None:
-                static_sim_result = run_epfd_simulation_windowed(
-                    constellation=constellation, wcg=static_wcg, pfd_mask=pfd_mask,
-                    es_antenna=es_antenna, alpha0_deg=alpha0_deg,
-                    min_elevation_deg=min_elev_deg, windows=windows_static,
-                    n_jobs=n_jobs, pfd_bw_correction_db=bw_correction_db,
-                    raan_dot_artificial_rad_s=raan_dot_artificial,
-                    raan_dot_override_rad_s=raan_dot_override_rad_s,
-                    max_co_freq_by_lat=max_co_freq_by_lat,
-                    strict_max_co_freq_total=strict_max_co_freq_total,
-                    strict_exclusion_zone=strict_exclusion_zone,
-                    min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
-                    t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
-                    selection_config=selection_config,
-                )
+                if ref_vec_selection:
+                    static_sim_result = run_epfd_simulation_ref_vec(
+                        constellation=constellation, wcg=static_wcg, pfd_mask=pfd_mask,
+                        es_antenna=es_antenna, alpha0_deg=alpha0_deg,
+                        min_elevation_deg=min_elev_deg, windows=windows_static,
+                        n_jobs=n_jobs, pfd_bw_correction_db=bw_correction_db,
+                        raan_dot_artificial_rad_s=raan_dot_artificial,
+                        raan_dot_override_rad_s=raan_dot_override_rad_s,
+                        max_co_freq_by_lat=max_co_freq_by_lat,
+                        wdelta_deg=wdelta_deg, t_run_s=t_run_s,
+                        ref_vec_az_deg=ref_vec_az_deg, ref_vec_el_deg=ref_vec_el_deg,
+                        ref_vec_time_window_P_pct=ref_vec_time_window_P_pct,
+                        wcg_ref_sat_idx=wcg_ref_sat_idx,
+                    )
+                else:
+                    static_sim_result = run_epfd_simulation_windowed(
+                        constellation=constellation, wcg=static_wcg, pfd_mask=pfd_mask,
+                        es_antenna=es_antenna, alpha0_deg=alpha0_deg,
+                        min_elevation_deg=min_elev_deg, windows=windows_static,
+                        n_jobs=n_jobs, pfd_bw_correction_db=bw_correction_db,
+                        raan_dot_artificial_rad_s=raan_dot_artificial,
+                        raan_dot_override_rad_s=raan_dot_override_rad_s,
+                        max_co_freq_by_lat=max_co_freq_by_lat,
+                        strict_max_co_freq_total=strict_max_co_freq_total,
+                        strict_exclusion_zone=strict_exclusion_zone,
+                        min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
+                        t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
+                        selection_config=selection_config,
+                    )
             else:
                 # Static ES latitude has MIN_DURATION=0 → standard path for it.
+                # Not reachable when ref_vec_selection=True.
                 static_sim_result = run_epfd_simulation(
                     constellation=constellation, wcg=static_wcg, pfd_mask=pfd_mask,
                     es_antenna=es_antenna, alpha0_deg=alpha0_deg,
@@ -3179,6 +3255,9 @@ def run_wcg_downlink(config: dict) -> tuple[
                 )
             static_sim_elapsed_s = time.perf_counter() - static_t0
     elif static_wcg is not None and dual_ts is None:
+        # Shared-propagation fast path. Not reachable when ref_vec_selection=True
+        # (windows_main is never None then, so the branch above is always taken
+        # instead) — run_epfd_simulation_multi_es has no reference-vector support.
         logger.info("")
         logger.info(
             "  PHASE 3B: EPFD↓ simulation for the Static ES ("
@@ -3299,6 +3378,8 @@ def run_wcg_downlink(config: dict) -> tuple[
         sim_result = alpha_subruns[0]["result"]
         sim_elapsed_s = time.perf_counter() - sim_t0
     else:
+        # Not reachable when ref_vec_selection=True (windows_main is never
+        # None then, so the first branch above is always taken instead).
         sim_result = run_epfd_simulation(
             constellation=constellation,
             wcg=wcg_result,
@@ -3959,6 +4040,44 @@ def main():
     )
 
 
+    # Reference-vector satellite selection (US proposal R23-WP4A-C-0519)
+    parser.add_argument(
+        "--ref-vec-selection", action="store_true", default=False,
+        help=(
+            "Replace S.1503-4 Steps 19–21 greedy MAX_CO_FREQ selection with the "
+            "reference-vector algorithm (US proposal R23-WP4A-C-0519). Selects Nco "
+            "satellites closest to a reference direction V=(az, el) in the ES local "
+            "ENU frame, held for T seconds. Default: off (normative S.1503-4 behaviour)."
+        ),
+    )
+    parser.add_argument(
+        "--ref-vec-az-deg", type=float, default=None,
+        help=(
+            "Reference vector azimuth in ES local frame (degrees, clockwise from North). "
+            "0°=North, 90°=East. Only used when --ref-vec-selection is active. Default: 0.0."
+        ),
+    )
+    parser.add_argument(
+        "--ref-vec-el-deg", type=float, default=None,
+        help=(
+            "Reference vector elevation above the local horizontal plane (degrees). "
+            "90°=zenith (equivalent to highest-elevation selection). "
+            "Only used when --ref-vec-selection is active. Default: 90.0."
+        ),
+    )
+    parser.add_argument(
+        "--ref-vec-time-window-pct", type=float, default=None,
+        help=(
+            "Time-window percentile P (%%). M = max(floor(N_SW × P / 100), 1) "
+            "worst-case samples are averaged per satellite when ranking, where "
+            "N_SW is the MIN_DURATION-derived hold window (§D5.1.4.2) — "
+            "reference-vector selection has no separate duration parameter of "
+            "its own; MIN_DURATION/sat_oper is its sole hold-duration source. "
+            "P=100%% uses all N_SW samples. Only used when --ref-vec-selection "
+            "is active. Default: 100.0."
+        ),
+    )
+
     args = parser.parse_args()
 
     # ── Determine operating mode ──
@@ -3969,8 +4088,6 @@ def main():
             logger.info("Mode: MDB + MASK MDB (real SRS data)")
         if args.pfd_xml and args.pfd_mask_mdb:
             parser.error("Use only one mask source: --pfd-xml or --pfd-mask-mdb")
-        if args.pfd_mask_mdb and args.mask_id is None:
-            parser.error("--pfd-mask-mdb mode requires --mask-id")
         config = load_from_srs(
             args.mdb,
             xml_path=args.pfd_xml,
@@ -4189,6 +4306,26 @@ def main():
         config.setdefault("simulation", {})["run_static_es"] = False
         logger.info("Additional static ES simulation disabled via --no-static-es")
 
+    # Reference-vector satellite selection (US proposal R23-WP4A-C-0519).
+    # Hold duration comes solely from MIN_DURATION/sat_oper (§D5.1.4.2) — see
+    # artifacts/WP4A_519_track_duration_consolidation_decision.md — so there
+    # is no separate --ref-vec-track-duration-s flag.
+    if args.ref_vec_selection:
+        config.setdefault("simulation", {})["ref_vec_selection"] = True
+        if args.ref_vec_az_deg is not None:
+            config["simulation"]["ref_vec_az_deg"] = float(args.ref_vec_az_deg)
+        if args.ref_vec_el_deg is not None:
+            config["simulation"]["ref_vec_el_deg"] = float(args.ref_vec_el_deg)
+        if args.ref_vec_time_window_pct is not None:
+            config["simulation"]["ref_vec_time_window_P_pct"] = float(args.ref_vec_time_window_pct)
+        logger.info(
+            "Reference-vector selection enabled via --ref-vec-selection "
+            f"(az={config['simulation'].get('ref_vec_az_deg', 0.0):.1f}°, "
+            f"el={config['simulation'].get('ref_vec_el_deg', 90.0):.1f}°, "
+            f"P={config['simulation'].get('ref_vec_time_window_P_pct', 100.0):.0f}%, "
+            "T=MIN_DURATION)"
+        )
+
     # Override alpha0 if specified via CLI
     if args.alpha0 is not None:
         old = config["non_gso"].get("alpha0_deg", 0.0)
@@ -4316,6 +4453,14 @@ def main():
             sat_name = srs_sys.sat_name
 
         plot_results(sim_result, compliance, limits, args.output, sat_name)
+
+    if sim_result is not None and getattr(sim_result, "acc", None) is not None:
+        _elev_csv = format_contributing_elevation_csv(sim_result.acc)
+        if _elev_csv:
+            _elev_path = os.path.join(args.output, "contributing_sat_elevations.csv")
+            with open(_elev_path, "w", encoding="utf-8") as f:
+                f.write(_elev_csv)
+            logger.info(f"Contributing-satellite elevations saved at: {_elev_path}")
 
     if compliance is not None and not compliance.compliant:
         sys.exit(2)

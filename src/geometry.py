@@ -1947,3 +1947,80 @@ def compute_slant_range(
 ) -> float:
     """Slant range ES ↔ satellite (km)."""
     return float(np.linalg.norm(sat_ecef - es_ecef))
+
+
+# =====================================================================
+#  Angular separation from a reference vector (US proposal R23-WP4A-C-0519)
+# =====================================================================
+
+def compute_angular_separation_from_ref_vector(
+    es_ecef: np.ndarray,
+    sat_ecef_batch: np.ndarray,
+    es_lat_deg: float,
+    es_lon_deg: float,
+    ref_az_deg: float,
+    ref_el_deg: float,
+) -> np.ndarray:
+    """Angular separation (degrees) between each satellite and a reference vector.
+
+    The reference vector is defined in the ES local ENU frame as
+    (azimuth, elevation) where azimuth is clockwise from North and elevation
+    is above the local horizontal plane — the same convention used throughout
+    this module and in ``compute_offaxis_and_planar_angle_batch``.
+
+    Parameters
+    ----------
+    es_ecef : (3,) ECEF position of the earth station (km)
+    sat_ecef_batch : (N, 3) ECEF positions of N satellites (km)
+    es_lat_deg, es_lon_deg : geodetic latitude/longitude of the ES (degrees)
+    ref_az_deg : reference vector azimuth in ES local frame (degrees, CW from N)
+    ref_el_deg : reference vector elevation in ES local frame (degrees above horizon)
+
+    Returns
+    -------
+    np.ndarray shape (N,) — angular separations in degrees
+    """
+    sat_ecef_batch = np.asarray(sat_ecef_batch, dtype=np.float64)
+    es_ecef = np.asarray(es_ecef, dtype=np.float64).ravel()
+
+    if sat_ecef_batch.ndim == 1:
+        sat_ecef_batch = sat_ecef_batch.reshape(1, 3)
+    N = sat_ecef_batch.shape[0]
+    if N == 0:
+        return np.array([], dtype=np.float64)
+
+    # ENU rotation components (same convention as compute_offaxis_and_planar_angle_batch)
+    lat_r = math.radians(es_lat_deg)
+    lon_r = math.radians(es_lon_deg)
+    sl, cl = math.sin(lat_r), math.cos(lat_r)
+    so, co = math.sin(lon_r), math.cos(lon_r)
+
+    # Difference vectors ES → satellite
+    diff = sat_ecef_batch - es_ecef  # (N, 3)
+    dx, dy, dz = diff[:, 0], diff[:, 1], diff[:, 2]
+
+    # Project to ENU
+    east  = -so * dx + co * dy
+    north = -sl * co * dx - sl * so * dy + cl * dz
+    up    =  cl * co * dx + cl * so * dy + sl * dz
+
+    ranges = np.linalg.norm(diff, axis=1)
+    ranges = np.maximum(ranges, 1e-15)
+
+    # Unit ENU vectors toward each satellite
+    u_east  = east  / ranges
+    u_north = north / ranges
+    u_up    = up    / ranges
+
+    # Reference vector as a unit ENU vector
+    ref_az_r = math.radians(ref_az_deg)
+    ref_el_r = math.radians(ref_el_deg)
+    cos_el = math.cos(ref_el_r)
+    r_east  = math.sin(ref_az_r) * cos_el
+    r_north = math.cos(ref_az_r) * cos_el
+    r_up    = math.sin(ref_el_r)
+
+    # Angular separation = arccos of dot product
+    dot = u_east * r_east + u_north * r_north + u_up * r_up
+    dot = np.clip(dot, -1.0, 1.0)
+    return np.degrees(np.arccos(dot))

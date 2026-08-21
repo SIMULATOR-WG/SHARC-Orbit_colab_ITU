@@ -60,7 +60,11 @@ class EPFDStreamAccumulator:
       - EPFD histogram: ``_NBINS * 8 B`` ≈ 32 KB
       - count histograms (3×): ``3 * (NSAT_HIST_MAX+1) * 8 B`` ≈ 384 KB
       - decimated trace: ~10k points × ~7 floats ≈ 0.6 MB
-      → total < 1 MB regardless of N steps.
+      - decimated contributing-satellite elevation: ~10k points × a handful
+        of contributing sats each × 2 arrays (idx + elevation) — a few MB
+        worst case, still O(1) in N (bounded by the decimated point count,
+        not the number of simulated steps).
+      → total on the order of a few MB regardless of N steps.
     """
 
     duration_per_bin: np.ndarray = field(default_factory=_empty_hist)
@@ -99,6 +103,11 @@ class EPFDStreamAccumulator:
     decim_n_cont: list[int] = field(default_factory=list)
     decim_min_alpha_deg: list[float] = field(default_factory=list)
     decim_duration_s: list[float] = field(default_factory=list)
+    # Per-decimated-point arrays of EPFD-contributing satellites (index-
+    # aligned with decim_t_s: same slot per kept point). Variable length per
+    # point — not a scalar like the other decim_* fields.
+    decim_contrib_sat_idx: list[np.ndarray] = field(default_factory=list)
+    decim_contrib_elev_deg: list[np.ndarray] = field(default_factory=list)
 
     # Multi-system aggregation (Resolution 76 / method_3): one sub-accumulator
     # per ``system_id``, fed from the SAME pass as the joint one — each system's
@@ -134,11 +143,19 @@ class EPFDStreamAccumulator:
         num_contributing_sats: int,
         min_alpha_deg: float,
         is_fine: bool | None = None,
+        contrib_sat_idx: np.ndarray | None = None,
+        contrib_elev_deg: np.ndarray | None = None,
     ) -> None:
         """Adds a step to the accumulator. ``O(1)`` in memory/time.
 
         ``is_fine`` classifies the step for the dual time step tally: ``True`` →
         fine Δt, ``False`` → coarse Δt, ``None`` → not counted (unknown).
+
+        ``contrib_sat_idx``/``contrib_elev_deg``: optional per-step arrays
+        (same length, index-aligned) of the EPFD-contributing satellites'
+        global index and elevation angle (°) as seen from the ES. Only
+        stored when this step happens to land on a kept decimated point —
+        same adaptive-stride treatment as the rest of the trace.
         """
         if duration_s <= 0.0 or not np.isfinite(duration_s):
             return
@@ -191,6 +208,7 @@ class EPFDStreamAccumulator:
             float(epfd_db),
             float(duration_s),
             h, v, c, float(min_alpha_deg),
+            contrib_sat_idx, contrib_elev_deg,
         )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -206,6 +224,8 @@ class EPFDStreamAccumulator:
         n_vis: int,
         n_cont: int,
         min_alpha_deg: float,
+        contrib_sat_idx: np.ndarray | None = None,
+        contrib_elev_deg: np.ndarray | None = None,
     ) -> None:
         self.decim_seen += 1
         if (self.decim_seen - 1) % self.decim_stride != 0:
@@ -217,6 +237,14 @@ class EPFDStreamAccumulator:
         self.decim_n_cont.append(n_cont)
         self.decim_min_alpha_deg.append(min_alpha_deg)
         self.decim_duration_s.append(duration_s)
+        self.decim_contrib_sat_idx.append(
+            np.asarray(contrib_sat_idx, dtype=np.int64)
+            if contrib_sat_idx is not None else np.empty(0, dtype=np.int64)
+        )
+        self.decim_contrib_elev_deg.append(
+            np.asarray(contrib_elev_deg, dtype=np.float64)
+            if contrib_elev_deg is not None else np.empty(0, dtype=np.float64)
+        )
         if len(self.decim_t_s) > 2 * self.decim_capacity:
             self._decim_halve()
 
@@ -230,6 +258,8 @@ class EPFDStreamAccumulator:
         self.decim_n_cont = self.decim_n_cont[::2]
         self.decim_min_alpha_deg = self.decim_min_alpha_deg[::2]
         self.decim_duration_s = self.decim_duration_s[::2]
+        self.decim_contrib_sat_idx = self.decim_contrib_sat_idx[::2]
+        self.decim_contrib_elev_deg = self.decim_contrib_elev_deg[::2]
 
     # ─────────────────────────────────────────────────────────────────────
     #  Merge (parallel)
@@ -285,6 +315,8 @@ class EPFDStreamAccumulator:
         self.decim_n_cont.extend(other.decim_n_cont)
         self.decim_min_alpha_deg.extend(other.decim_min_alpha_deg)
         self.decim_duration_s.extend(other.decim_duration_s)
+        self.decim_contrib_sat_idx.extend(other.decim_contrib_sat_idx)
+        self.decim_contrib_elev_deg.extend(other.decim_contrib_elev_deg)
         self.decim_seen += other.decim_seen
         while len(self.decim_t_s) > 2 * self.decim_capacity:
             self._decim_halve()
@@ -310,6 +342,8 @@ class EPFDStreamAccumulator:
         self.decim_n_cont = [self.decim_n_cont[i] for i in idx]
         self.decim_min_alpha_deg = [self.decim_min_alpha_deg[i] for i in idx]
         self.decim_duration_s = [self.decim_duration_s[i] for i in idx]
+        self.decim_contrib_sat_idx = [self.decim_contrib_sat_idx[i] for i in idx]
+        self.decim_contrib_elev_deg = [self.decim_contrib_elev_deg[i] for i in idx]
 
     # ─────────────────────────────────────────────────────────────────────
     #  Outputs
@@ -378,6 +412,30 @@ class EPFDStreamAccumulator:
         return 10.0 * math.log10(mean_lin)
 
 
+def format_contributing_elevation_csv(acc: "EPFDStreamAccumulator") -> str | None:
+    """CSV text: elevation of EPFD-contributing satellites over the
+    decimated trace (same adaptive-stride time points as ``epfd_timeseries``).
+
+    One row per (decimated time point × contributing satellite at that
+    point). Returns ``None`` when the accumulator has no decimated trace
+    (e.g. the track-duration windowed variant, which doesn't build one).
+    """
+    if not acc.decim_t_s:
+        return None
+    lines = [
+        "# SHARC-Orbit per-step elevation of EPFD-contributing satellites "
+        "(decimated trace; same adaptive-stride time points as epfd_timeseries.csv)",
+        "# units: t_s [s] · sat_idx [constellation index] · elevation_deg [deg]",
+        "t_s,sat_idx,elevation_deg",
+    ]
+    for t_s, idx_arr, elev_arr in zip(
+        acc.decim_t_s, acc.decim_contrib_sat_idx, acc.decim_contrib_elev_deg,
+    ):
+        for sat_idx, elev_deg in zip(idx_arr, elev_arr):
+            lines.append(f"{float(t_s):.6g},{int(sat_idx)},{float(elev_deg):.4f}")
+    return "\n".join(lines) + "\n"
+
+
 @dataclass
 class EPFDWindowStats:
     """Slim per-window-set statistics for S.1503-4 §D5.1.4.2.
@@ -439,4 +497,7 @@ class EPFDWindowStats:
         return bin_centers[::-1], percentages
 
 
-__all__ = ["EPFDStreamAccumulator", "EPFDWindowStats", "DECIM_TARGET_POINTS"]
+__all__ = [
+    "EPFDStreamAccumulator", "EPFDWindowStats", "DECIM_TARGET_POINTS",
+    "format_contributing_elevation_csv",
+]

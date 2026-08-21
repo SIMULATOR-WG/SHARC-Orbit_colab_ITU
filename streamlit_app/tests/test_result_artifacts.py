@@ -228,6 +228,48 @@ def test_timeseries_gz_for_long_traces(tmp_path):
     assert text.count("\n") > 60_000
 
 
+def test_contributing_elevation_csv_absent_when_no_acc_or_no_trace(tmp_path):
+    from streamlit_app.lib.result_artifacts import write_contributing_elevation_csv
+
+    assert write_contributing_elevation_csv(tmp_path, None) is None
+    assert write_contributing_elevation_csv(tmp_path, EPFDStreamAccumulator()) is None
+
+
+def test_contributing_elevation_csv_written_via_run_artifacts(tmp_path):
+    acc = EPFDStreamAccumulator()
+    acc.add(time_s=0.0, epfd_db=-160.0, duration_s=1.0, num_horizon_sats=5,
+            num_visible_sats=3, num_contributing_sats=2, min_alpha_deg=4.0,
+            contrib_sat_idx=np.array([1, 2]), contrib_elev_deg=np.array([30.0, 45.0]))
+    acc.add(time_s=1.0, epfd_db=-161.0, duration_s=1.0, num_horizon_sats=5,
+            num_visible_sats=3, num_contributing_sats=1, min_alpha_deg=4.0,
+            contrib_sat_idx=np.array([1]), contrib_elev_deg=np.array([31.0]))
+
+    written = write_run_artifacts(tmp_path, _sim_data(), acc=acc)
+    assert "contributing_sat_elevations.csv" in written
+
+    rows = _rows(tmp_path / "contributing_sat_elevations.csv")
+    assert len(rows) == 3
+    assert rows[0]["sat_idx"] == "1"
+    assert float(rows[0]["elevation_deg"]) == 30.0
+    head = (tmp_path / "contributing_sat_elevations.csv").read_text().splitlines()[1]
+    assert "elevation_deg" in head and "deg" in head
+
+
+def test_contributing_elevation_csv_gz_for_long_traces(tmp_path):
+    import gzip
+    from streamlit_app.lib.result_artifacts import write_contributing_elevation_csv
+
+    class BigAcc:
+        decim_t_s = list(range(60_000))
+        decim_contrib_sat_idx = [np.array([k % 7]) for k in range(60_000)]
+        decim_contrib_elev_deg = [np.array([5.0]) for _ in range(60_000)]
+
+    name = write_contributing_elevation_csv(tmp_path, BigAcc())
+    assert name == "contributing_sat_elevations.csv.gz"
+    text = gzip.decompress((tmp_path / name).read_bytes()).decode()
+    assert text.count("\n") > 60_000
+
+
 def test_run_to_xlsx_aggregate_curves_and_res76():
     """Aggregate export parity with the UI chart: per-point curves get their
     own sheet and Resolution 76 joins the result_def specification points."""

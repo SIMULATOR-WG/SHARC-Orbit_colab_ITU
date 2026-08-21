@@ -28,6 +28,7 @@ from src.time_step import (  # type: ignore[import]
 from src.epfd_calculator import (  # type: ignore[import]
     run_epfd_simulation,
     run_epfd_simulation_windowed,
+    run_epfd_simulation_ref_vec,
 )
 
 
@@ -107,6 +108,28 @@ def test_window_params_min_sliding_time_floor():
     assert w.min_sliding_time_s >= 1.0 - 1e-9   # floored at 1 s
     assert w.n_sw == 60                          # ⌊30/0.5⌋
     assert w.n_msl == math.ceil(1.0 / 0.5)       # ⌈1/0.5⌉ = 2
+
+
+def test_single_set_forces_one_window_set():
+    """``single_set=True`` (used by reference-vector selection, see
+    artifacts/WP4A_519_track_duration_consolidation_decision.md) skips the
+    MIN_SLIDING_TIME formula entirely: N_MSL == N_SW and N_TW == 1,
+    regardless of orbital period / satellite count."""
+    w_multi = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=60,
+    )
+    assert w_multi.n_tw > 1  # the non-single_set case is a genuine multi-set here
+
+    w_single = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=60, single_set=True,
+    )
+    assert w_single.n_sw == w_multi.n_sw == 10  # same hold window either way
+    assert w_single.n_tw == 1
+    assert w_single.n_msl == w_single.n_sw
+    assert w_single.n_repeat == w_multi.n_repeat
+    assert w_single.n_total_steps == w_single.n_repeat * w_single.n_sw
 
 
 def test_window_range_helpers():
@@ -259,3 +282,88 @@ def test_windowed_run_is_deterministic():
     r2 = run_epfd_simulation_windowed(windows=windows, n_jobs=1, **common)
     assert np.array_equal(r1.cdf_epfd_dBW, r2.cdf_epfd_dBW)
     assert np.allclose(r1.cdf_percentage, r2.cdf_percentage, atol=1e-12)
+
+
+# ── run_epfd_simulation_ref_vec (US proposal R23-WP4A-C-0519, consolidated
+#    onto this same MIN_DURATION/N_SW windowing — see
+#    artifacts/WP4A_519_track_duration_consolidation_decision.md) ────────────
+
+def test_ref_vec_windowed_standalone_equals_parallel():
+    ant = _ant()
+    const = _constellation()
+    common = dict(
+        constellation=const, wcg=_wcg(), pfd_mask=_alpha_mask(), es_antenna=ant,
+        alpha0_deg=2.0, min_elevation_deg=5.0, pfd_bw_correction_db=0.0,
+        ref_vec_az_deg=0.0, ref_vec_el_deg=90.0, ref_vec_time_window_P_pct=100.0,
+        wcg_ref_sat_idx=0,
+        # _get_lowest_avg_ref_vec_separation treats max_co_freq<=0 as "select
+        # nothing" (unlike _resolve_max_co_freq's 0=unlimited convention used
+        # elsewhere) — pass an explicit cap, matching every other ref-vec test.
+        max_co_freq_by_lat=[(-90.0, 90.0, 5)],
+    )
+    windows = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=len(const), single_set=True,
+    )
+    assert windows.n_tw == 1  # reference-vector mode never uses the N_TW envelope
+
+    seq = run_epfd_simulation_ref_vec(windows=windows, n_jobs=1, **common)
+    par = run_epfd_simulation_ref_vec(windows=windows, n_jobs=4, **common)
+
+    # Non-vacuity: real contributing satellites, not empty-vs-empty.
+    assert seq.acc.n_steps_valid > 0
+    assert len(seq.cdf_epfd_dBW) > 0
+
+    assert np.array_equal(seq.cdf_epfd_dBW, par.cdf_epfd_dBW)
+    assert np.allclose(seq.cdf_percentage, par.cdf_percentage, atol=1e-12)
+
+    def to_set(acc):
+        s = set()
+        for t, idxs, elevs in zip(acc.decim_t_s, acc.decim_contrib_sat_idx, acc.decim_contrib_elev_deg):
+            for i, e in zip(idxs, elevs):
+                s.add((round(float(t), 6), int(i), round(float(e), 6)))
+        return s
+
+    seq_set, par_set = to_set(seq.acc), to_set(par.acc)
+    assert len(seq_set) > 0
+    assert seq_set == par_set
+
+
+def test_ref_vec_windowed_run_is_deterministic():
+    ant = _ant()
+    const = _constellation(seed=3)
+    common = dict(
+        constellation=const, wcg=_wcg(), pfd_mask=_alpha_mask(), es_antenna=ant,
+        alpha0_deg=2.0, min_elevation_deg=5.0, pfd_bw_correction_db=0.0,
+        ref_vec_az_deg=0.0, ref_vec_el_deg=90.0, ref_vec_time_window_P_pct=100.0,
+        wcg_ref_sat_idx=0,
+        # _get_lowest_avg_ref_vec_separation treats max_co_freq<=0 as "select
+        # nothing" (unlike _resolve_max_co_freq's 0=unlimited convention used
+        # elsewhere) — pass an explicit cap, matching every other ref-vec test.
+        max_co_freq_by_lat=[(-90.0, 90.0, 5)],
+    )
+    windows = compute_track_duration_windows(
+        min_duration_s=8.0, t_fine_s=1.0, nsteps=80,
+        min_orbital_period_s=6000.0, n_satellites=len(const), single_set=True,
+    )
+    r1 = run_epfd_simulation_ref_vec(windows=windows, n_jobs=1, **common)
+    r2 = run_epfd_simulation_ref_vec(windows=windows, n_jobs=1, **common)
+    assert np.array_equal(r1.cdf_epfd_dBW, r2.cdf_epfd_dBW)
+    assert np.allclose(r1.cdf_percentage, r2.cdf_percentage, atol=1e-12)
+
+
+def test_run_epfd_simulation_ref_vec_rejects_multi_set_windows():
+    windows = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=60,
+    )
+    assert windows.n_tw > 1
+    try:
+        run_epfd_simulation_ref_vec(
+            constellation=_constellation(), wcg=_wcg(), pfd_mask=_alpha_mask(),
+            es_antenna=_ant(), alpha0_deg=2.0, min_elevation_deg=5.0,
+            windows=windows, n_jobs=1, pfd_bw_correction_db=0.0,
+        )
+        assert False, "expected ValueError for a multi-set TrackDurationWindows"
+    except ValueError:
+        pass

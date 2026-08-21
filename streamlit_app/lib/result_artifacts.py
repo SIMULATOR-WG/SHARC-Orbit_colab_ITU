@@ -11,6 +11,10 @@ Writes, next to ``sim_data.json`` in the run directory:
                             accumulator (adaptive stride; the *statistics* are
                             accumulated over every step regardless).
                             Requirement R15.
+* ``contributing_sat_elevations.csv`` — elevation angle (as seen from the ES)
+                            of every EPFD-contributing satellite, over the
+                            same decimated time points as
+                            ``epfd_timeseries.csv``.
 * ``ccdf.png``            — CCDF curve image (R12).
 * ``histogram.png``       — histogram image (R14).
 
@@ -26,7 +30,9 @@ from typing import Any
 import numpy as np
 
 # 0.1 dB bin grid of the streaming accumulator (S.1503-4 §D1.4).
-from src.epfd_stream_accumulator import _BIN_MIN_DB, _BIN_SIZE_DB  # noqa: PLC2701
+from src.epfd_stream_accumulator import (  # noqa: PLC2701
+    _BIN_MIN_DB, _BIN_SIZE_DB, format_contributing_elevation_csv,
+)
 
 
 def _refbw_khz(sim_data: dict[str, Any]) -> float:
@@ -272,6 +278,28 @@ def write_per_point_timeseries_csv(
         out.write_bytes(gzip.compress(payload.encode("utf-8")))
         return out.name
     out = result_path / "epfd_timeseries_per_point.csv"
+    out.write_text(payload, encoding="utf-8")
+    return out.name
+
+
+def write_contributing_elevation_csv(result_path: Path, acc: Any | None) -> str | None:
+    """``contributing_sat_elevations.csv`` — elevation of EPFD-contributing
+    satellites over the same decimated time points as
+    ``epfd_timeseries.csv``. See ``format_contributing_elevation_csv``
+    (``src/epfd_stream_accumulator.py``) for the row format."""
+    if acc is None or not getattr(acc, "decim_t_s", None):
+        return None
+    payload = format_contributing_elevation_csv(acc)
+    if not payload:
+        return None
+    n_rows = sum(len(a) for a in getattr(acc, "decim_contrib_sat_idx", []))
+    # R16 — compressed container for long traces (cheap, self-describing).
+    if n_rows > 50_000:
+        import gzip
+        out = result_path / "contributing_sat_elevations.csv.gz"
+        out.write_bytes(gzip.compress(payload.encode("utf-8")))
+        return out.name
+    out = result_path / "contributing_sat_elevations.csv"
     out.write_text(payload, encoding="utf-8")
     return out.name
 
@@ -644,6 +672,7 @@ def write_run_artifacts(result_path: Path, sim_data: dict[str, Any],
         lambda: write_timeseries_csv(result_path, sim_data, acc),
         lambda: write_per_system_ccdf_csv(result_path, sim_data),
         lambda: write_per_system_timeseries_csv(result_path, sim_data),
+        lambda: write_contributing_elevation_csv(result_path, acc),
         lambda: write_table17_csv(result_path, sim_data),
         lambda: write_geometries_csv(result_path, sim_data),
         lambda: write_timebase_csv(result_path, sim_data),
