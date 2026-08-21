@@ -1,0 +1,28 @@
+# Alpha table — NEUTRAL: α uniformly distributed over [0°, 90°]
+#
+# The CDF is (near) linear in α, so after densification every bin carries the
+# same mass and accrues credit at the same rate. The quota then behaves like a
+# round-robin over the occupied α bins: no bin is privileged, and the pick
+# degenerates to "the bin that has been starved longest".
+#
+# Useful as the midpoint between 00_reference (agrees with normative) and
+# 01_high_alpha_stress (fights it): it isolates the effect of *spreading* the
+# selection across α from the effect of *targeting* a specific α range.
+#
+# Also the cleanest table for an `alpha_bin_deg` sensitivity sweep — with
+# uniform mass, any change in the statistics comes from the bin width alone
+# (Doc 4A/312 notes smaller bins tend to lower the EPFD statistics).
+
+min:
+  - [1.0, 0.012]
+  - [22.5, 0.250]
+  - [45.0, 0.500]
+  - [67.5, 0.750]
+  - [89.0, 0.989]
+
+max:
+  - [1.0, 0.006]
+  - [22.5, 0.200]
+  - [45.0, 0.430]
+  - [67.5, 0.680]
+  - [89.0, 0.960]

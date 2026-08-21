@@ -1,0 +1,36 @@
+# Alpha table — REALISTIC OPERATOR DECLARATION
+#
+# A densely sampled declaration with a knee around the exclusion-zone angle
+# (α₀ ≈ 5–6° in most filings), which is where the mask and the selection
+# interact. Shaped like what an operator would actually submit: fine resolution
+# near α₀, coarsening out to the tail.
+#
+# TESTS: the densification path (Decision 1) with many pairs. With
+# `alpha_bin_deg = 1.0` (default) the 7 sparse pairs become 90 bins by linear
+# interpolation of the CDF; the per-bin masses must reproduce the normative
+# per-case totals Nco·p₁, Nco·(pᵢ − pᵢ₋₁), Nco·(1 − pₙ).
+#
+# Good candidate for the `alpha_bin_deg` sweep (0.5 / 1.0 / 2.0 / 5.0): with the
+# knee at α₀, coarse bins smear the transition and the statistics should move.
+#
+# Pair the run with a config whose non_gso.alpha0_deg matches the knee, or the
+# detail declared here falls entirely inside the exclusion zone and is wasted
+# (satellites with |α| < α₀ never reach the standard selection at all).
+
+min:
+  - [2.0, 0.15]
+  - [4.0, 0.28]
+  - [6.0, 0.40]
+  - [8.0, 0.52]
+  - [12.0, 0.68]
+  - [20.0, 0.84]
+  - [40.0, 0.96]
+
+max:
+  - [2.0, 0.08]
+  - [4.0, 0.17]
+  - [6.0, 0.26]
+  - [8.0, 0.36]
+  - [12.0, 0.52]
+  - [20.0, 0.72]
+  - [40.0, 0.91]

@@ -1,0 +1,30 @@
+# Alpha table — REFERENCE: mass concentrated at small α (WP 4A Doc 4A/312)
+#
+# Declares that the active satellite spends most of its time close to the GSO
+# arc: P(α ≤ 2°) ≈ 0.70 in the `min` table. That is exactly where the EPFD peaks,
+# so the quota rule *wants* the same satellites the normative Step 20 picks.
+#
+# EXPECTED: little to no divergence from the s1503 run. Use it as the control —
+# if this one already diverges, the geometry has a rich eligible pool and the
+# method is biting. If it does NOT diverge, that alone proves nothing; run
+# 01_high_alpha_stress.yaml before concluding anything.
+#
+# `min` / `max` are the two declared bounding tables of the 7-table envelope
+# (factors 0, .25, .5, .75, 1 plus the MinMax / MaxMin diagonals). Convention
+# here: `min` = distribution shifted toward small α, `max` = shifted toward
+# large α. Both MUST start at the same angle (see README, "Restrição").
+#
+# Pairs are [angle_deg, cumulative_probability] — a CDF: P(α ≤ angle).
+# Angles strictly increasing, probabilities non-decreasing in (0, 1].
+
+min:
+  - [1.0, 0.45]
+  - [2.0, 0.70]
+  - [5.0, 0.88]
+  - [10.0, 0.96]
+
+max:
+  - [1.0, 0.30]
+  - [2.0, 0.55]
+  - [5.0, 0.78]
+  - [10.0, 0.92]

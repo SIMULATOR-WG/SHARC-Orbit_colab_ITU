@@ -180,6 +180,12 @@ prev = use_persisted_state("s1503.form", {
     "wcg_manual_es_lat": "",
     "wcg_manual_es_lon": "",
     "wcg_manual_gso_lon": "",
+    "selection_strategy": "s1503",
+    "top_n": 5,
+    "n_select": 1,
+    "seed": "",
+    "include_override": False,
+    "alpha_bin_deg": 0.0,   # 0 = normative declared TSS cases (Doc 4A/312 p. 110)
 })
 if not prev.get("_full_theta_default_v1"):
     prev = dict(prev)
@@ -681,6 +687,146 @@ with st.form("s1503_form"):
                  "large MIN_DURATION with a small T_fine is expensive.",
         )
 
+    with st.expander("8. Satellite selection strategy", expanded=True):
+        st.caption(
+            "Method used to choose which satellites contribute to the aggregated EPFD↓. "
+            "The normative S.1503-4 rule picks the highest EPFD satellites. "
+            "Alternative strategies are experimental. All strategies run with the "
+            "§D4.7 dual time step (mode `s1503`) above — the random ones run serially "
+            "when it is on."
+        )
+        col_sel, col_n, col_seed = st.columns(3)
+        with col_sel:
+            selection_strategy = st.selectbox(
+                "Strategy",
+                options=["s1503", "top_n_elev_random", "hybrid_rand_he", "alpha_table"],
+                index=0,
+                key="sel_strategy",
+                help=(
+                    "`s1503` – normative rule (Steps 19–22): order by EPFD, apply MAX_CO_FREQ and MIN_ANGLE_AT_ES.\n"
+                    "`top_n_elev_random` – pick the Top-N highest-elevation satellites, then choose one at random.\n"
+                    "`hybrid_rand_he` – combine Nco random + Nco highest-elevation, then keep the Nco highest EPFD.\n"
+                    "`alpha_table` – deterministic quota selection over a declared α CDF (Doc 4A/312); "
+                    "runs the 7-table envelope. Needs a min/max α table file below.\n"
+                    "All four work with the dual time step (mode `s1503`): the random strategies "
+                    "run serially when it is on (per-step RNG needs a stable step index), and "
+                    "`alpha_table` scales its TSS credit by Δt/T_fine so the time-weighted α "
+                    "distribution still tracks the declared table."
+                ),
+            )
+        with col_n:
+            top_n = st.number_input(
+                "Top-N (for `top_n_elev_random`)",
+                min_value=1,
+                max_value=50,
+                value=5,
+                step=1,
+                help="Only used when strategy is `top_n_elev_random`. Number of highest-elevation satellites to consider.",
+            )
+        with col_seed:
+            seed = st.text_input(
+                "Random seed (optional)",
+                value="",
+                placeholder="e.g. 42",
+                help="Set a fixed seed for reproducibility (applies to random selections). Leave empty for non‑deterministic.",
+            )
+
+        n_select = st.number_input(
+            "n_select — satellites tracked (for `top_n_elev_random`)",
+            min_value=1,
+            max_value=50,
+            value=int(prev.get("n_select", 1)),
+            step=1,
+            help=(
+                "Only used when strategy is `top_n_elev_random`. Number of satellites "
+                "drawn at random from the Top-N pool. Effective count is "
+                "min(n_select, MAX_CO_FREQ), bounded by the pool size. Default 1 (paper)."
+            ),
+        )
+
+        include_override = st.checkbox(
+            "Include override (OR condition) satellites",
+            value=prev.get("include_override", False),
+            help=(
+                "When enabled, satellites that violate α₀/ε₀ but have "
+                "GRX(φ) > min(Gmax-30, GRX(α₀)) are added to the EPFD sum "
+                "without the MAX_CO_FREQ cap (S.1503-4 Step 22). "
+                "When disabled (default), override satellites are ignored in "
+                "experimental strategies (normative behavior kept for 's1503')."
+            ),
+        )
+
+        # ── Alpha table (Doc 4A/312) — FIXED here for now (always visible) ──
+        st.markdown("**Alpha table (Doc 4A/312)** — deterministic quota over a declared α CDF")
+        st.caption("Used by the engine only when Strategy = `alpha_table`. Upload declared min/max CDF.")
+        alpha_bin_deg = st.number_input(
+            "α sub-bin width (deg) — 0 = normative",
+            min_value=0.0, max_value=10.0,
+            value=float(prev.get("alpha_bin_deg", 0.0)), step=0.5,
+            help=(
+                "0 (default) uses the normative TSS cases of Doc 4A/312 p. 110: "
+                "the declared intervals themselves, with an unbounded last case. "
+                "Any value > 0 subdivides each case into sub-bins, splitting its "
+                "credit among them — that changes the Step-20 'highest TSS' "
+                "comparison, so the run is NOT conforming. Sensitivity studies only "
+                "(Doc 4A/707 §4.1.3)."
+            ),
+        )
+        if float(alpha_bin_deg) > 0.0:
+            st.warning(
+                f"α sub-bin = {alpha_bin_deg}° subdivides the declared TSS cases — "
+                "this run does **not** conform to Doc 4A/312. Set 0 for the "
+                "normative granularity."
+            )
+        up = st.file_uploader(
+            "Alpha table file (JSON or YAML) — declared min/max CDF pairs",
+            type=["json", "yaml", "yml"],
+            help=(
+                "File with `min` and `max` lists of [angle_deg, probability] pairs; "
+                "probability is the CDF P(α ≤ angle), monotonically increasing. "
+                "NOT read from the .mdb."
+            ),
+        )
+        alpha_table_data = None
+        # Provenance: which declared table produced this run. The uploader hands
+        # over bytes, not a server-side path, so the original file name is the
+        # only identifier available — enough to tell sibling tables apart
+        # (e.g. examples/alpha_tables/03_wide_envelope.yaml vs 04_narrow_…).
+        alpha_table_file = None
+
+        def _validate_cdf(pairs, who):
+            pa = pp = -1.0
+            for a, p in pairs:
+                a, p = float(a), float(p)
+                if a <= pa:
+                    raise ValueError(f"{who}: angles must strictly increase (got {a}° after {pa}°).")
+                if p < pp:
+                    raise ValueError(f"{who}: probabilities must be non-decreasing (CDF); got {p} after {pp}.")
+                if not (0.0 < p <= 1.0):
+                    raise ValueError(f"{who}: probability {p} out of (0, 1].")
+                pa, pp = a, p
+
+        if up is not None:
+            try:
+                raw = up.getvalue().decode("utf-8")
+                if up.name.lower().endswith((".yaml", ".yml")):
+                    import yaml as _yaml
+                    data = _yaml.safe_load(raw)
+                else:
+                    import json as _json
+                    data = _json.loads(raw)
+                _min = [[float(a), float(p)] for a, p in data["min"]]
+                _max = [[float(a), float(p)] for a, p in data["max"]]
+                _validate_cdf(_min, "min"); _validate_cdf(_max, "max")
+                alpha_table_data = {"min": _min, "max": _max}
+                alpha_table_file = up.name
+                st.success(
+                    f"Alpha table loaded from `{up.name}`: "
+                    f"{len(_min)} min pairs, {len(_max)} max pairs."
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Invalid alpha table: {exc}")
+
     # ── Workload + runtime estimate ────────────────────────────────────────
     from lib import estimator as _est
     from lib import srs_inspect as _si
@@ -853,6 +999,28 @@ if submit:
     # Table 8 εGSO gate: checkbox unchecked (default) → disable it.
     params["disable_gso_min_elevation"] = not bool(apply_table8_egso)
 
+    params["selection_strategy"] = selection_strategy
+    if top_n is not None and top_n > 0:
+        params["top_n"] = int(top_n)
+    if n_select is not None and n_select > 0:
+        params["n_select"] = int(n_select)
+    if seed and seed.strip():
+        try:
+            params["seed"] = int(seed.strip())
+        except ValueError:
+            pass
+
+    params["include_override"] = bool(include_override)
+
+    if selection_strategy == "alpha_table":
+        params["alpha_bin_deg"] = float(alpha_bin_deg)
+        if alpha_table_data is not None:
+            params["alpha_table"] = alpha_table_data
+            # Recorded in the run's params.json next to the inline pairs: the
+            # pairs make the run reproducible, the name says which declared
+            # table it was.
+            params["alpha_table_file"] = alpha_table_file
+
     # Article 22 scenario leaf overrides service / ES antenna / ref BW /
     # frequency run and pins the PFD mask (see section 1 selector).
     if art22_leaf is not None:
@@ -929,6 +1097,12 @@ if submit:
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
         "restrict_emitters_to_sim_band": bool(restrict_emitters),
+        "selection_strategy": selection_strategy,
+        "top_n": int(top_n) if top_n is not None else 5,
+        "n_select": int(n_select) if n_select is not None else 1,
+        "seed": seed.strip() if seed else "",
+        "include_override": False,
+        "alpha_bin_deg": float(alpha_bin_deg),
     })
 
     run_id = launcher.launch_s1503(system_id=sel_sys, params=params)

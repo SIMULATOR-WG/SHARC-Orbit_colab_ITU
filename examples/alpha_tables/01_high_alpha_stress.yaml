@@ -1,0 +1,33 @@
+# Alpha table — STRESS / DECISIVE TEST: mass pushed to large α
+#
+# Declares that the active satellite almost never sits near the GSO arc:
+# P(α ≤ 10°) ≈ 0.08. The quota therefore demands satellites far from the arc,
+# i.e. the exact opposite of what the normative Step 20 (highest epfd↓) picks.
+#
+# This is the diagnostic table. Since the alpha-table aggregate can never
+# exceed the normative one (any Nco-subset sums to ≤ the top-Nco subset), the
+# CCDF should drop *visibly* here.
+#
+#   • CCDF moves          → the selection bites; the method is working.
+#   • CCDF identical to s1503 → the selection CANNOT bite in this scenario.
+#     Almost always: the eligible pool per step is ≤ Nco (nothing to choose),
+#     or every eligible satellite falls in the same α bin. Check
+#     `num_contributing_sats` against Nco and the per-sub-run TSS_max line.
+#
+# Expect a large TSS residual (`TSS_max ... per step`) growing roughly linearly:
+# the geometry cannot supply the declared large-α occupancy, so the credit in
+# the high-α bins is never spent. That is the infeasibility signature, not a bug.
+
+min:
+  - [1.0, 0.02]
+  - [10.0, 0.08]
+  - [30.0, 0.30]
+  - [60.0, 0.70]
+  - [85.0, 0.95]
+
+max:
+  - [1.0, 0.01]
+  - [10.0, 0.04]
+  - [30.0, 0.18]
+  - [60.0, 0.55]
+  - [85.0, 0.90]

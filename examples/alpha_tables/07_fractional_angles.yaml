@@ -1,0 +1,36 @@
+# Alpha table — BIN SENSITIVITY: declared angles off the bin grid
+#
+# Every declared angle is a half-degree (0.5, 1.5, 2.5, 4.5, 7.5, 12.5), so with
+# the default `alpha_bin_deg = 1.0` no declared pair coincides with a bin edge.
+# The densification must split each declared step across two bins by linear CDF
+# interpolation rather than snapping it to an edge.
+#
+# TESTS: the interaction between the declared grid and the bin grid. Run the
+# same table at several bin widths and compare:
+#
+#   --alpha-bin-deg 0.5   → declared angles land ON edges (aligned)
+#   --alpha-bin-deg 1.0   → every pair straddles a bin (maximally misaligned)
+#   --alpha-bin-deg 2.0   → two declared pairs collapse into one bin
+#   --alpha-bin-deg 5.0   → the whole knee collapses into a single bin
+#
+# Doc 4A/312 flags bin width as a known sensitivity (smaller bins tend to lower
+# the statistics). This table makes it measurable: the spread across those four
+# runs is the size of that sensitivity for your constellation. If the spread is
+# ~0, the selection is not resolving α at all — cross-check with
+# 01_high_alpha_stress.yaml before reporting it as "insensitive".
+
+min:
+  - [0.5, 0.20]
+  - [1.5, 0.42]
+  - [2.5, 0.58]
+  - [4.5, 0.75]
+  - [7.5, 0.88]
+  - [12.5, 0.95]
+
+max:
+  - [0.5, 0.10]
+  - [1.5, 0.25]
+  - [2.5, 0.38]
+  - [4.5, 0.58]
+  - [7.5, 0.76]
+  - [12.5, 0.90]

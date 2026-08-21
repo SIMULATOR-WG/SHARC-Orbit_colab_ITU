@@ -1,0 +1,51 @@
+# Alpha table — THE CANONICAL EXAMPLE OF Doc 4A/312, p. 16, verbatim.
+#
+# Transcribed from the `<alpha_table latitude = "0">` block of the XML the
+# document specifies for `track_method = "A"`:
+#
+#   <alpha_table_min>
+#     <alpha_table_pair angle = "20" >0.1, </alpha_table_pair>
+#     <alpha_table_pair angle = "30" >0.25</alpha_table_pair>
+#     <alpha_table_pair angle = "40" >0.5</alpha_table_pair>
+#     <alpha_table_pair angle = "50" >1.0</alpha_table_pair>
+#   </alpha_table_min>
+#   <alpha_table_max>
+#     <alpha_table_pair angle = "30" >0.1, </alpha_table_pair>
+#     <alpha_table_pair angle = "40" >0.25</alpha_table_pair>
+#     <alpha_table_pair angle = "50" >0.5</alpha_table_pair>
+#     <alpha_table_pair angle = "60" >1.0</alpha_table_pair>
+#   </alpha_table_max>
+#
+# USE IT AS THE CONFORMANCE REFERENCE. Two properties are worth noting, because
+# both broke earlier versions of this engine:
+#
+#   * The two tables start at different angles (20° vs 30°) and end at different
+#     angles (50° vs 60°) — the offset IS the envelope. See
+#     08_offset_first_angles.yaml for what the union grid does about it.
+#   * Both end at p = 1.0, so the unbounded tail case (1 − p_n) carries zero
+#     mass: `min` never wants a satellite at α ≥ 50°, `max` none at α ≥ 60°. If a
+#     run shows credit piling up in a zero-mass tail, that is a reporting bug,
+#     not infeasibility.
+#
+# The declared TSS cases (Doc p. 110) that come out of `min` are
+#   [0,20) 0.10 · [20,30) 0.15 · [30,40) 0.25 · [40,50) 0.50 · [50,∞) 0.00
+# and out of `max`
+#   [0,30) 0.10 · [30,40) 0.15 · [40,50) 0.25 · [50,60) 0.50 · [60,∞) 0.00
+#
+# NOTE ON GEOMETRY: this table declares that the active satellite spends all its
+# time at α ≥ 20°, i.e. well away from the GSO arc. A constellation whose
+# eligible pool never reaches those angles cannot satisfy it, and the TSS
+# residual will grow linearly — that is the table being infeasible for that
+# constellation, which is exactly what the diagnostic is for.
+
+min:
+  - [20.0, 0.10]
+  - [30.0, 0.25]
+  - [40.0, 0.50]
+  - [50.0, 1.00]
+
+max:
+  - [30.0, 0.10]
+  - [40.0, 0.25]
+  - [50.0, 0.50]
+  - [60.0, 1.00]

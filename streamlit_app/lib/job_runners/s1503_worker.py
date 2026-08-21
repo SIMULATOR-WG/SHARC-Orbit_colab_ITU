@@ -18,6 +18,13 @@ params.json fields (optional simulation overrides):
     service               — default "FSS"
     es_antenna_diameter_m — overrides config gso_es.antenna_diameter_m
     keep_full_history     — default False (legacy mode, costly)
+    alpha_table           — declared {"min": [[deg, cdf], …], "max": […]} pairs
+                            for selection_strategy="alpha_table" (Doc 4A/312)
+    alpha_table_file      — name of the file those pairs came from. Provenance
+                            only; the engine runs off the inline pairs above.
+    alpha_bin_deg         — NON-NORMATIVE α sub-bin width inside each declared
+                            TSS case. Default 0.0 = the normative declared
+                            intervals of Doc 4A/312 p. 110.
 
 Outputs (written under result_path):
     sim_data.json         — CCDF, time series, max EPFD, percentiles, WCG,
@@ -232,6 +239,36 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     _md = params.get("min_duration_s")
     if _md is not None and float(_md) > 0.0:
         ngso["min_duration_by_lat"] = [(-90.0, 90.0, float(_md))]
+
+    if "selection_strategy" in params:
+        sim["selection_strategy"] = params["selection_strategy"]
+    if "top_n" in params:
+        sim["top_n"] = int(params["top_n"])
+    if "n_select" in params:
+        sim["n_select"] = int(params["n_select"])
+    if "seed" in params and params["seed"] is not None:
+        sim["seed"] = int(params["seed"])
+    if "include_override" in params:
+        sim["include_override"] = bool(params["include_override"])
+    # Alpha table (Doc 4A/312): declared min/max CDF pairs come pre-parsed from
+    # the UI (JSON/YAML) — NOT from the .mdb — and the α-bin width for the TSS
+    # densification. run_wcg_downlink reads config["non_gso"]["alpha_table"].
+    if params.get("alpha_bin_deg") is not None:
+        sim["alpha_bin_deg"] = float(params["alpha_bin_deg"])
+    _at = params.get("alpha_table")
+    if _at and "min" in _at and "max" in _at:
+        ngso["alpha_table"] = {
+            "min": [[float(a), float(p)] for a, p in _at["min"]],
+            "max": [[float(a), float(p)] for a, p in _at["max"]],
+        }
+        # ``alpha_table_file`` is provenance only (which declared table this
+        # run used) — the engine runs off the inline pairs. Echoed to the log
+        # so worker.log identifies the table without opening params.json.
+        _at_file = params.get("alpha_table_file")
+        _emit(
+            f"alpha_table: {len(_at['min'])} min / {len(_at['max'])} max pairs"
+            + (f" from '{_at_file}'" if _at_file else " (source file not recorded)")
+        )
 
     # Manual WCG override
     if params.get("wcg_manual") and all(

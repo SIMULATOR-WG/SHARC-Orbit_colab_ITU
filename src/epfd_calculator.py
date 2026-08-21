@@ -239,6 +239,143 @@ def _separation_angle_deg_at_es(
     return math.degrees(math.acos(c))
 
 
+@dataclass(frozen=True)
+class SelectionConfig:
+    """Configuration for the satellite selection strategy (Part D, Step 20).
+
+    ``strategy``:
+      - ``"s1503"``            : normative rule (§D5.1.4.1 Steps 19–22), unchanged.
+      - ``"top_n_elev_random"``: Top-N highest-elevation random selection
+        (WP 4A Doc 4A/442-E). Rank the α₀/ε₀-eligible ("standard") satellites by
+        elevation, keep the top ``top_n``, draw ``n_select`` at random (no
+        replacement). The OR branch (Step 22) is disabled for this strategy.
+      - ``"hybrid_rand_he"``  : hybrid random + highest-elevation (WP 4A Doc
+        4A/493-E). Draw Nco random + take Nco highest-elevation from the standard
+        set, union them, then keep the Nco highest-epfd (Nco = MAX_CO_FREQ). OR
+        branch disabled. ``top_n`` / ``n_select`` are unused by this strategy.
+      - ``"alpha_table"``     : deterministic quota selection (WP 4A Doc 4A/312).
+        Driven by a per-sub-run ``TSSAccumulator`` (passed separately, since it is
+        mutable state — not carried in this frozen config). The OR branch (Step
+        22) STAYS ON (normative loop). ``top_n`` / ``n_select`` / ``seed`` unused.
+        ``alpha_bin_deg = 0`` (default) uses the normative TSS cases — the
+        declared intervals of Doc 4A/312 p. 110. A positive value subdivides
+        them, which is a NON-NORMATIVE sensitivity knob: it splits each case's
+        credit among the sub-bins and so changes the Step-20 "highest TSS"
+        comparison. See ``alpha_table.build_tss_cases``.
+
+    ``n_select`` is the *requested* number of tracked satellites; the effective
+    number is ``min(n_select, MAX_CO_FREQ)`` when a positive ``MAX_CO_FREQ`` is
+    declared, and is further bounded by the pool size (``top_n`` / #candidates).
+
+    ``seed`` seeds a per-time-step RNG keyed by ``(seed, step_index)`` so the
+    result is reproducible **independently of chunking/parallelism**. ``None`` →
+    non-deterministic (OS entropy).
+    """
+    strategy: str = "s1503"
+    top_n: int = 5
+    n_select: int = 1
+    seed: int | None = None
+    alpha_bin_deg: float = 0.0
+
+
+def _rng_for_step(seed: int | None, step_index: int) -> np.random.Generator:
+    """Deterministic per-time-step RNG.
+
+    Same ``(seed, step_index)`` ⇒ same draw regardless of how the time axis was
+    split across chunks/workers — the key never depends on chunk boundaries.
+    ``seed is None`` ⇒ non-deterministic (fresh OS entropy).
+    """
+    if seed is None:
+        return np.random.default_rng()
+    return np.random.default_rng(
+        np.random.SeedSequence(entropy=int(seed), spawn_key=(int(step_index),))
+    )
+
+
+def _select_top_n_elev_random(
+    standard_items: list[tuple[float, int]],
+    elev_by_k: dict[int, float],
+    top_n: int,
+    n_select: int,
+    rng: np.random.Generator,
+) -> list[float]:
+    """Top-N highest-elevation random selection (Doc 4A/442-E §4.1).
+
+    ``standard_items`` are the α₀/ε₀-eligible candidates ``(epfd↓ᵢ, k)``;
+    ``elev_by_k`` maps sat index ``k`` → elevation (deg). Steps: (2) sort by
+    elevation descending, deterministic tie-break by ``k`` ascending — so the
+    Top-N set is reproducible *before* the random draw; (3) keep the top
+    ``top_n``; (4) draw ``n_select`` distinct satellites at random. Returns
+    their epfd↓ᵢ (linear); the caller sums them (Step 23).
+    """
+    if not standard_items:
+        return []
+    ordered = sorted(
+        standard_items,
+        key=lambda it: (-elev_by_k.get(it[1], -90.0), it[1]),
+    )
+    pool = ordered[: max(1, int(top_n))]
+    n_eff = min(int(n_select), len(pool))
+    if n_eff <= 0:
+        return []
+    if n_eff >= len(pool):
+        chosen = pool
+    else:
+        pick = rng.choice(len(pool), size=n_eff, replace=False)
+        chosen = [pool[int(i)] for i in pick]
+    return [float(epfd) for epfd, _k in chosen]
+
+
+def _select_hybrid_rand_he(
+    standard_items: list[tuple[float, int]],
+    elev_by_k: dict[int, float],
+    n_co: int,
+    rng: np.random.Generator,
+) -> list[float]:
+    """Hybrid random + highest-elevation selection (Doc 4A/493-E §3.1).
+
+    "Worst case between the two most common methods." Over the α₀/ε₀-eligible
+    candidates ``(epfd↓ᵢ, k)`` (``elev_by_k`` maps ``k`` → elevation deg), with
+    ``n_co`` = number of co-frequency satellites (``MAX_CO_FREQ``):
+
+      1. draw ``n_co`` satellites at random (no replacement) — the Random set;
+      2. take the ``n_co`` highest-elevation satellites — the HE set
+         (elevation desc, deterministic tie-break by ``k`` for reproducibility);
+      3. union the two sets, de-duplicated by ``k`` (a high sat may also be drawn);
+      4. rank the union by epfd↓ descending and keep the top ``n_co``.
+
+    Returns the kept epfd↓ᵢ (linear); the caller sums them (Step 23). More
+    conservative than random-only or HE-only, but bounded above by the full
+    worst-interferer rule (which ranks *all* visible sats, not just this union).
+    The OR branch (Step 22) is disabled for this strategy.
+    """
+    if not standard_items:
+        return []
+    n = max(1, int(n_co))
+    m = len(standard_items)
+    # HE set: n_co highest by elevation (tie-break by k).
+    he_ordered = sorted(
+        standard_items,
+        key=lambda it: (-elev_by_k.get(it[1], -90.0), it[1]),
+    )
+    he_set = he_ordered[: min(n, m)]
+    # Random set: n_co drawn at random from all eligible.
+    if n >= m:
+        rand_set = list(standard_items)
+    else:
+        pick = rng.choice(m, size=n, replace=False)
+        rand_set = [standard_items[int(i)] for i in pick]
+    # Union, de-duplicated by satellite index k.
+    union: dict[int, float] = {}
+    for epfd, k in he_set:
+        union[int(k)] = float(epfd)
+    for epfd, k in rand_set:
+        union[int(k)] = float(epfd)
+    # Rank by epfd desc (tie-break by k for determinism), keep top n_co.
+    ranked = sorted(union.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [float(epfd) for _k, epfd in ranked[:n]]
+
+
 def _select_standard_epfd_s1503_steps_20_21(
     items: list[tuple[float, int]],
     max_co_freq: int,
@@ -304,8 +441,23 @@ def _finalize_epfd_after_max_co_freq(
     max_co_freq_by_system: dict[int, int] | None = None,
     override_items: list[tuple[float, int]] | None = None,
     per_system_out: dict[int, list] | None = None,
+    selection_config: "SelectionConfig | None" = None,
+    step_index: int = 0,
+    elev_by_k: dict[int, float] | None = None,
+    alpha_by_k: dict[int, float] | None = None,
+    alpha_tss: "object | None" = None,
+    t_s: float = 0.0,
+    alpha_step_weight: float = 1.0,
 ) -> tuple[list[float], list[float]]:
     """Steps 19–22 §D5.1.4.1: standard selection (20–21), then OR branch (22).
+
+    **Non-normative strategies (``selection_config``):** when
+    ``selection_config.strategy == "top_n_elev_random"`` the standard selection
+    (Steps 20–21) is replaced by the Top-N highest-elevation random draw
+    (Doc 4A/442-E); the effective count is ``min(n_select, MAX_CO_FREQ)`` (the
+    ``min`` reading: never exceed the co-frequency ceiling). The OR branch is
+    disabled for that strategy (returns ``[]``). ``strategy == "s1503"`` (default)
+    leaves everything below unchanged.
 
     With ``strict_max_co_freq_total=False`` (the **normative** default
     behavior in the project), ``MAX_CO_FREQ`` applies only to the standard
@@ -340,6 +492,68 @@ def _finalize_epfd_after_max_co_freq(
     split may then slightly over-count for such steps. The joint result is
     unaffected either way.
     """
+    # --- Non-normative strategy dispatch (fixed- or dual-step, OR disabled) ---
+    # Dispatched BEFORE the per-system OR attribution below: the strategies
+    # return early and (except alpha_table) drop the Step 22 branch entirely,
+    # so attributing override_items first would over-count.
+    if selection_config is not None and selection_config.strategy == "top_n_elev_random":
+        n_sel = int(selection_config.n_select)
+        if max_co_freq and max_co_freq > 0:
+            n_sel = min(n_sel, int(max_co_freq))  # never exceed the co-freq ceiling
+        rng = _rng_for_step(selection_config.seed, step_index)
+        selected = _select_top_n_elev_random(
+            standard_items,
+            elev_by_k or {},
+            selection_config.top_n,
+            n_sel,
+            rng,
+        )
+        # OR branch (Step 22) disabled for this strategy — see SelectionConfig.
+        return selected, []
+
+    if selection_config is not None and selection_config.strategy == "hybrid_rand_he":
+        # Nco = number of co-frequency satellites (MAX_CO_FREQ); paper §3.1.
+        n_co = int(max_co_freq) if (max_co_freq and max_co_freq > 0) else 1
+        rng = _rng_for_step(selection_config.seed, step_index)
+        selected = _select_hybrid_rand_he(
+            standard_items,
+            elev_by_k or {},
+            n_co,
+            rng,
+        )
+        # OR branch (Step 22) disabled for this strategy.
+        return selected, []
+
+    if selection_config is not None and selection_config.strategy == "alpha_table":
+        # Alpha table (Doc 4A/312): TSS quota selection. Unlike the two papers
+        # above, this lives inside the full normative loop, so the OR branch
+        # (Step 22) STAYS ON — return the override contributors unchanged.
+        if alpha_tss is None:
+            raise ValueError(
+                "alpha_table strategy requires an alpha_tss accumulator "
+                "(built per sub-run by the envelope orchestrator)."
+            )
+        prune = None
+        if min_angle_at_es_deg and float(min_angle_at_es_deg) > 0.0:
+            _min_ang = float(min_angle_at_es_deg)
+
+            def prune(sel_k: int, remaining: list[tuple[float, int]],
+                      _ang=_min_ang) -> list[tuple[float, int]]:
+                # Step 21: drop candidates within MIN_ANGLE_AT_ES of the chosen
+                # satellite (pool-only; never touches TSS credit — Decision 2).
+                pos_sel = pos_ecef_all[sel_k]
+                return [
+                    (e, k) for (e, k) in remaining
+                    if _separation_angle_deg_at_es(es_ecef, pos_ecef_all[k], pos_sel)
+                    + 1e-12 >= _ang
+                ]
+
+        selected = alpha_tss.select(
+            standard_items, alpha_by_k or {}, float(t_s), prune,
+            weight=float(alpha_step_weight),
+        )
+        return selected, override_epfd
+
     if per_system_out is not None and system_id_all is not None and override_items:
         # Step 22 (OR) values are kept in full in the normative path, so they
         # can be attributed straight from their satellite indices.
@@ -427,6 +641,10 @@ def _accumulate_epfd_visible_satellites(
     max_co_freq_by_system: dict[int, int] | None = None,
     min_elevation_deg_all: np.ndarray | None = None,
     alpha0_deg_all: np.ndarray | None = None,
+    selection_config: "SelectionConfig | None" = None,
+    step_index: int = 0,
+    alpha_tss: "object | None" = None,
+    alpha_step_weight: float = 1.0,
     per_sat_out: dict | None = None,
     per_system_out: dict[int, list] | None = None,
 ) -> tuple[list[float], list[float], float, bool]:
@@ -652,6 +870,29 @@ def _accumulate_epfd_visible_satellites(
             if per_system_out is not None else None
         )
 
+        # Elevation-based strategies need elevation per standard candidate.
+        elev_by_k = None
+        if selection_config is not None and selection_config.strategy in (
+            "top_n_elev_random", "hybrid_rand_he",
+        ):
+            elev_by_k = {}
+            if sin_el_full is not None:
+                _se = np.clip(np.asarray(sin_el_full, dtype=np.float64), -1.0, 1.0)
+                for j in range(elig_j.size):
+                    if std_mask[j]:
+                        kk = int(idx_k[j])
+                        elev_by_k[kk] = math.degrees(math.asin(float(_se[kk])))
+
+        # Alpha table needs |α| per standard candidate (for TSS binning).
+        # alpha_e = alpha_arr[elig_j] is aligned with idx_k / std_mask (elig order).
+        alpha_by_k = None
+        if selection_config is not None and selection_config.strategy == "alpha_table":
+            alpha_by_k = {
+                int(idx_k[j]): float(abs(alpha_e[j]))
+                for j in range(elig_j.size)
+                if std_mask[j]
+            }
+
         standard_epfd, override_epfd = _finalize_epfd_after_max_co_freq(
             standard_items,
             override_epfd,
@@ -664,6 +905,13 @@ def _accumulate_epfd_visible_satellites(
             max_co_freq_by_system=max_co_freq_by_system,
             override_items=override_items,
             per_system_out=per_system_out,
+            selection_config=selection_config,
+            step_index=step_index,
+            elev_by_k=elev_by_k,
+            alpha_by_k=alpha_by_k,
+            alpha_tss=alpha_tss,
+            t_s=t_s,
+            alpha_step_weight=alpha_step_weight,
         )
 
         return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -675,6 +923,16 @@ def _accumulate_epfd_visible_satellites(
     # Step 22 (OR) values with their satellite index — only collected when the
     # per-system split is requested (method_3); mirrors `override_epfd`.
     _override_items_scalar: list[tuple[float, int]] = []
+    _need_elev = (
+        selection_config is not None
+        and selection_config.strategy in ("top_n_elev_random", "hybrid_rand_he")
+    )
+    elev_by_k: dict[int, float] | None = {} if _need_elev else None
+    _need_alpha = (
+        selection_config is not None
+        and selection_config.strategy == "alpha_table"
+    )
+    alpha_by_k: dict[int, float] | None = {} if _need_alpha else None
     _ps_idx: list[int] = []
     _ps_epfd: list[float] = []
     _ps_std: list[bool] = []
@@ -755,6 +1013,12 @@ def _accumulate_epfd_visible_satellites(
             continue
         if is_standard:
             standard_items.append((epfd_i, int(k)))
+            if elev_by_k is not None and sin_el_full is not None:
+                elev_by_k[int(k)] = math.degrees(
+                    math.asin(max(-1.0, min(1.0, float(sin_el_full[k]))))
+                )
+            if alpha_by_k is not None:
+                alpha_by_k[int(k)] = float(abs(alpha))
         else:
             override_epfd.append(epfd_i)
             if per_system_out is not None:
@@ -779,6 +1043,12 @@ def _accumulate_epfd_visible_satellites(
         max_co_freq_by_system=max_co_freq_by_system,
         override_items=(_override_items_scalar if per_system_out is not None else None),
         per_system_out=per_system_out,
+        selection_config=selection_config,
+        step_index=step_index,
+        elev_by_k=elev_by_k,
+        alpha_by_k=alpha_by_k,
+        alpha_tss=alpha_tss,
+        t_s=t_s,
     )
 
     return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -1280,7 +1550,16 @@ def _simulate_chunk(args):
     max_co_freq_by_system = None
     min_el_all = None
     alpha0_all = None
-    if len(args) == 25:
+    selection_config = None
+    if len(args) == 26:
+        (start_step, num_steps, t_start, tstep_s, constellation,
+         wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
+         pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+         max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
+         min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
+         keep_full_history, system_id_per_sat, max_co_freq_by_system,
+         min_el_all, alpha0_all, selection_config) = args
+    elif len(args) == 25:
         (start_step, num_steps, t_start, tstep_s, constellation,
          wcg, pfd_mask, es_antenna, alpha0_deg, min_elevation_deg,
          pfd_bw_correction_db, raan_dot_artificial_rad_s, raan_dot_override_rad_s,
@@ -1350,7 +1629,8 @@ def _simulate_chunk(args):
         else None
     )
 
-    for _ in range(num_steps):
+    for _i_step in range(num_steps):
+        _global_step = start_step + _i_step
         gso_ecef = gso_position_ecef(gso_lon, t_s)
 
         pos_ecef_all, vel_ecef_all = propagate_and_to_ecef_batch(
@@ -1420,6 +1700,8 @@ def _simulate_chunk(args):
             min_elevation_deg_all=min_el_all,
             alpha0_deg_all=alpha0_all,
             per_system_out=per_system_step,
+            selection_config=selection_config,
+            step_index=_global_step,
         )
 
         epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -1867,6 +2149,8 @@ def run_epfd_simulation(
     min_elevation_deg_per_system: list | None = None,
     alpha0_deg_per_system: list | None = None,
     on_chunk: "Callable[[EPFDStreamAccumulator, int, int], None] | None" = None,
+    selection_config: "SelectionConfig | None" = None,
+    alpha_tss: "object | None" = None,
 ) -> EPFDSimulationResult:
     """Runs the complete EPFD↓ time simulation.
 
@@ -1886,8 +2170,68 @@ def run_epfd_simulation(
     swallowed: persistence must never kill a simulation. Fires on the
     sequential path too (on its progress heartbeat), so both modes behave the
     same from the caller's side.
+
+    ``alpha_tss``: for ``strategy == "alpha_table"``, a per-sub-run mutable
+    ``TSSAccumulator`` (Doc 4A/312). It carries state across all steps, so the
+    run is forced serial (``n_jobs = 1``); parallelism happens *between* the 7
+    envelope tables, one accumulator each.
     """
     result = EPFDSimulationResult(wcg=wcg, keep_full_history=keep_full_history)
+
+    _strategy = (
+        getattr(selection_config, "strategy", "s1503")
+        if selection_config is not None else "s1503"
+    )
+
+    # Random strategies draw from a per-step RNG keyed by (seed, step_index).
+    # With the dual time step, chunks are split by *time* and each step's Δt is
+    # data-dependent (fine near the WCG, coarse elsewhere), so there is no
+    # chunk-independent global step index — the parallel dual path cannot honour
+    # the (seed, step_index) reproducibility contract. The *sequential* dual walk
+    # can: step_index = step_count is a clean monotonic counter. So allow the
+    # dual step for these strategies but force serial execution (n_jobs=1),
+    # mirroring the alpha_table serial rule. The 's1503' and 'alpha_table' paths
+    # are untouched.
+    _random_strat = _strategy in ("top_n_elev_random", "hybrid_rand_he")
+    if _random_strat and dual_ts is not None and n_jobs != 1:
+        logger.info(
+            "%s + dual time step: forcing n_jobs=1 (the per-step RNG needs a "
+            "chunk-independent step index, only guaranteed by the serial walk).",
+            _strategy,
+        )
+        n_jobs = 1
+
+    # Alpha table + dual step (Decision 8): supported in the s1503_gain mode
+    # only, where Δt is decided *before* selection so the TSS step weight
+    # w = Δt/T_fine is well defined. The legacy alpha_threshold mode decides Δt
+    # *after* the accumulate (from min_alpha), leaving the weight undefined — so
+    # that combination stays unsupported.
+    if (
+        _strategy == "alpha_table"
+        and dual_ts is not None
+        and getattr(dual_ts, "mode", "") != "s1503_gain"
+    ):
+        raise NotImplementedError(
+            "alpha_table supports the dual time step only in the 's1503_gain' "
+            f"mode (got '{getattr(dual_ts, 'mode', '?')}'), because the TSS step "
+            "weight must be known before selection. Use dual mode 's1503' or "
+            "disable the dual step."
+        )
+
+    # Alpha table is stateful across the whole run (TSS credit vector) → serial.
+    _is_alpha = (
+        selection_config is not None
+        and getattr(selection_config, "strategy", "s1503") == "alpha_table"
+    )
+    if _is_alpha:
+        if alpha_tss is None:
+            raise ValueError(
+                "alpha_table strategy requires an alpha_tss accumulator "
+                "(built per sub-run by the envelope orchestrator)."
+            )
+        if n_jobs != 1:
+            logger.info("alpha_table: forcing n_jobs=1 (TSS state is serial).")
+            n_jobs = 1
 
     # GSO ES position (ECEF, fixed on the surface)
     es_ecef = _es_ecef_from_wcg(wcg)
@@ -1995,6 +2339,17 @@ def run_epfd_simulation(
 
             gso_ecef = gso_position_ecef(wcg.gso_lon_deg, t_s)
 
+            # Fine-equivalent weight of this step (Decision 8): 1 on a fixed/fine
+            # step, Ncoarse on a coarse dual step. In s1503_gain mode Δt is final
+            # here (decided before selection); alpha_threshold is rejected upstream
+            # for the alpha table, so this weight is always well defined for it.
+            alpha_step_weight = (dt / dual_ts.fine) if dual_ts is not None else 1.0
+
+            # Step 9bis: accrue TSS credit once per time step (before selection),
+            # scaled by the step's fine-equivalent duration.
+            if alpha_tss is not None:
+                alpha_tss.update(weight=alpha_step_weight)
+
             pos_ecef_all, vel_ecef_all = propagate_and_to_ecef_batch(
                 constellation, t_s,
                 raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
@@ -2062,6 +2417,10 @@ def run_epfd_simulation(
                     min_elevation_deg_all=min_el_all,
                     alpha0_deg_all=alpha0_all,
                     per_system_out=per_system_step,
+                    selection_config=selection_config,
+                    step_index=step_count,
+                    alpha_tss=alpha_tss,
+                    alpha_step_weight=alpha_step_weight,
                 )
             )
 
@@ -2247,6 +2606,7 @@ def run_epfd_simulation(
                 keep_full_history,
                 system_id_per_sat, max_co_freq_by_system,
                 min_el_all, alpha0_all,
+                selection_config,
             ))
             current_step += count
             current_t += count * tstep_s
@@ -2593,6 +2953,7 @@ def run_epfd_simulation_windowed(
     gso_min_elevation_deg: float = -90.0,
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
+    selection_config: "SelectionConfig | None" = None,
 ) -> EPFDSimulationResult:
     """EPFD↓ with the track-duration sliding-window variant (S.1503-4 §D5.1.4.2).
 
@@ -2614,6 +2975,13 @@ def run_epfd_simulation_windowed(
     """
     result = EPFDSimulationResult(wcg=wcg)
     result.windows = windows
+
+    if selection_config is not None and getattr(selection_config, "strategy", "s1503") != "s1503":
+        raise NotImplementedError(
+            f"selection strategy '{selection_config.strategy}' is not yet supported "
+            "on the track-duration windowed path (planned for Phase 2). "
+            "Run without track duration (MIN_DURATION=0) for Phase 1."
+        )
 
     es_ecef = _es_ecef_from_wcg(wcg)
     if np.linalg.norm(es_ecef) < RE_KM * 0.9:
@@ -2783,6 +3151,7 @@ def run_epfd_simulation_multi_es(
     t_run_s: float = 0.0,
     gso_min_elevation_deg: float = -90.0,
     keep_full_history: bool = False,
+    selection_config: "SelectionConfig | None" = None,
 ) -> list[EPFDSimulationResult]:
     """Runs the EPFD↓ simulation for multiple ES/WCG with shared dynamics.
 
@@ -2792,6 +3161,13 @@ def run_epfd_simulation_multi_es(
     """
     if len(wcgs) == 0:
         return []
+
+    if selection_config is not None and getattr(selection_config, "strategy", "s1503") != "s1503":
+        raise NotImplementedError(
+            f"selection strategy '{selection_config.strategy}' is not yet supported "
+            "on the shared-dynamics multi-ES path (Phase 1). It runs on the "
+            "single-ES fixed-step path; run each ES separately for now."
+        )
 
     # The dual time step depends on each ES state → fallback for accuracy.
     if dual_ts is not None:

@@ -1,0 +1,27 @@
+# Alpha table — MINIMAL: one declared pair per table (tail-mass path)
+#
+# The smallest legal declaration. Everything else is produced by the
+# densification anchors (Decision 1): the CDF is anchored at (0, 0), the single
+# declared pair, and (alpha_max_deg, 1).
+#
+#   min: p₁ = 0.90 at 5°  →  0.90 spread over [0°, 5°), 0.10 over [5°, 90°]
+#   max: p₁ = 0.60 at 5°  →  0.60 spread over [0°, 5°), 0.40 over [5°, 90°]
+#
+# TESTS:
+#   • The tail ramp: the residual (1 − pₙ) must land in the bins above the last
+#     declared angle and the densified masses must still sum to exactly 1.
+#   • The single-point union grid in the envelope generator: with one common
+#     angle the diagonal blend factor has a zero span, and the code must fall
+#     back to a unit span instead of dividing by zero (MinMax then reduces to
+#     `min` and MaxMin to `max`, so only 2 distinct tables exist here — expect
+#     duplicated margins in the per-sub-run log, that is correct, not a bug).
+#
+# Because 90 % / 60 % of the mass sits below 5° with no internal structure, the
+# quota has almost no shape to enforce: treat the resulting margin as a floor,
+# not as a meaningful envelope.
+
+min:
+  - [5.0, 0.90]
+
+max:
+  - [5.0, 0.60]

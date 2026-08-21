@@ -1,0 +1,31 @@
+# Alpha table — min and max starting (and ending) at DIFFERENT angles.
+#
+# `min` spans 2°–12°, `max` spans 3°–20°. This is the normal shape of a declared
+# envelope, not an edge case: the canonical example in Doc 4A/312 p. 16 has `min`
+# spanning 20°–50° and `max` 30°–60° (see 09_doc312_canonical.yaml).
+#
+# WHAT IT EXERCISES: on the union angle grid {2, 3, 5, 8, 12, 20} each table is
+# evaluated outside its own declared span, and both extrapolations get trimmed by
+# `alpha_table._as_pairs`:
+#
+#   * at 2° the `max` table has nothing declared below its first angle, so the
+#     interpolation gives p = 0 — dropped, because the first TSS case already
+#     runs from 0° up to the first declared angle;
+#   * above 12° the `min` table is held flat at 0.95 — those trailing repeats are
+#     dropped too, so `min`'s unbounded tail case stays [12°, ∞) instead of being
+#     displaced to [20°, ∞) with a phantom zero-mass case [12°, 20°).
+#
+# The envelope endpoints therefore come back as exactly the two tables declared
+# here. This file used to live in invalid/ as `mismatched_first_angle.yaml`,
+# where the p = 0 pair made densification raise
+# "probability #0=0.0 out of range (0, 1]".
+
+min:
+  - [2.0, 0.30]
+  - [5.0, 0.70]
+  - [12.0, 0.95]
+
+max:
+  - [3.0, 0.15]
+  - [8.0, 0.55]
+  - [20.0, 0.90]

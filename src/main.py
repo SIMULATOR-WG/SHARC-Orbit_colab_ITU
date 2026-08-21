@@ -20,6 +20,7 @@ Reference: ITU-R S.1503-4 (09/2023)
 """
 
 from __future__ import annotations
+import json
 import os
 import sys
 import math
@@ -45,8 +46,14 @@ from .time_step import (
 from .epfd_calculator import (
     run_epfd_simulation, run_epfd_simulation_multi_es, run_epfd_simulation_windowed,
     check_article22_compliance, EPFDSimulationResult, ComplianceResult,
-    epfd_aggregate_dBW_at_instant, _resolve_min_duration,
+    epfd_aggregate_dBW_at_instant, _resolve_min_duration, SelectionConfig,
+    _resolve_max_co_freq, _apply_epfd_globals, _epfd_global_snapshot,
 )
+from .tss_accumulator import TSSAccumulator
+from .alpha_table import (
+    validate_alpha_pairs, build_tss_cases, generate_seven_tables,
+)
+from .constants import MU_KM3_S2
 from .time_step import compute_track_duration_windows
 from .coordinates import (
     lla_to_ecef, gso_position_ecef, eci_to_ecef, eci_vel_to_ecef,
@@ -1649,6 +1656,186 @@ def build_downlink_engine_inputs(config: dict) -> DownlinkEngineInputs:
     )
 
 
+def _first_orbit_end_s(constellation: list, wcg_ref_sat_idx: int) -> float:
+    """Time (s) at which the WCG-causing satellite completes its first orbit.
+
+    Decision 3 (Doc 4A/312 Step 20 first-orbit exception). Period from Kepler,
+    T = 2π·√(a³/μ), with the sim starting at t=0. Returns ``-inf`` (exception
+    disabled) if the period cannot be computed.
+    """
+    try:
+        a_km = float(constellation[wcg_ref_sat_idx].a)
+        if a_km <= 0.0:
+            return -math.inf
+        return 2.0 * math.pi * math.sqrt(a_km ** 3 / MU_KM3_S2)
+    except Exception:  # noqa: BLE001 — defensive; a is a core element
+        logger.warning("alpha_table: could not compute WCG-sat period; first-orbit exception disabled.")
+        return -math.inf
+
+
+def _alpha_cases_note(bin_deg: float | None) -> str:
+    """Human-readable description of the TSS case granularity in use."""
+    b = float(bin_deg or 0.0)
+    if b <= 0.0:
+        return "declared intervals (normative, Doc 4A/312 p. 110)"
+    return f"{b}° uniform sub-bins (NON-NORMATIVE refinement)"
+
+
+def _resolve_alpha_table(config: dict, es_lat_deg: float) -> tuple[list, list]:
+    """Resolve the declared (min, max) alpha tables for the ES latitude.
+
+    v1 reads a single lat-independent table at
+    ``config["non_gso"]["alpha_table"] = {"min": [[angle, prob], ...],
+    "max": [[angle, prob], ...]}`` (per-latitude resolution mirrors
+    ``max_co_freq_by_lat`` and can be added later). Validates both.
+    """
+    at = config.get("non_gso", {}).get("alpha_table")
+    if not at or "min" not in at or "max" not in at:
+        raise ValueError(
+            "alpha_table strategy needs config['non_gso']['alpha_table'] with "
+            "'min' and 'max' pair lists (see --alpha-table-file)."
+        )
+    min_pairs = [(float(a), float(p)) for a, p in at["min"]]
+    max_pairs = [(float(a), float(p)) for a, p in at["max"]]
+    validate_alpha_pairs(min_pairs, name="alpha_table_min")
+    validate_alpha_pairs(max_pairs, name="alpha_table_max")
+    return min_pairs, max_pairs
+
+
+# ---------------------------------------------------------------------------
+#  Alpha-table envelope: cross-table (7 sub-runs) process parallelism
+# ---------------------------------------------------------------------------
+# Each sub-run is intrinsically serial (the TSSAccumulator carries credit state
+# across the whole time loop), so the only axis left is the envelope itself: the
+# 7 tables are fully independent — same geometry, same masks, disjoint mutable
+# state. The heavy read-only payload (constellation, WCG, PFD mask, ES antenna,
+# …) is shipped ONCE per worker via the pool initializer, not per task: on fork
+# it costs nothing (inherited), on spawn it is pickled once instead of 7 times.
+_ALPHA_WORKER_SIM_KWARGS: dict | None = None
+
+
+def _alpha_pool_initializer(payload: dict) -> None:
+    """Pool worker init: re-apply engine globals + stash the shared sim kwargs.
+
+    ``_apply_epfd_globals`` is required on ``spawn`` (native Windows), where the
+    worker re-imports the modules with their defaults and would otherwise run
+    with ``alpha_method='sweep'``, ``gso_mode='arc_optimal'`` and GMST0=0 — a
+    silently wrong sub-run. Harmless re-assignment on ``fork``.
+    """
+    global _ALPHA_WORKER_SIM_KWARGS
+    _apply_epfd_globals(payload["globals"])
+    _ALPHA_WORKER_SIM_KWARGS = payload["sim_kwargs"]
+    if payload.get("quiet"):
+        # 7 concurrent per-step progress bars interleave into noise; the parent
+        # logs one line per finished sub-run instead. Warnings/errors still pass.
+        for name in ("src", "wcg_main", "src.epfd_calculator"):
+            logging.getLogger(name).setLevel(logging.WARNING)
+
+
+def _alpha_subrun_worker(task: tuple) -> dict:
+    """Run one envelope sub-run in a worker process (top-level → picklable).
+
+    ``task`` carries only the per-table state (label + densified bin masses +
+    accumulator config); everything else comes from the initializer payload.
+    Returns the label, the simulation result and the *mutated* accumulator, so
+    the parent keeps the Decision-7 TSS diagnostics of every table.
+    """
+    label, edges, masses, nco, wcg_ref_sat_idx, t_end_first_orbit = task
+    tss = TSSAccumulator(
+        bin_edges=edges, masses=masses, nco=int(nco),
+        wcg_ref_sat_idx=wcg_ref_sat_idx, t_end_first_orbit=t_end_first_orbit,
+    )
+    result = run_epfd_simulation(**(_ALPHA_WORKER_SIM_KWARGS or {}), alpha_tss=tss)
+    return {"label": label, "result": result, "tss": tss}
+
+
+def _run_alpha_table_envelope(
+    *,
+    sim_kwargs: dict,
+    min_pairs: list,
+    max_pairs: list,
+    bin_deg: float,
+    nco: int,
+    wcg_ref_sat_idx: int,
+    t_end_first_orbit: float,
+    n_jobs: int = 1,
+) -> list[dict]:
+    """7-table envelope orchestration (Decision 6).
+
+    Generates the 7-table family, builds the TSS cases of each (the declared
+    intervals of Doc 4A/312 p. 110 when ``bin_deg <= 0``; the non-normative
+    uniform refinement otherwise), builds a fresh ``TSSAccumulator`` per table
+    (each with its own credit state and the first-orbit exception), and runs
+    ``run_epfd_simulation(**sim_kwargs, alpha_tss=tss)`` for each. Returns
+    ``[{"label", "result", "tss"}, ...]`` in table order (min, mid25, mid50,
+    mid75, max, MinMax, MaxMin).
+
+    Each sub-run is serial by construction (``sim_kwargs["n_jobs"] = 1``: the TSS
+    credit state is sequential in time). Parallelism is *between* tables:
+    ``n_jobs > 1`` maps them over a process pool with an ordered ``imap``, so the
+    returned order — and therefore the binding-table tie-break downstream — is
+    identical to the sequential path. ``n_jobs <= 1`` keeps the in-process loop.
+
+    Cost note: the pool holds up to ``min(7, n_jobs)`` full simulations in RAM at
+    once. With ``keep_full_history=True`` that multiplies the per-step history
+    footprint by the same factor.
+    """
+    tables = generate_seven_tables(min_pairs, max_pairs)
+    tasks = []
+    for label, pairs in tables:
+        edges, masses = build_tss_cases(pairs, bin_deg=bin_deg)
+        tasks.append(
+            (label, edges, masses, int(nco), wcg_ref_sat_idx, t_end_first_orbit)
+        )
+
+    n_workers = min(len(tasks), int(n_jobs)) if n_jobs and n_jobs > 0 else len(tasks)
+
+    if n_workers <= 1:
+        out: list[dict] = []
+        for label, edges, masses, _nco, _ref_idx, _t_end in tasks:
+            logger.info(f"  PHASE 3-α: alpha-table sub-run '{label}'")
+            tss = TSSAccumulator(
+                bin_edges=edges, masses=masses, nco=_nco,
+                wcg_ref_sat_idx=_ref_idx, t_end_first_orbit=_t_end,
+            )
+            result = run_epfd_simulation(**sim_kwargs, alpha_tss=tss)
+            out.append({"label": label, "result": result, "tss": tss})
+        return out
+
+    import multiprocessing
+
+    # Each sub-run is a *serial* time loop that still calls the Numba batch
+    # kernels, so the cores must be split between the sub-run processes instead
+    # of every one of them claiming the whole machine.
+    total_cores = os.cpu_count() or 1
+    numba_thr = max(1, total_cores // n_workers)
+    payload = {
+        "globals": _epfd_global_snapshot(numba_thr),
+        "sim_kwargs": sim_kwargs,
+        "quiet": True,
+    }
+    logger.info(
+        f"  Alpha table envelope: {len(tasks)} sub-runs across {n_workers} processes "
+        f"({numba_thr} numba threads each); per-step logs silenced in the workers."
+    )
+    out = []
+    t0 = time.perf_counter()
+    with multiprocessing.Pool(
+        processes=n_workers,
+        initializer=_alpha_pool_initializer,
+        initargs=(payload,),
+    ) as pool:
+        # Ordered imap: same order as the sequential path (deterministic
+        # binding-table tie-break in the compliance section).
+        for done, sub in enumerate(pool.imap(_alpha_subrun_worker, tasks), start=1):
+            out.append(sub)
+            logger.info(
+                f"  PHASE 3-α: sub-run '{sub['label']}' done "
+                f"({done}/{len(tasks)}, {time.perf_counter() - t0:.1f}s elapsed)"
+            )
+    return out
+
+
 def run_wcg_downlink(config: dict) -> tuple[
     list[OrbitalElements], WCGResult | None, EPFDSimulationResult | None, ComplianceResult | None,
     WCGResult | None, EPFDSimulationResult | None, ComplianceResult | None
@@ -1660,6 +1847,16 @@ def run_wcg_downlink(config: dict) -> tuple[
     sim_cfg = config["simulation"]
     pfd_cfg = config["pfd_mask"]
     art22_cfg = config["article22_limits"]
+
+    # Satellite selection strategy (Part D, Step 20). Built once and threaded to
+    # all EPFD entry points. Default 's1503' reproduces the normative engine.
+    selection_config = SelectionConfig(
+        strategy=sim_cfg.get("selection_strategy", "s1503"),
+        top_n=int(sim_cfg.get("top_n", 5)),
+        n_select=int(sim_cfg.get("n_select", 1)),
+        seed=sim_cfg.get("seed", None),
+        alpha_bin_deg=float(sim_cfg.get("alpha_bin_deg", 0.0)),
+    )
 
     gmst0_override_deg = sim_cfg.get("earth_rotation_initial_deg", None)
     if gmst0_override_deg is not None:
@@ -2720,6 +2917,7 @@ def run_wcg_downlink(config: dict) -> tuple[
 
     static_wcg = None
     static_sim_result = None
+    alpha_subruns = None  # populated when strategy == "alpha_table" (7-table envelope)
     static_compliance = None
     static_sim_elapsed_s = 0.0
     static_shared_timeline = False
@@ -2919,6 +3117,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 wdelta_deg=wdelta_deg,
                 t_run_s=t_run_s,
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
+                selection_config=selection_config,
             )
         else:
             # Main WCG ES has MIN_DURATION=0 → standard path (only the static ES
@@ -2936,6 +3135,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
                 t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
                 keep_full_history=keep_full_history,
+                selection_config=selection_config,
             )
         sim_elapsed_s = time.perf_counter() - sim_t0
         if static_wcg is not None:
@@ -2958,6 +3158,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                     strict_exclusion_zone=strict_exclusion_zone,
                     min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
                     t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
+                    selection_config=selection_config,
                 )
             else:
                 # Static ES latitude has MIN_DURATION=0 → standard path for it.
@@ -2974,6 +3175,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                     min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
                     t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
                     keep_full_history=keep_full_history,
+                    selection_config=selection_config,
                 )
             static_sim_elapsed_s = time.perf_counter() - static_t0
     elif static_wcg is not None and dual_ts is None:
@@ -3005,12 +3207,97 @@ def run_wcg_downlink(config: dict) -> tuple[
             t_run_s=t_run_s,
             gso_min_elevation_deg=gso_min_elev_effective_deg,
             keep_full_history=keep_full_history,
+            selection_config=selection_config,
         )
         sim_result = multi_results[0]
         static_sim_result = multi_results[1]
         sim_elapsed_s = time.perf_counter() - sim_t0
         static_sim_elapsed_s = sim_elapsed_s
         static_shared_timeline = True
+    elif selection_config.strategy == "alpha_table":
+        # Camada 4: 7-table envelope. Each sub-run is serial (TSS state); the
+        # binding table (worst margin) is chosen in the compliance section.
+        t_end_fo = _first_orbit_end_s(constellation, wcg_ref_sat_idx)
+        _nco_es = _resolve_max_co_freq(wcg_result.es_lat_deg, max_co_freq_by_lat or [])
+        _nco_es = _nco_es if (_nco_es and _nco_es > 0) else 1
+        _min_pairs, _max_pairs = _resolve_alpha_table(config, wcg_result.es_lat_deg)
+        _bin_deg = float(selection_config.alpha_bin_deg or 0.0)
+        logger.info(
+            f"  Alpha table envelope: Nco={_nco_es}, "
+            f"TSS cases = {_alpha_cases_note(_bin_deg)}, "
+            f"first-orbit exception until t={t_end_fo:.0f}s (7 sub-runs, each serial in time)"
+        )
+        if _bin_deg > 0.0:
+            logger.warning(
+                "  alpha_bin_deg=%.3g subdivides the declared TSS cases: per-case "
+                "credit is divided among the sub-bins, which changes the Step-20 "
+                "'highest TSS' comparison. Results are NOT conforming to "
+                "Doc 4A/312 — use alpha_bin_deg=0 for the normative run.", _bin_deg,
+            )
+
+        # Alpha table supports the dual step only in s1503_gain mode (Decision 8:
+        # Δt known before selection → TSS step weight well defined). The legacy
+        # alpha_threshold mode decides Δt after selection, so fall back to
+        # fine-only there instead of raising mid-envelope.
+        _alpha_dual_ts = (
+            dual_ts if (dual_ts is not None and dual_ts.mode == "s1503_gain") else None
+        )
+        if dual_ts is not None and _alpha_dual_ts is None:
+            logger.info(
+                "  Alpha table: dual step mode '%s' is not supported (needs "
+                "'s1503_gain'); running fine-step only.", dual_ts.mode,
+            )
+        elif _alpha_dual_ts is not None:
+            logger.info("  Alpha table: dual time step ENABLED (s1503_gain, Decision 8 weighting).")
+
+        # Shared, read-only kwargs of every sub-run. Only ``alpha_tss`` differs
+        # per table, so this dict is shipped once to each envelope worker.
+        _alpha_sim_kwargs = dict(
+            constellation=constellation,
+            wcg=wcg_result,
+            pfd_mask=pfd_mask,
+            es_antenna=es_antenna,
+            alpha0_deg=alpha0_deg,
+            min_elevation_deg=min_elev_deg,
+            tstep_s=tstep,
+            nsteps=nsteps,
+            dual_ts=_alpha_dual_ts,     # dual step (s1503_gain) or None
+            n_jobs=1,                   # each sub-run serial (TSS state)
+            pfd_bw_correction_db=bw_correction_db,
+            raan_dot_artificial_rad_s=raan_dot_artificial,
+            raan_dot_override_rad_s=raan_dot_override_rad_s,
+            max_co_freq_by_lat=max_co_freq_by_lat,
+            strict_max_co_freq_total=strict_max_co_freq_total,
+            strict_exclusion_zone=strict_exclusion_zone,
+            min_angle_at_es_deg=min_angle_at_es_deg,
+            wdelta_deg=wdelta_deg,
+            t_run_s=t_run_s,
+            gso_min_elevation_deg=gso_min_elev_effective_deg,
+            keep_full_history=keep_full_history,
+            selection_config=selection_config,
+        )
+
+        # Envelope-level parallelism (Decision 6): the 7 tables are independent,
+        # so they run one per process. ``alpha_envelope_jobs`` overrides the
+        # worker count (1 = the old sequential behaviour, for debugging).
+        _alpha_jobs = sim_cfg.get("alpha_envelope_jobs", None)
+        if _alpha_jobs is None:
+            _alpha_jobs = n_jobs if (n_jobs and n_jobs > 0) else (os.cpu_count() or 1)
+        _alpha_jobs = max(1, int(_alpha_jobs))
+
+        alpha_subruns = _run_alpha_table_envelope(
+            sim_kwargs=_alpha_sim_kwargs,
+            min_pairs=_min_pairs,
+            max_pairs=_max_pairs,
+            bin_deg=selection_config.alpha_bin_deg,
+            nco=_nco_es,
+            wcg_ref_sat_idx=wcg_ref_sat_idx,
+            t_end_first_orbit=t_end_fo,
+            n_jobs=_alpha_jobs,
+        )
+        # Placeholder; the compliance section replaces it with the binding table.
+        sim_result = alpha_subruns[0]["result"]
+        sim_elapsed_s = time.perf_counter() - sim_t0
     else:
         sim_result = run_epfd_simulation(
             constellation=constellation,
@@ -3034,6 +3321,7 @@ def run_wcg_downlink(config: dict) -> tuple[
             t_run_s=t_run_s,
             gso_min_elevation_deg=gso_min_elev_effective_deg,
             keep_full_history=keep_full_history,
+            selection_config=selection_config,
         )
         sim_elapsed_s = time.perf_counter() - sim_t0
 
@@ -3077,6 +3365,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 t_run_s=t_run_s,
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
                 keep_full_history=keep_full_history,
+                selection_config=selection_config,
             )
             static_sim_elapsed_s = time.perf_counter() - static_t0
     # ================================================================
@@ -3090,11 +3379,44 @@ def run_wcg_downlink(config: dict) -> tuple[
     limits = [(lim[0], lim[1]) for lim in art22_cfg["limits"]]
     ref_bw_khz = art22_cfg.get("reference_bandwidth_khz", 40.0)
 
-    compliance = check_article22_compliance(
-        sim_result=sim_result,
-        limits=limits,
-        reference_bandwidth_khz=ref_bw_khz,
-    )
+    if alpha_subruns is not None:
+        # Alpha table (Doc 4A/312): each of the 7 sub-runs must pass; the binding
+        # table (worst margin) becomes the reported result/compliance.
+        _per_table = []
+        _all_pass = True
+        _worst = None
+        for sr in alpha_subruns:
+            comp = check_article22_compliance(
+                sim_result=sr["result"], limits=limits, reference_bandwidth_khz=ref_bw_khz,
+            )
+            _per_table.append((sr["label"], comp, sr["tss"]))
+            _all_pass = _all_pass and comp.compliant
+            if _worst is None or comp.worst_margin_dB < _worst[1].worst_margin_dB:
+                _worst = (sr["label"], comp, sr["result"])
+        sim_result = _worst[2]       # binding table drives downstream stats/plots
+        compliance = _worst[1]
+        logger.info("")
+        logger.info("  Alpha-table envelope — per sub-run:")
+        for label, comp, tss in _per_table:
+            diag = tss.diagnostics(nsteps)
+            st = "PASS" if comp.compliant else "FAIL"
+            logger.info(
+                f"    [{st:4s}] {label:6s}  margin={comp.worst_margin_dB:+.2f} dB  "
+                f"TSS_max={diag['tss_max_abs']:.1f}  "
+                f"(per step {diag.get('tss_max_abs_per_step', 0.0):.3g}, "
+                f"peak {diag['tss_peak_temporal']:.1f}, "
+                f"WCG-1storbit hits {diag['wcg_exception_hits']})"
+            )
+        logger.info(
+            f"  Envelope verdict: {'ALL PASS' if _all_pass else 'FAIL (≥1 table exceeds)'} "
+            f"— binding table = '{_worst[0]}'"
+        )
+    else:
+        compliance = check_article22_compliance(
+            sim_result=sim_result,
+            limits=limits,
+            reference_bandwidth_khz=ref_bw_khz,
+        )
 
     if static_sim_result:
         static_compliance = check_article22_compliance(
@@ -3405,7 +3727,10 @@ def main():
             "Dual time step mode: "
             "'s1503' (normative gain-based rule), "
             "'alpha_threshold' (legacy), "
-            "'off' (single step)."
+            "'off' (single step). "
+            "The non-normative selection strategies support 's1503' and 'off'; "
+            "'alpha_threshold' is not supported with 'alpha_table' (Δt is decided "
+            "after selection, leaving the TSS step weight undefined)."
         ),
     )
     parser.add_argument(
@@ -3566,6 +3891,73 @@ def main():
             "MAX_CO_FREQ only in the Steps 19–21 cycle; Step 22 adds OR contributors without this cap."
         ),
     )
+    parser.add_argument(
+        "--selection-strategy", type=str, default=None,
+        choices=["s1503", "top_n_elev_random", "hybrid_rand_he", "alpha_table"],
+        help=(
+            "Selection of satellites that contribute to EPFD. Omit to use "
+            "``simulation.selection_strategy`` from the YAML config (default 's1503'). "
+            "'s1503' (normative pfd-based rule), "
+            "'top_n_elev_random' (Top-N highest elevation random selection strategy)."
+            "'hybrid_rand_he' (combine random + highest elevation, then pick highest EPFD)."
+            "'alpha_table' (deterministic quota selection over declared α CDF, "
+            "Doc 4A/312; runs the 7-table envelope). "
+            "All strategies work with the §D4.7 dual time step (--dual-time-step-mode "
+            "s1503): the random ones run serially when it is on; alpha_table scales its "
+            "TSS credit by Δt/T_fine."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-bin-deg", type=float, default=None, metavar="DEG",
+        help=(
+            "NON-NORMATIVE: subdivide each declared alpha_table TSS case into "
+            "sub-bins of at most DEG degrees. The normative cases of Doc 4A/312 "
+            "(p. 110) are the declared intervals themselves — DEG=0 (the default) "
+            "uses exactly those. Any DEG>0 splits each case's credit among its "
+            "sub-bins and therefore changes the Step-20 'highest TSS' comparison, "
+            "so such a run does NOT conform to Doc 4A/312. For sensitivity studies."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-table-file", type=str, default=None, metavar="PATH",
+        help=(
+            "YAML or JSON file with the declared min/max α tables for 'alpha_table': "
+            '{"min": [[angle_deg, cdf_prob], ...], "max": [[...]]}. '
+            "Probabilities are a CDF (P(α ≤ angle)), monotonically increasing. "
+            "Optional when the YAML config already declares ``non_gso.alpha_table``; "
+            "when given, it overrides that block. See examples/alpha_tables/."
+        ),
+    )
+    parser.add_argument(
+        "--top-n", type=int, default=None, metavar="N",
+        help=(
+            "Number of highest-elevation satellites to consider in the random selection "
+            "(only used when --selection-strategy is 'top_n_elev_random'). "
+            "Default: 5. Must be >= 1."
+        ),
+    )
+    parser.add_argument(
+        "--n-select", type=int, default=None, metavar="M",
+        help=(
+            "Requested number of satellites to track (drawn at random from the Top-N). "
+            "Only used with 'top_n_elev_random'. Effective count is "
+            "min(n_select, MAX_CO_FREQ) bounded by the pool size. Default: 1 (paper). "
+            "Must be >= 1."
+        ),
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None,
+        help="Random seed for reproducibility (applies to selection strategies that use randomness).",
+    )
+    parser.add_argument(
+        "--include_override", action="store_true", default=False,
+        help=(
+            "When enabled, satellites that violate α₀/ε₀ but have " 
+            "GRX(φ) > min(Gmax-30, GRX(α₀)) are added to the EPFD sum "
+            "without the MAX_CO_FREQ cap (S.1503-4 Step 22)."
+        )
+    )
+
 
     args = parser.parse_args()
 
@@ -3608,6 +4000,71 @@ def main():
                 "Provide --config config.yaml OR --mdb file.MDB + (--pfd-xml mask.xml or --pfd-mask-mdb MASK.mdb)"
             )
             return
+
+    # CLI flags override the YAML config; when a flag is absent the config value
+    # stands (a flag default must never silently clobber a declared setting).
+    _sim = config.setdefault("simulation", {})
+    if args.selection_strategy is not None:
+        _sim["selection_strategy"] = args.selection_strategy
+    else:
+        _sim.setdefault("selection_strategy", "s1503")
+    _strategy = _sim["selection_strategy"]
+
+    if args.top_n is not None:
+        _sim["top_n"] = args.top_n
+        if _strategy != "top_n_elev_random":
+            logger.warning("--top-n is ignored because selection-strategy is not 'top_n_elev_random'.")
+    _sim.setdefault("top_n", 5)
+    if args.n_select is not None:
+        _sim["n_select"] = args.n_select
+    _sim.setdefault("n_select", 1)
+    if _strategy == "top_n_elev_random":
+        if int(_sim["top_n"]) < 1:
+            parser.error("--top-n must be >= 1 when using 'top_n_elev_random' strategy.")
+        if int(_sim["n_select"]) < 1:
+            parser.error("--n-select must be >= 1 when using 'top_n_elev_random' strategy.")
+    if args.seed is not None:
+        _sim["seed"] = args.seed
+        logger.info(f"Random seed set to: {args.seed}")
+
+    # Alpha table (Doc 4A/312) — optional sub-binning + declared min/max tables.
+    if args.alpha_bin_deg is not None:
+        if args.alpha_bin_deg < 0:
+            parser.error("--alpha-bin-deg must be >= 0 (0 = normative declared cases).")
+        _sim["alpha_bin_deg"] = float(args.alpha_bin_deg)
+    _sim.setdefault("alpha_bin_deg", 0.0)
+    if _strategy == "alpha_table":
+        _at_cfg = config.get("non_gso", {}).get("alpha_table")
+        if args.alpha_table_file is None and not _at_cfg:
+            parser.error(
+                "'alpha_table' needs the declared tables: pass --alpha-table-file "
+                "(YAML/JSON with 'min' and 'max' pair lists, see examples/alpha_tables/) "
+                "or declare non_gso.alpha_table in the YAML config."
+            )
+        if args.alpha_table_file is not None:
+            # YAML superset of JSON: one loader accepts both file flavours.
+            import yaml
+            try:
+                with open(args.alpha_table_file, "r", encoding="utf-8") as _fh:
+                    _at = yaml.safe_load(_fh)
+                _min = [(float(a), float(p)) for a, p in _at["min"]]
+                _max = [(float(a), float(p)) for a, p in _at["max"]]
+                validate_alpha_pairs(_min, name="alpha_table_min")
+                validate_alpha_pairs(_max, name="alpha_table_max")
+            except (OSError, KeyError, ValueError, TypeError) as exc:
+                parser.error(f"--alpha-table-file: {exc}")
+            config.setdefault("non_gso", {})["alpha_table"] = {"min": _min, "max": _max}
+            logger.info(
+                f"Alpha table loaded from {args.alpha_table_file}: "
+                f"{len(_min)} min pairs, {len(_max)} max pairs, "
+                f"TSS cases={_alpha_cases_note(_sim['alpha_bin_deg'])}"
+            )
+        else:
+            logger.info(
+                f"Alpha table from config non_gso.alpha_table: "
+                f"{len(_at_cfg['min'])} min pairs, {len(_at_cfg['max'])} max pairs, "
+                f"TSS cases={_alpha_cases_note(_sim['alpha_bin_deg'])}"
+            )
 
     if args.service is not None:
         config.setdefault("gso_es", {})["service"] = args.service
@@ -3780,6 +4237,57 @@ def main():
 
     apply_article22_limits_to_config(config)
 
+    sim_cfg = config.get("simulation", {})
+    selection_strategy = sim_cfg.get("selection_strategy", "s1503")
+    top_n = sim_cfg.get("top_n", 5)
+    seed = sim_cfg.get("seed", None)
+    include_override = sim_cfg.get("include_override", False)
+
+    logger.info("─" * 50)
+    logger.info("  SATELLITE SELECTION STRATEGY")
+    logger.info("─" * 50)
+    if selection_strategy == "s1503":
+        logger.info("  Strategy : S.1503-4 Normative (Steps 19–22)")
+        logger.info("  Behavior : Order by EPFD, apply MAX_CO_FREQ and MIN_ANGLE_AT_ES")
+        logger.info("  Override : Always included (Step 22)")
+    elif selection_strategy == "top_n_elev_random":
+        logger.info("  Strategy : Top-N Highest Elevation Random Selection")
+        logger.info(f"  Top-N    : {top_n}")
+        logger.info(f"  n_select : {sim_cfg.get('n_select', 1)} (effective = min(n_select, MAX_CO_FREQ))")
+        logger.info("  Behavior : Pick N highest-elevation satellites, then choose n_select at random")
+        logger.info("  Override : Disabled for this strategy")
+        logger.info("  Dual step: supported (forced serial — per-step RNG needs a stable step index)")
+    elif selection_strategy == "hybrid_rand_he":
+        logger.info("  Strategy : Hybrid Random + Highest Elevation")
+        logger.info("  Behavior : Combine Nco random + Nco highest-elevation, keep Nco highest EPFD")
+        logger.info("  Nco      : = MAX_CO_FREQ (co-frequency satellite count)")
+        logger.info("  Override : Disabled for this strategy")
+        logger.info("  Dual step: supported (forced serial — per-step RNG needs a stable step index)")
+        if "max_co_freq_by_lat" in config.get("non_gso", {}):
+            mcf = config["non_gso"].get("max_co_freq_by_lat", [])
+            if mcf:
+                logger.info(f"  MAX_CO_FREQ: {mcf} (from sat_oper / override)")
+            else:
+                logger.info("  MAX_CO_FREQ: unlimited (0)")
+        else:
+            logger.info("  MAX_CO_FREQ: resolved from system (sat_oper)")
+    elif selection_strategy == "alpha_table":
+        logger.info("  Strategy : Alpha Table (deterministic quota — Doc 4A/312)")
+        logger.info(f"  Cases    : {_alpha_cases_note(sim_cfg.get('alpha_bin_deg', 0.0))}")
+        logger.info("  Behavior : TSS credit quota reproduces declared α CDF; worst-epfd within case")
+        logger.info("  Envelope : 7 tables (min · mid25 · mid50 · mid75 · max · MinMax · MaxMin)")
+        logger.info("  Verdict  : ALL 7 sub-runs must pass Art. 22 (binding = worst)")
+        logger.info("  Override : Kept ON (Step 22, normative loop)")
+        logger.info("  Execution: serial per sub-run (TSS state)")
+        logger.info("  Dual step: supported in 's1503_gain' mode (TSS credit scaled by Δt/T_fine — Decision 8)")
+    else:
+        logger.warning(f"  Unknown strategy: '{selection_strategy}'. Falling back to 's1503'.")
+    if seed is not None:
+        logger.info(f"  Random seed: {seed} (reproducible)")
+    else:
+        logger.info("  Random seed: None (non-deterministic)")
+    logger.info("─" * 50)
+    
     # ── Run ──
     try:
         (constellation, wcg_result, sim_result, compliance,

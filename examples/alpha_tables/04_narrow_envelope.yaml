@@ -1,0 +1,27 @@
+# Alpha table — NARROW ENVELOPE: min ≈ max (a nearly-collapsed family)
+#
+# The two declared tables differ by ~2 percentage points, so the 7 generated
+# tables are almost the same CDF. The envelope should collapse: all sub-runs
+# land within a fraction of a dB of each other.
+#
+# TESTS:
+#   • That the 7 margins spread by ~0 dB — a spread here means something other
+#     than the declared table is driving the variation (bug hunt).
+#   • The binding-table tie-break: with near-identical margins, the reported
+#     result must be deterministic and reproducible run to run (the envelope
+#     keeps table order and picks the strict worst; ties resolve to the first).
+#     Run twice and confirm the same binding table is reported.
+#
+# This is also the cheapest sanity check that the 7 sub-runs are genuinely
+# independent — if a shared TSS accumulator were leaking between them, the
+# sub-runs would drift apart even with near-identical tables.
+
+min:
+  - [2.0, 0.40]
+  - [6.0, 0.75]
+  - [15.0, 0.94]
+
+max:
+  - [2.0, 0.38]
+  - [6.0, 0.72]
+  - [15.0, 0.92]

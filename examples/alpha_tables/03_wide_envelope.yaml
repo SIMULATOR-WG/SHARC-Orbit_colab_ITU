@@ -1,0 +1,32 @@
+# Alpha table — WIDE ENVELOPE: min and max far apart
+#
+# `min` concentrates the occupancy at small α (P(α ≤ 3°) = 0.80) while `max`
+# spreads it out to 85°. The 7 generated tables (min, mid25, mid50, mid75, max,
+# MinMax, MaxMin) therefore span a very broad family.
+#
+# TESTS: the envelope machinery itself. The per-sub-run log should show clearly
+# *different* margins across the 7 tables, and the "binding table" verdict
+# should land on one of the extremes (or on a diagonal, if the α-dependent blend
+# happens to be the worst — which is precisely why MinMax/MaxMin exist).
+#
+#   • All 7 margins identical  → the table content is irrelevant to the result;
+#     the selection is not biting (see 01_high_alpha_stress.yaml).
+#   • Binding table = 'min'    → small-α occupancy is the worst case, as expected
+#     when EPFD peaks near the arc.
+#   • Binding table = MinMax / MaxMin → the α-dependent blend is worse than
+#     either endpoint; worth reporting, it is the non-obvious case Doc 4A/312
+#     added the diagonals for.
+#
+# Note the grids differ (min ends at 8°, max at 85°): the union grid is used and
+# `min` is extended flat at its last probability. Only the FIRST angle must match.
+
+min:
+  - [1.0, 0.50]
+  - [3.0, 0.80]
+  - [8.0, 0.95]
+
+max:
+  - [1.0, 0.02]
+  - [20.0, 0.20]
+  - [50.0, 0.60]
+  - [85.0, 0.95]
