@@ -22,6 +22,12 @@ candidate governs, i.e. ``GRX_rel(α₀) > −30 dB``. At α₀ = 4°:
 
 so the sheet's 1.2 m annulus rows only exist at 10.7 GHz.
 
+**Geometry.** One WCG PER VICTIM DIAMETER, pinned from the machine-3 B2
+baselines (they are this study's own config-A level-1 rows). The two
+differ by 22 deg of great circle, so a single shared geometry would run
+one diameter off its own worst case; what the A/B/C comparison needs is a
+geometry common across CONFIGURATIONS, which this satisfies.
+
 **Time base.** Every row runs on a FIXED time step: the SL2SL add-on requires
 it, and keeping the non-SL2SL baselines on the same convention makes the
 comparison exact. Level 1 uses the filing's own full §D4 count (``--level1
@@ -32,8 +38,8 @@ anyway.
 Usage (from the repo root, venv active):
 
     python scripts/run_1503_gmax30_study.py list
-    python scripts/run_1503_gmax30_study.py geometry --bootstrap
-    python scripts/run_1503_gmax30_study.py geometry --set 1.23,-45.6,-44.0
+    python scripts/run_1503_gmax30_study.py geometry            # show WCGs
+    python scripts/run_1503_gmax30_study.py geometry --set D0.6=lat,lon,gso
     python scripts/run_1503_gmax30_study.py run --node 1        # machine 1
     python scripts/run_1503_gmax30_study.py run --node 2        # machine 2
     python scripts/run_1503_gmax30_study.py run --only G4a G4b
@@ -72,9 +78,36 @@ camp.use_campaign(STUDY_ID)
 NTC = camp.NTC_LOW
 NTC_SRS_HINT = camp.NTC_LOW_SRS_HINT
 
-#: The WCG search that anchors the whole study runs with this victim (middle
-#: Table 22-1A diameter); every row then reuses that ONE geometry, which is
-#: what makes the A/B/C ablations comparable (§5.3 of the contribution).
+#: Geometry is pinned PER VICTIM DIAMETER, not once for the study: the WCGA
+#: on this filing lands 22 deg apart for the two Table 22-1A diameters, so a
+#: single "common WCG" would run one of them off its own worst case. What the
+#: comparison actually requires (contribution §5.3) is a geometry held common
+#: across CONFIGURATIONS (A / B / C) — which holding it per diameter
+#: satisfies, while each diameter still sits on its own worst case.
+#:
+#: Both values come from the block-B2 baselines run on machine 3 (0.1 deg
+#: WCGA, full §D4 time base) — which ARE the study's own level-1 config-A
+#: rows (G1a ≡ B2-0-d060, G1b ≡ B2-0-d120):
+#:
+#:   0.6 m — run 8c8259c07b3b: alpha 3.4012 deg, elev 10.0 deg,
+#:           epfd@WCG −167.025 dBW/m², max −163.2 (fail)
+#:   1.2 m — run 2ff9173e17d9: alpha 0.0960 deg, elev 10.0 deg,
+#:           epfd@WCG −171.613 dBW/m², max −165.6 (fail)
+#:
+#: Note both reference satellites sit INSIDE the exclusion cone
+#: (alpha < alpha0 = 4 deg), i.e. they are admitted by the Step-18 GAIN
+#: branch — exactly the regime the Gmax−30 candidate governs, so these
+#: geometries are the relevant ones for this study.
+GEOM_BY_DIAMETER: dict[float, dict[str, Any]] = {
+    0.6: {"es_lat": -74.752270, "es_lon": -104.095508,
+          "gso_lon": -105.737813,
+          "source": "B2-0-d060 run 8c8259c07b3b (0.1 deg WCGA, machine 3)"},
+    1.2: {"es_lat": -64.459828, "es_lon": -44.157290,
+          "gso_lon": -86.839430,
+          "source": "B2-0-d120 run 2ff9173e17d9 (0.1 deg WCGA, machine 3)"},
+}
+
+#: Diameter the ``geometry --bootstrap`` fallback searches with.
 GEOM_SEARCH_DIAMETER_M = 1.2
 
 GRID_RADIUS_KM = 315.0
@@ -141,6 +174,22 @@ def _steps_for(row: dict, level1_steps: int | None) -> int | None:
     return STEPS_L2 if row["level"] == 2 else STEPS_L3
 
 
+def _geom_for(row: dict, state: dict) -> dict[str, Any]:
+    """The WCG this row runs at: the local state's per-diameter override if
+    present, else the pinned value."""
+    d = float(row["diameter"])
+    st_geom = (state.get("geometry") or {}).get(f"D{d:g}")
+    if st_geom:
+        return st_geom
+    g = GEOM_BY_DIAMETER.get(d)
+    if not g:
+        raise SystemExit(
+            f"no WCG pinned for D={d} m — add it to GEOM_BY_DIAMETER or set "
+            f"it locally: geometry --set D{d:g}=lat,lon,gso"
+        )
+    return g
+
+
 def _build_params(row: dict, geom: dict, sys_row: dict,
                   level1_steps: int | None,
                   steps_override: int | None) -> dict[str, Any]:
@@ -182,49 +231,61 @@ def _build_params(row: dict, geom: dict, sys_row: dict,
 def cmd_geometry(args) -> None:
     state = camp._load_state()
     if args.set:
-        lat, lon, gso = (float(x) for x in args.set.split(","))
-        state["geometry"]["G"] = {"es_lat": lat, "es_lon": lon,
-                                  "gso_lon": gso, "source": "manual"}
+        # "D0.6=lat,lon,gso" (or bare "lat,lon,gso" applied to --diameter)
+        spec = args.set
+        if "=" in spec:
+            key, vals = spec.split("=", 1)
+            key = key.strip()
+        else:
+            key, vals = f"D{float(args.diameter):g}", spec
+        lat, lon, gso = (float(x) for x in vals.split(","))
+        state.setdefault("geometry", {})[key] = {
+            "es_lat": lat, "es_lon": lon, "gso_lon": gso, "source": "manual"}
         camp._save_state(state)
     if args.from_run:
         sim = json.loads(
             (Path(args.from_run) / "sim_data.json").read_text(encoding="utf-8"))
         w = sim.get("wcg") or {}
-        state["geometry"]["G"] = {
+        p = json.loads(
+            (Path(args.from_run) / "params.json").read_text(encoding="utf-8"))
+        d = float(p.get("es_antenna_diameter_m") or args.diameter)
+        state.setdefault("geometry", {})[f"D{d:g}"] = {
             "es_lat": float(w["es_lat_deg"]), "es_lon": float(w["es_lon_deg"]),
-            "gso_lon": float(w["gso_lon_deg"]), "source": str(args.from_run),
+            "gso_lon": float(w["gso_lon_deg"]),
+            "source": f"{args.from_run} (D={d} m)",
         }
         camp._save_state(state)
     if args.bootstrap:
+        d = float(args.diameter)
         sys_row = camp._resolve_system(NTC, NTC_SRS_HINT)
         params: dict[str, Any] = {
             "service": "FSS", "run_static_es": False,
             "num_time_steps": 8, "dual_time_step_mode": "off",
             "wcga_s1503": True, "s1503_step_deg": float(args.step_deg),
-            "es_antenna_diameter_m": GEOM_SEARCH_DIAMETER_M,
+            "es_antenna_diameter_m": d,
         }
         params.update(camp._filing_params(sys_row))
-        print(f"bootstrapping the common WCG: {args.step_deg}° WCGA on "
-              f"{Path(sys_row['srs_path']).name}, victim "
-              f"{GEOM_SEARCH_DIAMETER_M} m (token 8-step sim)…")
-        run_id, ok = camp._run_one("geom-G", params)
+        print(f"bootstrapping the WCG for D={d} m: {args.step_deg}° WCGA on "
+              f"{Path(sys_row['srs_path']).name} (token 8-step sim)…")
+        run_id, ok = camp._run_one(f"geom-D{d:g}", params)
         if not ok:
             raise SystemExit("bootstrap run failed — see its worker.log")
         run_dir = REPO / "streamlit_app" / "data" / "runs" / run_id
         sim = json.loads((run_dir / "sim_data.json").read_text(encoding="utf-8"))
         w = sim.get("wcg") or {}
-        state["geometry"]["G"] = {
+        state.setdefault("geometry", {})[f"D{d:g}"] = {
             "es_lat": float(w["es_lat_deg"]), "es_lon": float(w["es_lon_deg"]),
             "gso_lon": float(w["gso_lon_deg"]),
-            "source": f"bootstrap run {run_id} ({args.step_deg}°, "
-                      f"{GEOM_SEARCH_DIAMETER_M} m)",
+            "source": f"bootstrap run {run_id} ({args.step_deg}°, D={d} m)",
         }
         camp._save_state(state)
-    print(json.dumps(state.get("geometry", {}), indent=2))
-    if "G" not in state.get("geometry", {}):
-        print("\nCommon WCG unresolved — run `geometry --bootstrap` (searches "
-              "it here) or `geometry --set lat,lon,gso`. Every G row needs it: "
-              "the A/B/C comparison is only valid at ONE geometry.")
+
+    print("pinned in the script (used unless overridden locally):")
+    for d, g in GEOM_BY_DIAMETER.items():
+        print(f"  D={d} m: ES {g['es_lat']:.6f}, {g['es_lon']:.6f} · "
+              f"GSO {g['gso_lon']:.6f}   [{g['source']}]")
+    ov = state.get("geometry") or {}
+    print("\nlocal overrides:", json.dumps(ov, indent=2) if ov else "(none)")
 
 
 # ─── list / run / report ───────────────────────────────────────────────────
@@ -255,16 +316,12 @@ def cmd_list(args) -> None:
 
 def cmd_run(args) -> None:
     state = camp._load_state()
-    geom = (state.get("geometry") or {}).get("G")
-    if not geom:
-        raise SystemExit(
-            "Common WCG unresolved — run `geometry --bootstrap` (or --set) "
-            "first. Every G row must share ONE geometry."
-        )
     sys_row = camp._resolve_system(NTC, NTC_SRS_HINT)
     print(f"filing: {sys_row['id']} ({Path(sys_row['srs_path']).name})")
-    print(f"common WCG: ES {geom['es_lat']:.4f}, {geom['es_lon']:.4f} · "
-          f"GSO {geom['gso_lon']:.4f}  [{geom.get('source')}]")
+    for d, g in sorted(GEOM_BY_DIAMETER.items()):
+        gg = (state.get("geometry") or {}).get(f"D{d:g}") or g
+        print(f"WCG D={d} m: ES {gg['es_lat']:.4f}, {gg['es_lon']:.4f} · "
+              f"GSO {gg['gso_lon']:.4f}  [{gg.get('source')}]")
 
     todo = [r for r in MATRIX
             if (not args.only or r["id"] in args.only)
@@ -284,7 +341,7 @@ def cmd_run(args) -> None:
             print(f"[{key}] marked done externally — skipping "
                   "(--force runs it here)")
             continue
-        params = _build_params(row, geom, sys_row,
+        params = _build_params(row, _geom_for(row, state), sys_row,
                               args.level1_steps, args.steps_override)
         sl = row.get("sl")
         print(f"\n[{key}] D={row['diameter']}m cfg={row['config']} "
@@ -379,8 +436,14 @@ def main() -> None:
                    help="resolve the common WCG by running the WCGA here")
     g.add_argument("--step-deg", type=float, default=0.1,
                    help="WCGA grid step for --bootstrap (default 0.1)")
-    g.add_argument("--set", default=None, metavar="lat,lon,gso")
-    g.add_argument("--from-run", default=None, metavar="RUN_DIR")
+    g.add_argument("--set", default=None,
+                   metavar="[D0.6=]lat,lon,gso",
+                   help="pin a per-diameter WCG locally (overrides the "
+                        "script's value)")
+    g.add_argument("--from-run", default=None, metavar="RUN_DIR",
+                   help="take the WCG from a finished run (its own diameter)")
+    g.add_argument("--diameter", type=float, default=GEOM_SEARCH_DIAMETER_M,
+                   help="which diameter --bootstrap/--set applies to")
     r = sub.add_parser("run")
     r.add_argument("--node", type=int, choices=[1, 2], default=None,
                    help="run only this node's share of the matrix")
