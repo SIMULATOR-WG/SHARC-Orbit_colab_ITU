@@ -329,6 +329,12 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("sidelobe_enabled"):
         sim["sidelobe_enabled"] = True
         sim["sidelobe_pattern"] = str(params.get("sidelobe_pattern", "1.4"))
+        sim["sidelobe_scope"] = str(params.get("sidelobe_scope", "outside_zone"))
+        sim["sidelobe_pfd_source"] = str(
+            params.get("sidelobe_pfd_source", "constant"))
+        if params.get("sidelobe_alpha_gate_deg") is not None:
+            sim["sidelobe_alpha_gate_deg"] = float(
+                params["sidelobe_alpha_gate_deg"])
         for _k in ("sidelobe_pfd_dbw_m2", "sidelobe_grid_radius_km",
                    "sidelobe_grid_spacing_km", "sidelobe_min_elevation_deg",
                    "sidelobe_gso_arc_separation_deg", "sidelobe_gmax_dbi",
@@ -411,10 +417,13 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             f"(scope: {os.environ['SHARC_S1503_DROP_GMAX30']})"
         )
     if sim.get("sidelobe_enabled"):
+        _src = sim.get("sidelobe_pfd_source", "constant")
         _mod_lines.append(
-            f"sidelobe SL2SL — S.1528 rec {sim.get('sidelobe_pattern', '1.4')}, "
-            f"pfd={sim.get('sidelobe_pfd_dbw_m2', -140.0)} dBW/m², "
-            f"grid {sim.get('sidelobe_grid_radius_km', 315.0):.0f} km / "
+            f"sidelobe SL2SL — scope={sim.get('sidelobe_scope', 'outside_zone')}, "
+            f"S.1528 rec {sim.get('sidelobe_pattern', '1.4')}, pfd="
+            + (f"{sim.get('sidelobe_pfd_dbw_m2', -140.0)} dBW/m² (constant)"
+               if _src == "constant" else "filing mask @ served-link geometry")
+            + f", grid {sim.get('sidelobe_grid_radius_km', 315.0):.0f} km / "
             f"{sim.get('sidelobe_grid_spacing_km', 21.0):.0f} km"
         )
     if _mod_lines:
@@ -704,6 +713,11 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             _tb, _tp = sim_result_dl.sl_tot_acc.build_ccdf()
             sim_data["sidelobe"] = {
                 "pattern": getattr(sim_result_dl, "sidelobe_pattern", None),
+                "scope": getattr(sim_result_dl, "sidelobe_scope", None),
+                "pfd_source": getattr(sim_result_dl, "sidelobe_pfd_source", None),
+                "alpha_gate_deg": sim.get("sidelobe_alpha_gate_deg"),
+                "grid_radius_km": sim.get("sidelobe_grid_radius_km", 315.0),
+                "grid_spacing_km": sim.get("sidelobe_grid_spacing_km", 21.0),
                 "ccdf_bins_db": [float(x) for x in _sb],
                 "ccdf_pct": [float(x) for x in _sp],
                 "max_epfd_dbw": (float(_sb[0]) if len(_sb) else None),
@@ -711,6 +725,36 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
                 "total_ccdf_pct": [float(x) for x in _tp],
                 "total_max_epfd_dbw": (float(_tb[0]) if len(_tb) else None),
             }
+            # §7 diagnostics: candidate-count distribution and how often a
+            # candidate found no served cell (grid too small => understated).
+            _dg = getattr(sim_result_dl, "sl_diag", None) or {}
+            _hist = {int(k): int(v) for k, v in (_dg.get("hist") or {}).items()}
+            _steps = int(_dg.get("steps") or 0)
+            if _hist and _steps:
+                _flat = []
+                for _n, _c in sorted(_hist.items()):
+                    _flat.extend([_n] * _c)
+                import statistics as _stats  # noqa: PLC0415
+                _n_zero = _hist.get(0, 0)
+                sim_data["sidelobe"]["diagnostics"] = {
+                    "steps": _steps,
+                    "n_candidates_median": float(_stats.median(_flat)),
+                    "n_candidates_p90": float(
+                        _flat[min(len(_flat) - 1, int(0.90 * len(_flat)))]),
+                    "n_candidates_max": max(_hist),
+                    "pct_steps_with_candidate": round(
+                        100.0 * (_steps - _n_zero) / _steps, 3),
+                    "n_cand_without_link": int(
+                        _dg.get("n_cand_without_link") or 0),
+                }
+                _d = sim_data["sidelobe"]["diagnostics"]
+                _emit(
+                    f"Sidelobe diagnostics: candidates/step median="
+                    f"{_d['n_candidates_median']:.0f} p90={_d['n_candidates_p90']:.0f} "
+                    f"max={_d['n_candidates_max']} · steps with a candidate="
+                    f"{_d['pct_steps_with_candidate']}% · candidates with NO "
+                    f"served cell={_d['n_cand_without_link']}"
+                )
             _emit(
                 "Sidelobe (SL2SL) study: max sidelobe-only EPFD "
                 f"{sim_data['sidelobe']['max_epfd_dbw']} dBW · "
@@ -746,7 +790,11 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     if os.environ.get("SHARC_S1503_DROP_GMAX30"):
         _mods["drop_gmax30"] = True
     if sim.get("sidelobe_enabled"):
-        _mods["sidelobe"] = {"pattern": sim.get("sidelobe_pattern", "1.4")}
+        _mods["sidelobe"] = {
+            "pattern": sim.get("sidelobe_pattern", "1.4"),
+            "scope": sim.get("sidelobe_scope", "outside_zone"),
+            "pfd_source": sim.get("sidelobe_pfd_source", "constant"),
+        }
     if _mods:
         _mods["scope"] = (
             "epfd_and_wcga" if sim.get("mods_in_wcga") else "epfd_only"

@@ -707,6 +707,8 @@ with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
                  "with the reference-vector / alpha-table strategies.",
         )
         sidelobe_pattern = str(prev.get("sidelobe_pattern", "1.4"))
+        sidelobe_scope = str(prev.get("sidelobe_scope", "outside_zone"))
+        sidelobe_pfd_source = str(prev.get("sidelobe_pfd_source", "constant"))
         sidelobe_pfd_dbw_m2 = float(prev.get("sidelobe_pfd_dbw_m2", -140.0))
         sidelobe_grid_radius_km = float(prev.get("sidelobe_grid_radius_km", 315.0))
         sidelobe_grid_spacing_km = float(prev.get("sidelobe_grid_spacing_km", 21.0))
@@ -720,6 +722,51 @@ with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
         sidelobe_p12_near_lobe_level_db = float(prev.get("sidelobe_p12_near_lobe_level_db", -15.0))
         sidelobe_p12_hpbw_deg = float(prev.get("sidelobe_p12_hpbw_deg", 3.1338))
         if sidelobe_enabled:
+            _scopes = ["outside_zone", "annulus_gmax30", "in_zone",
+                       "all_non_nco"]
+            sidelobe_scope = st.selectbox(
+                "Which satellites radiate side lobes (scope)",
+                options=_scopes,
+                index=(_scopes.index(sidelobe_scope)
+                       if sidelobe_scope in _scopes else 0),
+                key="m1503_sl_scope",
+                format_func=lambda v: {
+                    "outside_zone": "outside_zone — every visible satellite past the α₀ gate (all side lobes, historical)",
+                    "annulus_gmax30": "annulus_gmax30 — only the Gmax−30 annulus (Doc 4A/791 Study 1 sc. 2)",
+                    "in_zone": "in_zone — every satellite admitted by the Step-18 gain branch",
+                    "all_non_nco": "all_non_nco — everything NOT in the Nco set (in-zone + capped standard)",
+                }[v],
+                help="The annulus is the set the current text counts at "
+                     "MAIN-BEAM pfd and Doc 4A/1029 §5 drops; running it as "
+                     "side lobe is the third option of the debate. It "
+                     "REQUIRES the Gmax−30 ablation (previous tab) or the "
+                     "engine refuses the run, to avoid double counting.",
+            )
+            if sidelobe_scope == "annulus_gmax30" and not drop_gmax30:
+                st.error(
+                    "scope=annulus_gmax30 needs the **Gmax−30 dB ablation** "
+                    "enabled (tab 'Step-18 · Gmax−30'): otherwise those "
+                    "satellites are counted twice — at main-beam pfd by the "
+                    "gain branch AND at side-lobe level here. The engine "
+                    "refuses the run.",
+                    icon=":material/error:",
+                )
+            _srcs = ["constant", "mask"]
+            sidelobe_pfd_source = st.selectbox(
+                "Serving-beam pfd source",
+                options=_srcs,
+                index=(_srcs.index(sidelobe_pfd_source)
+                       if sidelobe_pfd_source in _srcs else 0),
+                key="m1503_sl_pfdsrc",
+                format_func=lambda v: (
+                    "constant — a declared pfd toward each served cell (France 4A/461, Viasat 4A/706)"
+                    if v == "constant" else
+                    "mask — the filing's own PFD mask at the SERVED-link geometry (US 4A/791)"
+                ),
+                help="With 'mask' the run's RefBW correction IS applied (as "
+                     "in the normative path); the constant is deliberately "
+                     "left uncorrected because it is a study convention.",
+            )
             sidelobe_pattern = st.radio(
                 "NGSO satellite transmit pattern",
                 options=["1.4", "1.2"],
@@ -797,11 +844,15 @@ with st.expander("1503 proposal modifications (WP 4A studies)", expanded=False):
             st.markdown("**Served-ES grid & link gates**")
             col_sl1, col_sl2, col_sl3 = st.columns(3)
             with col_sl1:
-                sidelobe_pfd_dbw_m2 = st.number_input(
-                    "pfd toward served cell (dBW/m²/40kHz)",
-                    min_value=-200.0, max_value=-80.0,
-                    value=sidelobe_pfd_dbw_m2, step=1.0, key="m1503_sl_pfd",
-                )
+                if sidelobe_pfd_source == "constant":
+                    sidelobe_pfd_dbw_m2 = st.number_input(
+                        "pfd toward served cell (dBW/m²/40kHz)",
+                        min_value=-200.0, max_value=-80.0,
+                        value=sidelobe_pfd_dbw_m2, step=1.0,
+                        key="m1503_sl_pfd",
+                    )
+                else:
+                    st.caption("pfd comes from the filing mask (no constant).")
                 sidelobe_grid_radius_km = st.number_input(
                     "Grid half-width (km)", min_value=50.0, max_value=2000.0,
                     value=sidelobe_grid_radius_km, step=21.0,
@@ -1334,6 +1385,13 @@ if submit:
             icon=":material/error:",
         )
         st.stop()
+    if sidelobe_enabled and sidelobe_scope == "annulus_gmax30" and not drop_gmax30:
+        st.error(
+            "scope=annulus_gmax30 requires the Gmax−30 dB ablation enabled "
+            "(section 8 → 'Step-18 · Gmax−30'). Run not launched.",
+            icon=":material/error:",
+        )
+        st.stop()
     if selection_strategy == "alpha_table" and alpha_table_data is None:
         st.error(
             "The alpha-table strategy needs a declared min/max CDF file "
@@ -1392,6 +1450,8 @@ if submit:
     if sidelobe_enabled:
         params["sidelobe_enabled"] = True
         params["sidelobe_pattern"] = str(sidelobe_pattern)
+        params["sidelobe_scope"] = str(sidelobe_scope)
+        params["sidelobe_pfd_source"] = str(sidelobe_pfd_source)
         params["sidelobe_pfd_dbw_m2"] = float(sidelobe_pfd_dbw_m2)
         params["sidelobe_grid_radius_km"] = float(sidelobe_grid_radius_km)
         params["sidelobe_grid_spacing_km"] = float(sidelobe_grid_spacing_km)
@@ -1497,6 +1557,8 @@ if submit:
         "drop_gmax30": bool(drop_gmax30),
         "sidelobe_enabled": bool(sidelobe_enabled),
         "sidelobe_pattern": str(sidelobe_pattern),
+        "sidelobe_scope": str(sidelobe_scope),
+        "sidelobe_pfd_source": str(sidelobe_pfd_source),
         "sidelobe_pfd_dbw_m2": float(sidelobe_pfd_dbw_m2),
         "sidelobe_grid_radius_km": float(sidelobe_grid_radius_km),
         "sidelobe_grid_spacing_km": float(sidelobe_grid_spacing_km),

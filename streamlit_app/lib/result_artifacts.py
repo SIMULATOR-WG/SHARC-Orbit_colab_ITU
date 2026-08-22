@@ -291,9 +291,14 @@ def write_sidelobe_ccdf_csv(result_path: Path, sim_data: dict[str, Any]) -> str 
         return None
     unit = _epfd_unit(sim_data)
     pattern = sl.get("pattern") or "?"
+    scope = sl.get("scope") or "outside_zone"
+    src = sl.get("pfd_source") or "constant"
     lines = [
         "# SHARC-Orbit sidelobe (SL2SL) study CCDFs — non-normative WP 4A "
-        f"option, NGSO satellite pattern ITU-R S.1528 rec {pattern}. "
+        f"option. scope={scope} · pfd_source={src} · NGSO satellite pattern "
+        f"ITU-R S.1528 rec {pattern} · served-ES grid "
+        f"{sl.get('grid_radius_km', '?')} km radius / "
+        f"{sl.get('grid_spacing_km', '?')} km spacing. "
         "curve=sidelobe_only: the sidelobe links alone; curve=total: "
         "per-step sum standard(S.1503-4)+sidelobe (Doc 4A/461-style view).",
         f"# units: epfd_db [{unit}] · pct_time_exceeded [% of simulated time]",

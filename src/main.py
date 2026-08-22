@@ -3003,7 +3003,41 @@ def run_wcg_downlink(config: dict) -> tuple[
     sidelobe_config = None
     if bool(sim_cfg.get("sidelobe_enabled", False)):
         from .sidelobe_epfd import SidelobeConfig  # noqa: PLC0415
+        _sl_scope = str(sim_cfg.get("sidelobe_scope", "outside_zone"))
+        _sl_pfd_src = str(sim_cfg.get("sidelobe_pfd_source", "constant"))
+        _sl_alpha_gate = sim_cfg.get("sidelobe_alpha_gate_deg")
+        # Guard 1 — the annulus scope EXISTS only under configuration B: the
+        # Gmax-30 candidate must be ablated, otherwise those satellites are
+        # counted twice (main-beam pfd by the Step-18 gain branch AND side
+        # lobe by this module).
+        if _sl_scope == "annulus_gmax30":
+            from .antenna import s1503_gain_test_drops_gmax30  # noqa: PLC0415
+            if not s1503_gain_test_drops_gmax30("epfd"):
+                raise ValueError(
+                    "sidelobe_scope='annulus_gmax30' requires the Step-18 "
+                    "Gmax-30 ablation to be ACTIVE (drop_gmax30 / "
+                    "SHARC_S1503_DROP_GMAX30 in {'epfd','both'}); otherwise "
+                    "the annulus satellites are double-counted — once at "
+                    "main-beam pfd by the gain branch and once at side-lobe "
+                    "level here."
+                )
+        # Guard 2 — the mask source needs a real PFD mask.
+        if _sl_pfd_src == "mask":
+            if pfd_mask is None or getattr(pfd_mask, "is_operating_params", False):
+                raise ValueError(
+                    "sidelobe_pfd_source='mask' requires the filing's PFD "
+                    "mask (not the parametric/operating-parameter path)."
+                )
+            if getattr(pfd_mask, "is_mixed_geometry", False):
+                raise ValueError(
+                    "sidelobe_pfd_source='mask' does not support "
+                    "mixed-geometry fused masks (method_3)."
+                )
         sidelobe_config = SidelobeConfig(
+            scope=_sl_scope,
+            pfd_source=_sl_pfd_src,
+            alpha_gate_deg=(float(_sl_alpha_gate)
+                            if _sl_alpha_gate is not None else None),
             pattern=str(sim_cfg.get("sidelobe_pattern", "1.4")),
             pfd_dbw_m2=float(sim_cfg.get("sidelobe_pfd_dbw_m2", -140.0)),
             frequency_ghz=float(

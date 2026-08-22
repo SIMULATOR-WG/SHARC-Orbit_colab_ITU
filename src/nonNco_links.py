@@ -35,13 +35,16 @@ def get_valid_links(deployed_ESs,
                     *,
                     victim_exclusion_alpha_deg: float = 4.0,
                     min_elevation_deg: float = 25.0,
-                    gso_arc_separation_deg: float = 20.0):
+                    gso_arc_separation_deg: float = 20.0,
+                    cand_idx=None,
+                    apply_victim_alpha_gate: bool = True):
     """
     Finds all valid ES-satellite links for the SL2SL computation.
 
     A valid link satisfies:
         - NGSO sat outside the victim's exclusion zone
-          (|alpha| > ``victim_exclusion_alpha_deg`` — pass the run's own α₀)
+          (|alpha| > ``victim_exclusion_alpha_deg`` -- the run's own alpha0),
+          UNLESS ``apply_victim_alpha_gate=False``
         - satellite above ``min_elevation_deg`` at the served ES
         - |alpha| at the served ES > ``gso_arc_separation_deg``
           (keeps served beams away from the GSO arc)
@@ -52,12 +55,23 @@ def get_valid_links(deployed_ESs,
         Rows of (lat_deg, lon_deg) of the served-cell grid.
     ngso_sat_ecef : (N, 3) ndarray of the constellation sats' ECEF
     victim_es_ecef : ECEF of the victim ES
+    cand_idx : (K,) ndarray | None
+        Constellation indices allowed to radiate side lobes. ``None``
+        (default) keeps the historical behaviour: every satellite above the
+        horizon. A Step-18-derived subset (see ``SidelobeConfig.scope``) is
+        passed here.
+    apply_victim_alpha_gate : bool
+        When False the |alpha| gate at the VICTIM is skipped -- required by
+        the in-zone / annulus scopes, whose satellites are inside the cone by
+        construction and would otherwise all be rejected.
 
     Returns
     -------
     valid_links : list
-        List of selected tuples:
-            (sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
+        List of tuples:
+            (sat_idx, sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
+        ``sat_idx`` is the CONSTELLATION index -- required downstream for
+        per-satellite PFD-mask routing (``get_pfd_batch(sat_indices=...)``).
     """
     # ESs are fixed: ECEF computed once, not per time step. Cache keyed on
     # the grid CONTENT hash, not id() (id() is per-process and can be reused
@@ -78,17 +92,24 @@ def get_valid_links(deployed_ESs,
 
     valid_links = []
 
-    # Iterate over the visible satellites (sin_el >= 0)
-    for sat_ecef in ngso_sat_ecef[sin_el >= 0]:
-        # alpha of the NGSO as seen by the WCG victim ES
-        alpha_with_victim = compute_alpha_angle(victim_es_ecef,
-                                                sat_ecef,
-                                                0,
-                                                t_s)
+    # Candidate set: an explicit Step-18 subset, or every visible satellite.
+    if cand_idx is None:
+        sat_iter = np.nonzero(np.asarray(sin_el) >= 0.0)[0]
+    else:
+        sat_iter = np.asarray(cand_idx, dtype=np.int64).ravel()
 
-        # Independent of the served ES: if it fails, every ES would fail
-        if not np.abs(alpha_with_victim) > float(victim_exclusion_alpha_deg):
-            continue
+    for _k in sat_iter:
+        _k = int(_k)
+        sat_ecef = ngso_sat_ecef[_k]
+        if apply_victim_alpha_gate:
+            # alpha of the NGSO as seen by the WCG victim ES. Independent of
+            # the served ES: if it fails, every served ES would fail.
+            alpha_with_victim = compute_alpha_angle(victim_es_ecef,
+                                                    sat_ecef,
+                                                    0,
+                                                    t_s)
+            if not np.abs(alpha_with_victim) > float(victim_exclusion_alpha_deg):
+                continue
 
         # elevation at every served ES at once
         d = sat_ecef.reshape(1, 3) - es_ecef
@@ -106,7 +127,8 @@ def get_valid_links(deployed_ESs,
             es_ecef[cand], sat_ecef, ES_lat[cand], ES_lon[cand])
 
         for i in cand[np.abs(alpha) > float(gso_arc_separation_deg)]:
-            valid_links.append((sat_ecef,
+            valid_links.append((_k,
+                                sat_ecef,
                                 ES_lat[i],
                                 ES_lon[i],
                                 elevation[i],
@@ -124,22 +146,22 @@ def select_links(valid_links):
     ----------
     valid_links : list
         List of tuples:
-            (sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
+            (sat_idx, sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
 
     Returns
     -------
     selected_links : list
-        List of selected tuples:
-            (sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
+        List of selected tuples, same row shape as the input:
+            (sat_idx, sat_ecef, ES_lat, ES_lon, elevation, es_ecef)
     """
 
     # Group candidate links by Earth station
     es_candidates = defaultdict(list)
 
-    for sat_ecef, es_lat, es_lon, elevation, es_ecef in valid_links:
+    for sat_idx, sat_ecef, es_lat, es_lon, elevation, es_ecef in valid_links:
         es_key = (es_lat, es_lon)
 
-        es_candidates[es_key].append((elevation, sat_ecef, es_ecef))
+        es_candidates[es_key].append((elevation, sat_idx, sat_ecef, es_ecef))
 
     # Greedy assignment
     assigned_satellites = set()
@@ -156,15 +178,15 @@ def select_links(valid_links):
             reverse=True,
         )
 
-        for elevation, sat_ecef, es_ecef in candidates:
-            sat_key = tuple(np.asarray(sat_ecef))
-
-            # Satellite already assigned?
-            if sat_key in assigned_satellites:
+        for elevation, sat_idx, sat_ecef, es_ecef in candidates:
+            # Keyed on the constellation index (exact and cheap -- the old
+            # tuple(position) key relied on float identity).
+            if sat_idx in assigned_satellites:
                 continue
 
-            selected_links.append((sat_ecef, es_lat, es_lon, elevation, es_ecef))
-            assigned_satellites.add(sat_key)
+            selected_links.append(
+                (sat_idx, sat_ecef, es_lat, es_lon, elevation, es_ecef))
+            assigned_satellites.add(sat_idx)
 
             # Move to next Earth station
             break

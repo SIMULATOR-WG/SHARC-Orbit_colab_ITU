@@ -752,6 +752,7 @@ def _accumulate_epfd_visible_satellites(
     per_sat_out: dict | None = None,
     per_system_out: dict[int, list] | None = None,
     contributing_idx_out: list[int] | None = None,
+    step18_out: dict | None = None,
 ) -> tuple[list[float], list[float], float, bool]:
     """Returns (standard_linear, override_linear, min_alpha_deg, any_critical_gain).
 
@@ -765,6 +766,20 @@ def _accumulate_epfd_visible_satellites(
     ``standard_linear + override_linear`` (same order), i.e. the satellites
     that survived Steps 19–22 selection. Purely additive — does not change
     selection behavior or the function's own return values.
+
+    ``step18_out`` (SL2SL study, see ``src/sidelobe_epfd.py``): when a dict is
+    passed it is filled with the Step-18 classification of THIS step, as
+    global satellite index arrays:
+
+    * ``"annulus"`` — not standard, admitted by the ``Gmax − 30 dB``
+      candidate but NOT by ``GRX(α₀)`` (exactly the set the Doc 4A/1029 §5
+      ablation drops);
+    * ``"in_zone"`` — every satellite admitted by the gain branch (Step 22);
+    * ``"non_nco_outside"`` — standard satellites dropped by the
+      ``MAX_CO_FREQ`` cap (outside the cone, not serving the victim's Nco).
+
+    Vectorized path only (the scalar/1D-mask fallback leaves it empty), and
+    purely diagnostic — it never changes the returned EPFD.
 
     ``per_sat_out`` (track-duration collect mode, S.1503-4 §D5.1.4.2): when a
     dict is passed, the per-step MAX_CO_FREQ selection (Steps 19–22 of
@@ -896,6 +911,22 @@ def _accumulate_epfd_visible_satellites(
                     override[cand] = g_rel_arr[cand] > g_rel_at_a0
                 else:
                     override[cand] = g_rel_arr[cand] > np.minimum(-30.0, g_rel_at_a0)
+                if step18_out is not None:
+                    # The annulus: NOT standard, above the Gmax−30 contour but
+                    # NOT above GRX(α₀) — the satellites configuration A
+                    # counts at main-beam pfd and configuration B drops.
+                    _nstd = ~is_standard_arr[cand]
+                    _ann = _nstd & (g_rel_arr[cand] > -30.0) & (
+                        g_rel_arr[cand] <= g_rel_at_a0)
+                    step18_out["annulus"] = visible_idx[cand[_ann]].astype(
+                        np.int64, copy=False)
+        if step18_out is not None:
+            step18_out.setdefault("annulus", np.empty(0, dtype=np.int64))
+            _inz = override & (~is_standard_arr)
+            step18_out["in_zone"] = visible_idx[np.nonzero(_inz)[0]].astype(
+                np.int64, copy=False)
+            step18_out["_standard_global"] = visible_idx[
+                np.nonzero(is_standard_arr)[0]].astype(np.int64, copy=False)
         eligible = is_standard_arr | override
         if not np.any(eligible):
             return [], [], min_alpha, any_critical_gain
@@ -1022,6 +1053,15 @@ def _accumulate_epfd_visible_satellites(
         if contributing_idx_out is not None:
             contributing_idx_out.extend(standard_idx)
             contributing_idx_out.extend(override_idx)
+        if step18_out is not None:
+            # Standard satellites the MAX_CO_FREQ cap dropped: outside the
+            # cone, eligible, but not serving the victim's Nco set.
+            _std_all = step18_out.pop("_standard_global",
+                                       np.empty(0, dtype=np.int64))
+            step18_out["non_nco_outside"] = np.setdiff1d(
+                _std_all, np.asarray(standard_idx, dtype=np.int64),
+                assume_unique=False,
+            )
 
         return standard_epfd, override_epfd, min_alpha, any_critical_gain
 
@@ -1576,6 +1616,10 @@ class EPFDSimulationResult:
     sl_acc: "EPFDStreamAccumulator | None" = None
     sl_tot_acc: "EPFDStreamAccumulator | None" = None
     sidelobe_pattern: str | None = None
+    #: SL2SL §7 diagnostics: candidate-count histogram, unlinked candidates.
+    sl_diag: dict | None = None
+    sidelobe_scope: str | None = None
+    sidelobe_pfd_source: str | None = None
 
     def build_cdf(self):
         """Builds the CCDF from the accumulator (or from the history if retained).
@@ -1666,6 +1710,40 @@ class _DualTSProxy:
         return g_db > thr
 
 
+def _sl_candidates(sl_cfg: "SidelobeConfig",
+                   step18: dict | None) -> "np.ndarray | None":
+    """Constellation indices allowed to radiate side lobes for this scope.
+
+    ``None`` means "all visible" (the ``outside_zone`` historical behaviour).
+    """
+    scope = sl_cfg.scope
+    if scope == "outside_zone":
+        return None
+    if step18 is None:
+        return np.empty(0, dtype=np.int64)
+    if scope == "annulus_gmax30":
+        return step18.get("annulus", np.empty(0, dtype=np.int64))
+    if scope == "in_zone":
+        return step18.get("in_zone", np.empty(0, dtype=np.int64))
+    # all_non_nco: gain-branch satellites + standard ones the cap dropped.
+    return np.union1d(
+        step18.get("in_zone", np.empty(0, dtype=np.int64)),
+        step18.get("non_nco_outside", np.empty(0, dtype=np.int64)),
+    ).astype(np.int64, copy=False)
+
+
+def _sl_diag_new() -> dict:
+    """Mergeable per-chunk SL2SL diagnostics (§7 of the spec)."""
+    return {"hist": {}, "n_cand_without_link": 0, "steps": 0}
+
+
+def _sl_diag_merge(dst: dict, src: dict) -> None:
+    for k, v in (src.get("hist") or {}).items():
+        dst["hist"][int(k)] = dst["hist"].get(int(k), 0) + int(v)
+    dst["n_cand_without_link"] += int(src.get("n_cand_without_link", 0))
+    dst["steps"] += int(src.get("steps", 0))
+
+
 def _sidelobe_step_add(
     sl_cfg: "SidelobeConfig",
     sl_grid: np.ndarray,
@@ -1683,10 +1761,21 @@ def _sidelobe_step_add(
     t_s: float,
     duration_s: float,
     standard_epfd_lin: float,
+    step18: dict | None = None,
+    pfd_mask=None,
+    pfd_bw_correction_db: float = 0.0,
+    subsat_lat_all: np.ndarray | None = None,
+    subsat_lon_all: np.ndarray | None = None,
+    diag: dict | None = None,
 ) -> None:
     """One step of the SL2SL study: aggregate the sidelobe links and feed the
     sidelobe-only + standard+sidelobe accumulators (same time base as the
-    joint ``acc``). The victim gain is the RUN's own antenna, relative."""
+    joint ``acc``). The victim gain is the RUN's own antenna, relative.
+
+    ``step18`` carries the Step-18 classification of this step (see
+    ``_accumulate_epfd_visible_satellites``); it selects the radiating set for
+    every scope except ``outside_zone``. ``diag`` accumulates the §7
+    diagnostics (candidate-count histogram and unlinked-candidate count)."""
 
     def _vic_gain_rel_lin(sat_ecef: np.ndarray) -> float:
         offaxis = compute_offaxis_angle(es_ecef, sat_ecef, gso_ecef)
@@ -1697,10 +1786,24 @@ def _sidelobe_step_add(
             )
         return float(es_antenna.relative_gain_linear(offaxis, theta_planar))
 
-    sl_lin, n_links = compute_sidelobe_epfd_step(
+    cand = _sl_candidates(sl_cfg, step18)
+    if diag is not None:
+        n_c = (int(np.asarray(cand).size) if cand is not None
+               else int(np.count_nonzero(sin_el >= 0.0)))
+        diag["hist"][n_c] = diag["hist"].get(n_c, 0) + 1
+        diag["steps"] += 1
+
+    sl_lin, n_links, n_no_link = compute_sidelobe_epfd_step(
         sl_cfg, sl_grid, pos_ecef_all, sin_el, es_ecef,
         _vic_gain_rel_lin, float(alpha0_deg), float(t_s),
+        cand_sat_idx=cand,
+        pfd_mask=pfd_mask,
+        pfd_bw_correction_db=pfd_bw_correction_db,
+        subsat_lat_all=subsat_lat_all,
+        subsat_lon_all=subsat_lon_all,
     )
+    if diag is not None:
+        diag["n_cand_without_link"] += int(n_no_link)
     sl_db = 10.0 * math.log10(sl_lin) if sl_lin > 0.0 else -999.0
     sl_acc.add(
         time_s=t_s, epfd_db=sl_db, duration_s=duration_s,
@@ -1836,6 +1939,12 @@ def _simulate_chunk(args):
     acc = EPFDStreamAccumulator()
     sl_acc = EPFDStreamAccumulator() if sidelobe_config is not None else None
     sl_tot_acc = EPFDStreamAccumulator() if sidelobe_config is not None else None
+    sl_diag = _sl_diag_new() if sidelobe_config is not None else None
+    # Step-18 classification is only needed by the non-default scopes.
+    _sl_needs_s18 = (
+        sidelobe_config is not None
+        and sidelobe_config.needs_step18_classification
+    )
     results: list[EPFDTimeStepResult] | None = [] if keep_full_history else None
     t_s = t_start
 
@@ -1915,6 +2024,7 @@ def _simulate_chunk(args):
 
         per_system_step: dict[int, list] | None = {} if all_sids is not None else None
         _contrib_idx: list[int] = []
+        _s18: dict | None = {} if _sl_needs_s18 else None
         standard_epfd, override_epfd, min_alpha, _ = _accumulate_epfd_visible_satellites(
             visible_idx=visible_idx,
             pos_ecef_all=pos_ecef_all,
@@ -1950,6 +2060,7 @@ def _simulate_chunk(args):
             selection_config=selection_config,
             step_index=_global_step,
             contributing_idx_out=_contrib_idx,
+            step18_out=_s18,
         )
 
         epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -1979,6 +2090,10 @@ def _simulate_chunk(args):
                 es_antenna=es_antenna, alpha0_deg=alpha0_deg,
                 t_s=t_s, duration_s=tstep_s,
                 standard_epfd_lin=epfd_sum_linear,
+                step18=_s18,
+                pfd_mask=pfd_mask,
+                pfd_bw_correction_db=pfd_bw_correction_db,
+                diag=sl_diag,
             )
         if per_system_step is not None:
             _acc_add_per_system(
@@ -1997,7 +2112,8 @@ def _simulate_chunk(args):
             ))
         t_s += tstep_s
 
-    return {"acc": acc, "ts": results, "sl_acc": sl_acc, "sl_tot_acc": sl_tot_acc}
+    return {"acc": acc, "ts": results, "sl_acc": sl_acc,
+            "sl_tot_acc": sl_tot_acc, "sl_diag": sl_diag}
 
 
 def _simulate_chunk_dual_ts(args):
@@ -3016,13 +3132,23 @@ def run_epfd_simulation(
         )
         result.sl_acc = EPFDStreamAccumulator()
         result.sl_tot_acc = EPFDStreamAccumulator()
+        result.sl_diag = _sl_diag_new()
         result.sidelobe_pattern = str(sidelobe_config.pattern)
+        result.sidelobe_scope = str(sidelobe_config.scope)
+        result.sidelobe_pfd_source = str(sidelobe_config.pfd_source)
         logger.info(
-            "SL2SL sidelobe study ON: pattern S.1528-%s, grid %d ES "
-            "(radius %.0f km, spacing %.0f km), pfd %.1f dBW/m²",
+            "SL2SL sidelobe study ON: scope=%s, pfd_source=%s, pattern "
+            "S.1528-%s, grid %d ES (radius %.0f km, spacing %.0f km), "
+            "alpha gate %s, pfd %s",
+            sidelobe_config.scope, sidelobe_config.pfd_source,
             sidelobe_config.pattern, len(sl_grid),
             sidelobe_config.grid_radius_km, sidelobe_config.grid_spacing_km,
-            sidelobe_config.pfd_dbw_m2,
+            ("off (candidate set from Step 18)"
+             if not sidelobe_config.applies_victim_alpha_gate
+             else f"{sidelobe_config.alpha_gate_deg or alpha0_deg:.2f} deg"),
+            (f"{sidelobe_config.pfd_dbw_m2:.1f} dBW/m2 (constant)"
+             if sidelobe_config.pfd_source == "constant"
+             else "filing mask at the served-link geometry"),
         )
 
     _strategy = (
@@ -3232,6 +3358,11 @@ def run_epfd_simulation(
                 {} if all_sids_seq is not None else None
             )
             _contrib_idx: list[int] = []
+            _s18_seq: dict | None = (
+                {} if (sidelobe_config is not None
+                       and sidelobe_config.needs_step18_classification)
+                else None
+            )
             standard_epfd, override_epfd, min_alpha, any_critical_gain = (
                 _accumulate_epfd_visible_satellites(
                     visible_idx=visible_idx,
@@ -3270,6 +3401,7 @@ def run_epfd_simulation(
                     alpha_tss=alpha_tss,
                     alpha_step_weight=alpha_step_weight,
                     contributing_idx_out=_contrib_idx,
+                    step18_out=_s18_seq,
                 )
             )
             epfd_sum_linear = sum(standard_epfd) + sum(override_epfd)
@@ -3301,6 +3433,10 @@ def run_epfd_simulation(
                     gso_ecef=gso_ecef, es_antenna=es_antenna,
                     alpha0_deg=alpha0_deg, t_s=t_s, duration_s=dt,
                     standard_epfd_lin=epfd_sum_linear,
+                    step18=_s18_seq,
+                    pfd_mask=pfd_mask,
+                    pfd_bw_correction_db=pfd_bw_correction_db,
+                    diag=result.sl_diag,
                 )
             if per_system_step is not None:
                 _acc_add_per_system(
@@ -3493,6 +3629,8 @@ def run_epfd_simulation(
             if result.sl_acc is not None and batch_res.get("sl_acc") is not None:
                 result.sl_acc.merge(batch_res["sl_acc"])
                 result.sl_tot_acc.merge(batch_res["sl_tot_acc"])
+                if batch_res.get("sl_diag") is not None:
+                    _sl_diag_merge(result.sl_diag, batch_res["sl_diag"])
             if keep_full_history and batch_res["ts"]:
                 result.time_steps.extend(batch_res["ts"])
             pct = done_steps / max(1, nsteps) * 100.0
