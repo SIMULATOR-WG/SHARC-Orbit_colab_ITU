@@ -140,6 +140,20 @@ GEOM_A_DEFAULT = {"es_lat": 0.5567511283556237,
 
 # ─── State ───────────────────────────────────────────────────────────────────
 
+def use_campaign(name: str) -> None:
+    """Re-point the module's campaign id and state dir.
+
+    Lets a sibling study script (e.g. ``run_1503_gmax30_study.py``) reuse this
+    module's runner (``_run_one``) and filing resolution while keeping its own
+    campaign id and resumable state file. Must be called BEFORE any run/state
+    call. Default (``changes_1503``) is untouched for the main campaign.
+    """
+    global CAMPAIGN_ID, STATE_DIR, STATE_PATH
+    CAMPAIGN_ID = name
+    STATE_DIR = REPO / "streamlit_app" / "data" / "campaigns" / name
+    STATE_PATH = STATE_DIR / "campaign_state.json"
+
+
 def _load_state() -> dict[str, Any]:
     if STATE_PATH.exists():
         st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
