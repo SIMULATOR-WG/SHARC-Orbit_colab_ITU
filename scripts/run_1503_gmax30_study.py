@@ -9,8 +9,11 @@ filing, the three readings of the annulus between ``GRX(α₀)`` and
     B  drop it                       (Doc 4A/1029 §5)        drop_gmax30 = epfd
     C  reclassify as SIDE LOBE       (Doc 4A/791 St.1 sc.2)  B + SL2SL annulus
 
-plus the ``all_non_nco`` and ``in_zone`` scope variants and both S.1528
-patterns (1.2 / 1.4), with the serving pfd taken from the FILING MASK.
+plus the ``all_non_nco`` and ``in_zone`` scope variants. Two antenna axes
+are crossed on EVERY scope: the victim ES is the current S.1428 at both
+Table 22-1A diameters (0.6 / 1.2 m) and the interferer side lobe is
+S.1528 rec 1.2 and 1.4 — the serving pfd itself comes from the FILING
+MASK, so only the side-lobe pattern changes between the a/b twins.
 
 **Band.** 10.7 GHz filing (323520263), Table 22-1A victim diameters. This is
 forced by the physics: the annulus is non-empty only where the Gmax−30
@@ -48,6 +51,8 @@ Usage (from the repo root, venv active):
 State (geometry + run ids) lives in
 ``streamlit_app/data/campaigns/gmax30_sl2sl/campaign_state.json`` — the study
 is resumable and completed runs are skipped (``--force`` re-runs).
+Records are keyed ``<row>_d<drops>``, so raising a drop count queues the
+row again instead of reporting the shorter run as the longer one.
 """
 from __future__ import annotations
 
@@ -113,18 +118,50 @@ GEOM_SEARCH_DIAMETER_M = 1.2
 GRID_RADIUS_KM = 315.0
 GRID_SPACING_KM = 21.0
 
-STEPS_L2 = 20_000
-STEPS_L3 = 200_000
+# ─── Measured cost model (10.7 GHz filing, this machine) ───────────────────
+# Timings measured on the real runs, not estimated:
+#     no-SL2SL      20 k -> 4.3 min      full base -> 2 h 44
+#     annulus       20 k -> 4.1 min · 200 k -> 7.4 min
+#     all_non_nco   20 k -> 10.5 min
+# Solving the two annulus points separates setup from marginal cost, and the
+# 5x apparent drop in ms/step between 20 k and 200 k is just this setup being
+# diluted — short runs are setup-dominated, so LONG runs are nearly free per
+# extra drop:
+SETUP_S = 224.0                 # grid build + ECEF cache + mask load (~3.7 min)
+MS_PER_STEP = {                 # marginal cost per drop, by SL2SL profile
+    None: 0.86,                 # calibrated to the measured 2 h 44 full run
+    "annulus_gmax30": 1.10,
+    "in_zone": 1.40,
+    "all_non_nco": 20.3,        # ~800 candidate sats/step — the only heavy one
+}
+#: Step count of the filing's full §D4 base, for ESTIMATES only (the engine
+#: derives the real one; level-1 rows pass steps=None = auto).
+FULL_BASE_STEPS_EST = 11_213_028
+
+#: Drop counts (raised from the first pass: 20 k / 200 k were setup-bound).
+DROPS_ANNULUS = 2_000_000       # ~0.7 h — the annulus/in_zone rows
+DROPS_ALL_NON_NCO = 500_000     # ~2.9 h — 2 M here would be ~11.3 h
+DROPS_PLAIN = 2_000_000         # ~0.5 h — the matched no-SL2SL references
 
 
-def _g(id_: str, node: int, level: int, diameter: float, config: str,
-       est_h: float, *, sl: dict | None = None, note: str = "",
+def _est_hours(steps: int | None, scope: str | None) -> float:
+    """Wall time from the measured model. ``steps=None`` = full §D4 base."""
+    n = FULL_BASE_STEPS_EST if steps is None else int(steps)
+    return (SETUP_S + n * MS_PER_STEP[scope] / 1000.0) / 3600.0
+
+
+def _g(id_: str, node: int, diameter: float, config: str,
+       steps: int | None, *, sl: dict | None = None, note: str = "",
        done: bool = False, optional: bool = False) -> dict[str, Any]:
-    """One matrix row. ``config`` is "A" (both candidates) or "B" (GRX(α₀))."""
+    """One matrix row. ``config`` is "A" (both candidates) or "B" (GRX(α₀)).
+
+    ``steps=None`` runs the filing's full §D4 base. ``est_h`` is derived from
+    the measured cost model — never hand-written.
+    """
     return {
-        "id": id_, "node": node, "level": level, "diameter": diameter,
-        "config": config, "est_h": est_h, "sl": sl, "note": note,
-        "done": done, "optional": optional,
+        "id": id_, "node": node, "diameter": diameter, "config": config,
+        "steps": steps, "est_h": _est_hours(steps, (sl or {}).get("scope")),
+        "sl": sl, "note": note, "done": done, "optional": optional,
     }
 
 
@@ -133,45 +170,112 @@ def _sl(scope: str, pattern: str, source: str = "mask") -> dict:
 
 
 # ─── The G matrix (spreadsheet, row by row) ─────────────────────────────────
-# Node split balances the two long poles (G5a/G5b at ~9 h and G2a/G2b at ~4 h):
-# node 1 ≈ 13.4 h, node 2 ≈ 13.8 h (G7c optional).
+# The ``node`` field is the default 2-way split (hand-balanced); ``--split N``
+# re-balances any N by estimated cost. Run ``list`` for the current totals.
 MATRIX: list[dict[str, Any]] = [
-    # ── Level 1: full §D4 baselines, no SL2SL ──
-    _g("G1a", 1, 1, 0.6, "A", 4.0, done=True,
-       note="A · both candidates (current text) — already done"),
-    _g("G1b", 2, 1, 1.2, "A", 4.0, done=True,
-       note="A · both candidates (current text) — already done"),
-    _g("G2a", 1, 1, 0.6, "B", 4.0, note="B · only GRX(α₀) [4A/1029 §5]"),
-    _g("G2b", 2, 1, 1.2, "B", 4.0, note="B · only GRX(α₀)"),
-    # ── Level 2: short runs, the A/B/C three-way at 0.6 m ──
-    _g("G3a", 1, 2, 0.6, "A", 0.02, note="A · both candidates (short)"),
-    _g("G3b", 2, 2, 0.6, "B", 0.02, note="B · only GRX(α₀) (short)"),
-    _g("G4a", 1, 2, 0.6, "B", 0.04, sl=_sl("annulus_gmax30", "1.2"),
-       note="C · annulus as side lobe, S.1528 1.2"),
-    _g("G4b", 2, 2, 0.6, "B", 0.04, sl=_sl("annulus_gmax30", "1.4"),
-       note="C · annulus as side lobe, S.1528 1.4"),
-    _g("G5a", 1, 2, 0.6, "B", 9.0, sl=_sl("all_non_nco", "1.2"),
-       note="all non-Nco side lobes (France/Viasat-style scope), 1.2"),
-    _g("G5b", 2, 2, 0.6, "B", 9.0, sl=_sl("all_non_nco", "1.4"),
-       note="all non-Nco side lobes, 1.4"),
-    _g("G6a", 1, 2, 1.2, "B", 0.04, sl=_sl("annulus_gmax30", "1.2"),
-       note="C at 1.2 m (annulus still non-empty at 10.7 GHz), 1.2"),
-    _g("G6b", 2, 2, 1.2, "B", 0.04, sl=_sl("annulus_gmax30", "1.4"),
-       note="C at 1.2 m, 1.4"),
-    # ── Level 3: longer statistics on the annulus rows ──
-    _g("G7a", 1, 3, 0.6, "B", 0.34, sl=_sl("annulus_gmax30", "1.2"),
-       note="annulus, 200k steps, 1.2"),
-    _g("G7b", 2, 3, 0.6, "B", 0.34, sl=_sl("annulus_gmax30", "1.4"),
-       note="annulus, 200k steps, 1.4"),
-    _g("G7c", 2, 3, 0.6, "B", 0.42, sl=_sl("in_zone", "1.4"), optional=True,
-       note="in_zone scope (optional)"),
+    # Every SL2SL scope is run at BOTH Table 22-1A victim diameters (S.1428
+    # 0.6 / 1.2 m — the CURRENT recommendation, not the 4A1d-3 revision) and
+    # with BOTH S.1528 interferer patterns (rec 1.2 / 1.4), so each cell of
+    # the sheet has its 2x2. Rows differing only in one axis are adjacent.
+
+    # ── Full §D4 baselines, no SL2SL (the A/B pair that frames everything) ──
+    _g("G1a", 1, 0.6, "A", None, done=True,
+       note="A · both candidates (current text) — B2-0-d060, run 8c8259c07b3b"),
+    _g("G1b", 2, 1.2, "A", None, done=True,
+       note="A · both candidates (current text) — B2-0-d120, run 2ff9173e17d9"),
+    _g("G2a", 1, 0.6, "B", None, note="B · only GRX(α₀) [4A/1029 §5]"),
+    _g("G2b", 2, 1.2, "B", None, note="B · only GRX(α₀)"),
+
+    # ── Matched no-SL2SL references, same drop count as the C rows ──
+    _g("G3a", 1, 0.6, "A", DROPS_PLAIN, note="A reference for the 0.6 m C rows"),
+    _g("G3b", 2, 0.6, "B", DROPS_PLAIN, note="B reference for the 0.6 m C rows"),
+    _g("G3c", 2, 1.2, "A", DROPS_PLAIN, note="A reference for the 1.2 m C rows"),
+    _g("G3d", 1, 1.2, "B", DROPS_PLAIN, note="B reference for the 1.2 m C rows"),
+
+    # ── C: the annulus radiating as a side lobe (the third reading) ──
+    _g("G4a", 1, 0.6, "B", DROPS_ANNULUS, sl=_sl("annulus_gmax30", "1.2"),
+       note="C · annulus as side lobe · 0.6 m · S.1528 1.2"),
+    _g("G4b", 2, 0.6, "B", DROPS_ANNULUS, sl=_sl("annulus_gmax30", "1.4"),
+       note="C · annulus as side lobe · 0.6 m · S.1528 1.4"),
+    _g("G6a", 1, 1.2, "B", DROPS_ANNULUS, sl=_sl("annulus_gmax30", "1.2"),
+       note="C · annulus as side lobe · 1.2 m · S.1528 1.2"),
+    _g("G6b", 2, 1.2, "B", DROPS_ANNULUS, sl=_sl("annulus_gmax30", "1.4"),
+       note="C · annulus as side lobe · 1.2 m · S.1528 1.4"),
+
+    # ── The France/Viasat-style scope: every non-Nco satellite radiates ──
+    # The heavy profile (~20 ms/drop, ~800 candidates/step) — hence 500 k.
+    _g("G5a", 1, 0.6, "B", DROPS_ALL_NON_NCO, sl=_sl("all_non_nco", "1.2"),
+       note="all non-Nco side lobes · 0.6 m · S.1528 1.2"),
+    _g("G5b", 2, 0.6, "B", DROPS_ALL_NON_NCO, sl=_sl("all_non_nco", "1.4"),
+       note="all non-Nco side lobes · 0.6 m · S.1528 1.4"),
+    _g("G5c", 2, 1.2, "B", DROPS_ALL_NON_NCO, sl=_sl("all_non_nco", "1.2"),
+       note="all non-Nco side lobes · 1.2 m · S.1528 1.2"),
+    _g("G5d", 1, 1.2, "B", DROPS_ALL_NON_NCO, sl=_sl("all_non_nco", "1.4"),
+       note="all non-Nco side lobes · 1.2 m · S.1528 1.4"),
+
+    # ── Definitive annulus statistic: the full §D4 base ──
+    _g("G7a", 1, 0.6, "B", None, sl=_sl("annulus_gmax30", "1.2"),
+       note="annulus on the FULL base · 0.6 m · S.1528 1.2"),
+    _g("G7b", 2, 0.6, "B", None, sl=_sl("annulus_gmax30", "1.4"),
+       note="annulus on the FULL base · 0.6 m · S.1528 1.4"),
+    # 1.2 m is already covered at 2 M by G6a/G6b, so the full base here buys
+    # precision rather than a new answer — optional, and the first to drop.
+    _g("G7c", 2, 1.2, "B", None, sl=_sl("annulus_gmax30", "1.2"),
+       optional=True, note="annulus on the FULL base · 1.2 m · S.1528 1.2"),
+    _g("G7d", 1, 1.2, "B", None, sl=_sl("annulus_gmax30", "1.4"),
+       optional=True, note="annulus on the FULL base · 1.2 m · S.1528 1.4"),
+
+    # ── in_zone scope (everything inside the cone radiates) ──
+    _g("G8a", 1, 0.6, "B", DROPS_ANNULUS, sl=_sl("in_zone", "1.2"),
+       optional=True, note="in_zone scope · 0.6 m · S.1528 1.2"),
+    _g("G8b", 2, 0.6, "B", DROPS_ANNULUS, sl=_sl("in_zone", "1.4"),
+       optional=True, note="in_zone scope · 0.6 m · S.1528 1.4"),
 ]
 
 
 def _steps_for(row: dict, level1_steps: int | None) -> int | None:
-    if row["level"] == 1:
-        return level1_steps          # None = the filing's own full §D4 base
-    return STEPS_L2 if row["level"] == 2 else STEPS_L3
+    """The row's drop count. ``None`` = the filing's full §D4 base;
+    ``--level1-steps`` forces a literal count on the full-base rows."""
+    if row["steps"] is None:
+        return level1_steps
+    return int(row["steps"])
+
+
+def _run_key(row: dict, params: dict) -> str:
+    """State key for a row AT A GIVEN DROP COUNT.
+
+    Keying on the row id alone would make a rescaled row look already-done:
+    raising ``DROPS_ANNULUS`` from 200 k to 2 M would silently report the
+    200 k run as the 2 M answer. The count is part of the identity.
+    """
+    n = params.get("num_time_steps")
+    return f"{row['id']}_d{'full' if not n else n}"
+
+
+def _row_of_key(key: str) -> dict | None:
+    return next((r for r in MATRIX if r["id"] == key.split("_d")[0]), None)
+
+
+def _migrate_state_keys(state: dict) -> None:
+    """Re-key legacy bare-id records by the drop count they actually used,
+    read back from the run's own params.json."""
+    runs = state.get("runs") or {}
+    moved = {}
+    for key, rec in list(runs.items()):
+        if "_d" in key:
+            continue
+        pf = (REPO / "streamlit_app" / "data" / "runs" / rec["run_id"]
+              / "params.json")
+        try:
+            n = json.loads(pf.read_text(encoding="utf-8")).get("num_time_steps")
+        except Exception:  # noqa: BLE001 — unreadable run: leave it alone
+            continue
+        moved[key] = f"{key}_d{'full' if not n else n}"
+    for old_k, new_k in moved.items():
+        runs[new_k] = runs.pop(old_k)
+    if moved:
+        camp._save_state(state)
+        print(f"state: re-keyed {len(moved)} legacy record(s) by drop count")
 
 
 def _geom_for(row: dict, state: dict) -> dict[str, Any]:
@@ -290,32 +394,82 @@ def cmd_geometry(args) -> None:
 
 # ─── list / run / report ───────────────────────────────────────────────────
 
+def _apply_drop_overrides(args) -> None:
+    """CLI overrides for the drop counts, re-deriving each row's estimate."""
+    over = {}
+    if getattr(args, "drops_annulus", None):
+        over["annulus_gmax30"] = int(args.drops_annulus)
+        over["in_zone"] = int(args.drops_annulus)
+    if getattr(args, "drops_all_non_nco", None):
+        over["all_non_nco"] = int(args.drops_all_non_nco)
+    if getattr(args, "drops_plain", None):
+        over[None] = int(args.drops_plain)
+    if not over:
+        return
+    for r in MATRIX:
+        if r["steps"] is None:      # full-base rows are never rescaled here
+            continue
+        scope = (r["sl"] or {}).get("scope")
+        if scope in over:
+            r["steps"] = over[scope]
+            r["est_h"] = _est_hours(r["steps"], scope)
+
+
+def _split_nodes(rows: list[dict], n_nodes: int) -> dict[str, int]:
+    """Longest-processing-time greedy balance of ``rows`` over ``n_nodes``.
+
+    Used when ``--split`` differs from the matrix's own 2-way a/b assignment
+    (e.g. spreading a 2 M all_non_nco run over 4 machines).
+    """
+    load = [0.0] * n_nodes
+    out: dict[str, int] = {}
+    for r in sorted(rows, key=lambda x: x["est_h"], reverse=True):
+        k = min(range(n_nodes), key=lambda i: load[i])
+        out[r["id"]] = k + 1
+        load[k] += r["est_h"]
+    return out
+
+
+def _node_of(row: dict, assign: dict[str, int] | None) -> int:
+    return assign[row["id"]] if assign else row["node"]
+
+
 def cmd_list(args) -> None:
-    tot = {1: 0.0, 2: 0.0}
+    _apply_drop_overrides(args)
+    pend = [r for r in MATRIX if not r["done"]]
+    assign = (_split_nodes(pend, args.split)
+              if args.split and args.split != 2 else None)
+    n_nodes = args.split if args.split else 2
+    tot = {i + 1: 0.0 for i in range(n_nodes)}
     for r in MATRIX:
         sl = r.get("sl")
+        steps = r["steps"]
         bits = [f"D={r['diameter']}m", f"cfg {r['config']}",
-                f"L{r['level']}", f"steps={_steps_for(r, None) or 'auto §D4'}"]
-        if sl:
-            bits.append(f"SL2SL {sl['scope']} · S.1528 {sl['pattern']} · "
-                        f"pfd={sl['pfd_source']}")
-        else:
-            bits.append("SL2SL off")
+                f"drops={'full §D4' if steps is None else format(steps, ',')}"]
+        bits.append(f"SL2SL {sl['scope']} · S.1528 {sl['pattern']} · "
+                    f"pfd={sl['pfd_source']}" if sl else "SL2SL off")
         flags = []
         if r["done"]:
             flags.append("DONE-externally")
         if r["optional"]:
             flags.append("optional")
-        print(f"{r['id']:5s} node{r['node']} ~{r['est_h']:5.2f} h | "
-              + " · ".join(bits) + (f"  [{', '.join(flags)}]" if flags else ""))
+        nd = "  -  " if r["done"] else f"node{_node_of(r, assign)}"
+        print(f"{r['id']:5s} {nd} ~{r['est_h']:5.2f} h | " + " · ".join(bits)
+              + (f"  [{', '.join(flags)}]" if flags else ""))
         if not r["done"]:
-            tot[r["node"]] += r["est_h"]
-    print(f"\nestimated wall time — node 1: {tot[1]:.1f} h · "
-          f"node 2: {tot[2]:.1f} h")
+            tot[_node_of(r, assign)] += r["est_h"]
+    print("\nestimated wall time — " + " · ".join(
+        f"node {k}: {v:.1f} h" for k, v in sorted(tot.items())))
+    print(f"total compute: {sum(tot.values()):.1f} h over {n_nodes} node(s)")
+    print("cost model: setup 3.7 min + marginal "
+          + ", ".join(f"{k or 'no-SL2SL'}={v} ms/drop"
+                      for k, v in MS_PER_STEP.items()))
 
 
 def cmd_run(args) -> None:
+    _apply_drop_overrides(args)
     state = camp._load_state()
+    _migrate_state_keys(state)
     sys_row = camp._resolve_system(NTC, NTC_SRS_HINT)
     print(f"filing: {sys_row['id']} ({Path(sys_row['srs_path']).name})")
     for d, g in sorted(GEOM_BY_DIAMETER.items()):
@@ -323,16 +477,21 @@ def cmd_run(args) -> None:
         print(f"WCG D={d} m: ES {gg['es_lat']:.4f}, {gg['es_lon']:.4f} · "
               f"GSO {gg['gso_lon']:.4f}  [{gg.get('source')}]")
 
+    pend = [r for r in MATRIX if not r["done"]]
+    assign = (_split_nodes(pend, args.split)
+              if args.split and args.split != 2 else None)
     todo = [r for r in MATRIX
             if (not args.only or r["id"] in args.only)
-            and (args.node is None or r["node"] == args.node)
+            and (args.node is None or _node_of(r, assign) == args.node)
             and (args.include_optional or not r["optional"])]
     print(f"study {STUDY_ID}: {len(todo)} row(s) queued · "
           f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
     pos = 0
     for row in todo:
         pos += 1
-        key = row["id"]
+        params = _build_params(row, _geom_for(row, state), sys_row,
+                              args.level1_steps, args.steps_override)
+        key = _run_key(row, params)
         rec = state["runs"].get(key)
         if rec and rec.get("status") == "success" and not args.force:
             print(f"[{key}] already done (run {rec['run_id']}) — skipping")
@@ -341,11 +500,9 @@ def cmd_run(args) -> None:
             print(f"[{key}] marked done externally — skipping "
                   "(--force runs it here)")
             continue
-        params = _build_params(row, _geom_for(row, state), sys_row,
-                              args.level1_steps, args.steps_override)
         sl = row.get("sl")
         print(f"\n[{key}] D={row['diameter']}m cfg={row['config']} "
-              f"L{row['level']} steps={params.get('num_time_steps', 'auto §D4')}"
+              f"drops={params.get('num_time_steps', 'auto §D4')}"
               + (f" · SL2SL {sl['scope']}/{sl['pattern']}/{sl['pfd_source']}"
                  if sl else "")
               + f"  (~{row['est_h']:.2f} h est.)")
@@ -366,15 +523,17 @@ def cmd_run(args) -> None:
 
 def cmd_report(args) -> None:
     state = camp._load_state()
+    _migrate_state_keys(state)
     rows_out = []
     for key, rec in state.get("runs", {}).items():
-        row = next((r for r in MATRIX if r["id"] == key), None)
+        row = _row_of_key(key)
         d = REPO / "streamlit_app" / "data" / "runs" / rec["run_id"]
         e: dict[str, Any] = {
             "id": key, "run_id": rec["run_id"], "status": rec.get("status"),
             "diameter_m": row["diameter"] if row else "",
             "config": row["config"] if row else "",
-            "level": row["level"] if row else "",
+            "drops": key.split("_d")[-1] if "_d" in key else "",
+            "sl_diameter_m": row["diameter"] if row else "",
         }
         try:
             sim = json.loads((d / "sim_data.json").read_text(encoding="utf-8"))
@@ -403,7 +562,7 @@ def cmd_report(args) -> None:
     rows_out.sort(key=lambda r: str(r["id"]))
     out = camp.STATE_DIR / "gmax30_study_results.csv"
     camp.STATE_DIR.mkdir(parents=True, exist_ok=True)
-    cols = ["id", "run_id", "status", "level", "diameter_m", "config",
+    cols = ["id", "run_id", "status", "drops", "diameter_m", "config",
             "drop_gmax30", "max_epfd_dbw_40khz", "worst_margin_db",
             "worst_pct", "compliant", "sl_scope", "sl_pattern",
             "sl_pfd_source", "sl_only_max_dbw", "sl_total_max_dbw",
@@ -430,7 +589,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("list")
+    ls = sub.add_parser("list")
+    ls.add_argument("--split", type=int, default=2)
+    ls.add_argument("--drops-annulus", type=int, default=None)
+    ls.add_argument("--drops-all-non-nco", type=int, default=None)
+    ls.add_argument("--drops-plain", type=int, default=None)
     g = sub.add_parser("geometry")
     g.add_argument("--bootstrap", action="store_true",
                    help="resolve the common WCG by running the WCGA here")
@@ -445,8 +608,21 @@ def main() -> None:
     g.add_argument("--diameter", type=float, default=GEOM_SEARCH_DIAMETER_M,
                    help="which diameter --bootstrap/--set applies to")
     r = sub.add_parser("run")
-    r.add_argument("--node", type=int, choices=[1, 2], default=None,
+    r.add_argument("--node", type=int, default=None,
                    help="run only this node's share of the matrix")
+    r.add_argument("--split", type=int, default=2,
+                   help="number of nodes to balance over (default 2 = the "
+                        "matrix's own a/b assignment; >2 re-balances by "
+                        "estimated cost, e.g. --split 4 for a 2 M all_non_nco)")
+    r.add_argument("--drops-annulus", type=int, default=None,
+                   help=f"drops for the annulus/in_zone rows "
+                        f"(default {DROPS_ANNULUS:,})")
+    r.add_argument("--drops-all-non-nco", type=int, default=None,
+                   help=f"drops for the all_non_nco rows "
+                        f"(default {DROPS_ALL_NON_NCO:,}; 2 M is ~11 h)")
+    r.add_argument("--drops-plain", type=int, default=None,
+                   help=f"drops for the matched no-SL2SL rows "
+                        f"(default {DROPS_PLAIN:,})")
     r.add_argument("--only", nargs="*")
     r.add_argument("--force", action="store_true")
     r.add_argument("--dry-run", action="store_true")
