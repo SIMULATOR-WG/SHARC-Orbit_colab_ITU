@@ -46,6 +46,7 @@ Usage (from the repo root, venv active):
     python scripts/run_1503_gmax30_study.py run --node 1        # machine 1
     python scripts/run_1503_gmax30_study.py run --node 2        # machine 2
     python scripts/run_1503_gmax30_study.py run --only G4a G4b
+    python scripts/run_1503_gmax30_study.py adopt      # register copied-in runs
     python scripts/run_1503_gmax30_study.py report
 
 State (geometry + run ids) lives in
@@ -392,6 +393,91 @@ def cmd_geometry(args) -> None:
     print("\nlocal overrides:", json.dumps(ov, indent=2) if ov else "(none)")
 
 
+# ─── adopt (runs copied in from another node) ───────────────────────────────
+
+def _norm_params(p: dict) -> dict:
+    r"""Params reduced to what identifies a ROW, so a run produced on another
+    machine still matches: the repo prefix of the filing paths differs there
+    (e.g. ``C:\Sharc\...`` vs ``D:\work\...``) while the MDBs themselves are
+    byte-identical — they are tracked in git with checksums for exactly this.
+    """
+    q = {k: v for k, v in p.items() if k != "result_path"}
+    for k in ("srs_path", "mask_path"):
+        if q.get(k):
+            q[k] = Path(str(q[k])).name
+    return q
+
+
+def _canonical_params(state: dict, sys_row: dict) -> dict[str, dict]:
+    """``{state key: identifying params}`` for every runnable matrix row."""
+    out: dict[str, dict] = {}
+    for row in MATRIX:
+        try:
+            pw = _build_params(row, _geom_for(row, state), sys_row, None, None)
+        except SystemExit:      # no geometry pinned for that diameter
+            continue
+        out[_run_key(row, pw)] = _norm_params(pw)
+    return out
+
+
+def cmd_adopt(args) -> None:
+    """Match completed runs on disk to matrix rows and record them.
+
+    The study runs across machines and finished run folders get copied back;
+    without this their results are invisible to ``report`` and ``run`` would
+    redo them.
+    """
+    state = camp._load_state()
+    _migrate_state_keys(state)
+    sys_row = camp._resolve_system(NTC, NTC_SRS_HINT)
+    want = _canonical_params(state, sys_row)
+    known = {v["run_id"] for v in (state.get("runs") or {}).values()}
+
+    hits: dict[str, list[tuple[str, bool, float]]] = {}
+    runs_dir = REPO / "streamlit_app" / "data" / "runs"
+    for d in sorted(runs_dir.iterdir() if runs_dir.is_dir() else []):
+        pf, sf = d / "params.json", d / "sim_data.json"
+        if not (pf.is_file() and sf.is_file()):
+            continue            # unfinished run — nothing to adopt
+        try:
+            got = _norm_params(json.loads(pf.read_text(encoding="utf-8")))
+        except Exception:       # noqa: BLE001
+            continue
+        key = next((k for k, w in want.items() if w == got), None)
+        if key:
+            hits.setdefault(key, []).append(
+                (d.name, d.name in known, sf.stat().st_mtime))
+
+    added = 0
+    for key in sorted(hits):
+        cands = hits[key]
+        rec = (state.get("runs") or {}).get(key)
+        if rec and rec.get("status") == "success" and not args.force:
+            print(f"  {key:16s} already recorded ({rec['run_id']})"
+                  + (f" · {len(cands) - 1} duplicate(s) on disk"
+                     if len(cands) > 1 else ""))
+            continue
+        # Prefer a run this machine already knows about, else the newest.
+        pick = sorted(cands, key=lambda c: (not c[1], -c[2]))[0][0]
+        extra = [c[0] for c in cands if c[0] != pick]
+        print(f"  {key:16s} -> {pick}  ADOPTED"
+              + (f" (ignoring duplicate {', '.join(extra)})" if extra else ""))
+        if not args.dry_run:
+            state.setdefault("runs", {})[key] = {
+                "run_id": pick, "status": "success", "adopted": True}
+            added += 1
+    if added:
+        camp._save_state(state)
+    ext_done = {k for k in want
+                if (_row_of_key(k) or {}).get("done")}
+    missing = [k for k in want if k not in hits and k not in ext_done
+               and not (state.get("runs") or {}).get(k)]
+    print(f"\n{added} record(s) added"
+          + (" (dry run — nothing written)" if args.dry_run else ""))
+    if missing:
+        print("still to run: " + " ".join(sorted(missing)))
+
+
 # ─── list / run / report ───────────────────────────────────────────────────
 
 def _apply_drop_overrides(args) -> None:
@@ -633,10 +719,15 @@ def main() -> None:
                         "own full §D4 base)")
     r.add_argument("--steps-override", type=int, default=None,
                    help="tiny step count for smoke-testing the matrix")
+    a = sub.add_parser("adopt")
+    a.add_argument("--dry-run", action="store_true")
+    a.add_argument("--force", action="store_true",
+                   help="re-point rows that already have a record")
+
     sub.add_parser("report")
     args = ap.parse_args()
-    {"list": cmd_list, "geometry": cmd_geometry,
-     "run": cmd_run, "report": cmd_report}[args.cmd](args)
+    {"list": cmd_list, "geometry": cmd_geometry, "run": cmd_run,
+     "adopt": cmd_adopt, "report": cmd_report}[args.cmd](args)
 
 
 if __name__ == "__main__":
