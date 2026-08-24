@@ -25,6 +25,28 @@ candidate governs, i.e. ``GRX_rel(α₀) > −30 dB``. At α₀ = 4°:
 
 so the sheet's 1.2 m annulus rows only exist at 10.7 GHz.
 
+**The 315 km grid biases every SL2SL number DOWNWARD, and by scope.** A grid
+that small excludes the geometry that actually produces side-lobe coupling —
+an interferer serving a distant ES while grazing the victim — because any ES
+it could serve nearby would put the victim in its MAIN beam. Sweeping the
+radius at a fixed 4000-step sample (707 grid ES throughout, spacing scaled
+with radius) separates this from sampling:
+
+    annulus_gmax30   315 km: no link at all, no contribution
+                    1500 km: 62% still unlinked, SL-only max -181.7
+                    3000 km: 0% unlinked,      SL-only max -182.4
+    all_non_nco      315 km: 36% unlinked, SL-only max -173.6, aggregate +0.10
+                    3000 km:  0% unlinked, SL-only max -166.8, aggregate +0.20
+
+So the two scopes answer differently. The annulus IS negligible — ~19 dB
+under the aggregate once every link resolves, which makes "C equals B" a
+real result rather than a modelling artifact. all_non_nco is NOT: widening
+the grid lifts its side-lobe max by 6.8 dB at equal sampling and doubles its
+effect on the aggregate. Sampling moves it too (the same row gains ~3 dB
+going from 4 k to 500 k drops on the narrow grid), and the two effects may
+compound, so any all_non_nco figure taken at 315 km is a FLOOR. Re-run those
+rows at 3000 km before quoting them.
+
 **The C reading does not resolve at a 315 km grid.** Every ``annulus_gmax30``
 run so far — both diameters, both S.1528 patterns, 20 k through the full
 11 895 145-step base — returned NO side-lobe contribution at all, while
