@@ -194,6 +194,8 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         wcg_search_cfg["s1503_symmetric_mask"] = True
     if params.get("s1503_trail_all_points"):
         wcg_search_cfg["s1503_trail_all_points"] = True
+    if params.get("wcga_flat_threshold"):
+        wcg_search_cfg["wcga_flat_threshold"] = True
     if params.get("gso_longitude_mode"):
         wcg_search_cfg["gso_longitude_mode"] = params["gso_longitude_mode"]
     if params.get("alpha_method"):

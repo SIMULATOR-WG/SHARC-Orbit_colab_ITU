@@ -163,6 +163,7 @@ def build_epfd_threshold_by_lat_fn(
     *,
     reference_bandwidth_khz: float = 40.0,
     curve: list[list[float]] | None = None,
+    flat_threshold: bool = False,
 ) -> EpfdLatThresholdFn:
     """Build the `EPFDThreshold[lat]` function used by the WCGA (S.1503 §D.3.1.2).
 
@@ -173,17 +174,35 @@ def build_epfd_threshold_by_lat_fn(
       * If there is no information, return the constant 0.0 — equivalent to
         ranking by absolute EPFD (legacy WCGA behavior, since the constant
         cancels out in the margin comparison).
+
+    ``flat_threshold=True`` suppresses the ramp even where the note applies,
+    ranking against the curve's flat baseline instead. This is a DELIBERATE
+    DEPARTURE from how this implementation reads §D.3.1.2, provided to measure
+    the other reading of it. Both S.1503-2 (CheckCase) and -4
+    (WCGD_CheckCase) say only to "calculate EPFDThreshold from latitude of
+    point P", and neither states whether the Article 22 latitude notes belong
+    to that threshold. Reading them in gives southern high-latitude
+    geometries up to 5.3 dB of ranking advantage; reading them out keeps the
+    search near the equator. The ambiguity is inherited from -2 and survives
+    into -4 unchanged, so it is not an artefact of the current revision.
     """
     ref = str(rr_reference or "").strip()
     d_cm = float(rf_diam_cm) if rf_diam_cm is not None else float("nan")
     bw = float(reference_bandwidth_khz)
 
-    if _applies_22_5c4(ref, d_cm, bw):
-        return EpfdLatThresholdFn(note="22.5C.4", latitude_dependent=True, baseline_db=0.0)
-    if _applies_22_5c8(ref, d_cm, bw):
-        return EpfdLatThresholdFn(note="22.5C.8", latitude_dependent=True, baseline_db=0.0)
+    ramp_note = ("22.5C.4" if _applies_22_5c4(ref, d_cm, bw)
+                 else "22.5C.8" if _applies_22_5c8(ref, d_cm, bw) else None)
+    if ramp_note and not flat_threshold:
+        return EpfdLatThresholdFn(note=ramp_note, latitude_dependent=True,
+                                  baseline_db=0.0)
 
     baseline_db = _baseline_epfd_threshold_db(curve) if curve is not None else 0.0
+    if flat_threshold:
+        # Name the note after what was suppressed, so a run's provenance shows
+        # whether the flat ranking was a choice or simply the default.
+        note = f"flat({ramp_note} suppressed)" if ramp_note else "flat"
+        return EpfdLatThresholdFn(note=note, latitude_dependent=False,
+                                  baseline_db=baseline_db)
     return EpfdLatThresholdFn(note="const", latitude_dependent=False, baseline_db=baseline_db)
 
 _DATA_PATH = Path(__file__).resolve().parent / "data" / "article22_limits.json"

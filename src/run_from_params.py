@@ -113,6 +113,9 @@ def build_argv(params: dict) -> tuple[list[str], dict, list[str]]:
     if params.get("s1503_trail_all_points"):
         argv.append("--s1503-trail-all-points")
 
+    if params.get("wcga_flat_threshold"):
+        argv.append("--wcga-flat-threshold")
+
     if params.get("wcg_manual"):
         argv.append("--wcg-manual")
         for key, flag in [

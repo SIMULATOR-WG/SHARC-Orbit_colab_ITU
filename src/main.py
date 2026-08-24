@@ -407,6 +407,7 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             "theta_min_deg": -90.0,
             "theta_max_deg": 270.0,
             "s1503_trail_all_points": False,
+            "wcga_flat_threshold": False,
         },
         "simulation": {
             "coarse_time_step_s": 1.0,
@@ -618,6 +619,7 @@ def load_from_manual(manual: dict) -> dict:
             "theta_min_deg": -90.0,
             "theta_max_deg": 270.0,
             "s1503_trail_all_points": False,
+            "wcga_flat_threshold": False,
             **(manual.get("wcg_search") or {}),
         },
         "simulation": {
@@ -2330,6 +2332,7 @@ def run_wcg_downlink(config: dict) -> tuple[
         # the margin (EPFD − limit). In the other cases the threshold is
         # constant and the ordering coincides with that of absolute EPFD (legacy).
         from .article22_tables import build_epfd_threshold_by_lat_fn
+        wcga_flat_threshold = bool(wcg_cfg.get("wcga_flat_threshold", False))
         epfd_threshold_by_lat_fn = build_epfd_threshold_by_lat_fn(
             rr_reference=art22_cfg.get("rr_reference"),
             rf_diam_cm=art22_cfg.get("_epfd_rf_diam_cm"),
@@ -2337,6 +2340,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 art22_cfg.get("reference_bandwidth_khz", 40.0) or 40.0
             ),
             curve=art22_cfg.get("limits"),
+            flat_threshold=wcga_flat_threshold,
         )
         if getattr(epfd_threshold_by_lat_fn, "latitude_dependent", False):
             logger.info(
@@ -2344,6 +2348,16 @@ def run_wcg_downlink(config: dict) -> tuple[
                 "(EPFD − limit(lat)); limits −160 dB (|lat|≤57.5°) → −165.3 dB "
                 "(|lat|≥63.75°).",
                 getattr(epfd_threshold_by_lat_fn, "note", "?"),
+            )
+        elif wcga_flat_threshold:
+            logger.info(
+                "  EPFDThreshold[lat] FLAT by request (%s): the Article 22 "
+                "latitude ramp is suppressed in the WCGA ranking, which then "
+                "orders by absolute EPFD against a constant %.1f dB. "
+                "NON-DEFAULT — the alternative reading of D.3.1.2, for "
+                "comparison only.",
+                getattr(epfd_threshold_by_lat_fn, "note", "?"),
+                getattr(epfd_threshold_by_lat_fn, "baseline_db", 0.0),
             )
 
         best_overall_wcg = None
@@ -4151,6 +4165,17 @@ def main():
         )
     )
     parser.add_argument(
+        "--wcga-flat-threshold", action="store_true",
+        help=(
+            "Rank the WCGA against the FLAT Article 22 baseline instead of the "
+            "22.5C.4/22.5C.8 latitude ramp. Non-default: this is the other "
+            "reading of the S.1503 phrase 'EPFDThreshold from latitude of "
+            "point P', which never says whether the Article 22 latitude notes "
+            "belong to the threshold. Use it to compare geometries, not to "
+            "produce a normative result."
+        )
+    )
+    parser.add_argument(
         "--wcg-manual", action="store_true",
         help=(
             "Skip the WCG search and use manual geometry. Requires "
@@ -4503,6 +4528,13 @@ def main():
         logger.info(f"WCGA S.1503-4 step: {args.s1503_step}°")
     if args.s1503_trail_all_points:
         config.setdefault("wcg_search", {})["s1503_trail_all_points"] = True
+
+    if args.wcga_flat_threshold:
+        config.setdefault("wcg_search", {})["wcga_flat_threshold"] = True
+        logger.info(
+            "WCGA ranking threshold FLAT via --wcga-flat-threshold: the "
+            "Article 22 latitude ramp is suppressed in the search."
+        )
         logger.info("WCGA S.1503: full trail (all points) enabled via CLI.")
     if args.wcg_manual:
         required = {

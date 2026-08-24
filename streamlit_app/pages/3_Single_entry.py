@@ -171,6 +171,7 @@ prev = use_persisted_state("s1503.form", {
     "s1503_step_deg": 1.0,
     "wcga_no_mask_symmetry": True,
     "s1503_trail_all_points": False,
+    "wcga_flat_threshold": False,
     "gso_longitude_mode": "arc_optimal",
     "alpha_method": "analytical",
     "dual_time_step_mode": "on",
@@ -1001,6 +1002,18 @@ with st.form("s1503_form"):
                      "trial point to the run artifacts (for debugging / "
                      "visualisation). Bigger output files.",
             )
+            wcga_flat_threshold = st.checkbox(
+                "Flat ranking threshold (suppress the 22.5C.4 ramp)",
+                value=bool(prev.get("wcga_flat_threshold", False)),
+                help="Engine key: `wcga_flat_threshold`. NON-DEFAULT. Ranks "
+                     "the WCGA against the flat Article 22 baseline instead "
+                     "of the latitude ramp (−160 → −165.3 dB). S.1503 says "
+                     "only to take `EPFDThreshold` from the latitude of point "
+                     "P, never whether the Article 22 latitude notes are part "
+                     "of it; this switch measures the other reading. Only has "
+                     "an effect where the ramp applies at all — Table 22-1A "
+                     "with D > 60 cm, so it is a no-op for a 60 cm victim.",
+            )
         with col_b:
             gso_lon_mode = select_described(
                 "GSO longitude mode",
@@ -1335,6 +1348,7 @@ if submit:
     _set("s1503_step_deg", _f(s1503_step))
     params["wcga_no_mask_symmetry"] = bool(wcga_no_mask_symmetry)
     params["s1503_trail_all_points"] = bool(s1503_trail)
+    params["wcga_flat_threshold"] = bool(wcga_flat_threshold)
     params["gso_longitude_mode"] = gso_lon_mode
     params["alpha_method"] = alpha_method
     params["wcg_manual"] = bool(wcg_manual)
@@ -1530,6 +1544,7 @@ if submit:
         "wcga_s1503": bool(wcga_s1503), "s1503_step_deg": _f(s1503_step),
         "wcga_no_mask_symmetry": bool(wcga_no_mask_symmetry),
         "s1503_trail_all_points": bool(s1503_trail),
+        "wcga_flat_threshold": bool(wcga_flat_threshold),
         "gso_longitude_mode": gso_lon_mode, "alpha_method": alpha_method,
         "wcg_manual": bool(wcg_manual),
         "wcg_manual_es_lat": wm_es_lat, "wcg_manual_es_lon": wm_es_lon,
