@@ -25,6 +25,19 @@ candidate governs, i.e. ``GRX_rel(α₀) > −30 dB``. At α₀ = 4°:
 
 so the sheet's 1.2 m annulus rows only exist at 10.7 GHz.
 
+**The C reading does not resolve at a 315 km grid.** Every ``annulus_gmax30``
+run so far — both diameters, both S.1528 patterns, 20 k through the full
+11 895 145-step base — returned NO side-lobe contribution at all, while
+``all_non_nco`` on the same grid resolves links for ~66% of its candidates.
+The diagnostics say why: ~100% of annulus candidates find no served link
+inside the grid (G7a: 89 244 872 candidate-steps without a link, median 8
+candidates/step). This is structural rather than a sampling problem — an
+annulus satellite sits 4-9.7 deg off the victim's boresight, so any ES it
+could serve within a few hundred km would put the victim in its MAIN beam,
+not a side lobe. So with this grid, C is numerically identical to B. Before
+quoting a C number, widen ``sidelobe_grid_radius_km`` until
+``n_cand_without_link`` falls, and report the radius alongside the result.
+
 **Geometry.** One WCG PER VICTIM DIAMETER, pinned from the machine-3 B2
 baselines (they are this study's own config-A level-1 rows). The two
 differ by 22 deg of great circle, so a single shared geometry would run
@@ -138,9 +151,13 @@ SETUP_S = {
     "all_non_nco": 400.0,       # measured: fits both the 20 k and 500 k points
 }
 MS_PER_STEP = {                 # marginal cost per drop, by SL2SL profile
-    None: 0.86,                 # calibrated to the measured 2 h 44 full run
-    "annulus_gmax30": 1.10,
-    "in_zone": 1.40,
+    None: 0.81,                 # 2 h 44 full run / 11 895 145 steps
+    # MEASURED on G7a (0.6 m, full base, run a3852eb150bc): the EPFD phase ran
+    # 23:09:42 -> 01:43:15 = 9213 s over 11 895 145 steps. Practically equal to
+    # the no-SL2SL cost, because the annulus is tiny (8 candidates median) and
+    # never resolves a served link — see the SL2SL note in the docstring.
+    "annulus_gmax30": 0.80,
+    "in_zone": 1.05,            # NEVER MEASURED — scaled off the annulus
     # MEASURED on G5a (0.6 m, 500 000 drops, run ce65a1285b71): the EPFD phase
     # ran 21:34:46 -> 23:07:57 = 5591 s, i.e. 11.18 ms/drop, under the machine's
     # normal background load. The earlier 20.3 came from the 20 k run alone,
@@ -149,9 +166,10 @@ MS_PER_STEP = {                 # marginal cost per drop, by SL2SL profile
     # swings between 6 and 18 ms/drop as other work comes and goes.
     "all_non_nco": 11.2,
 }
-#: Step count of the filing's full §D4 base, for ESTIMATES only (the engine
-#: derives the real one; level-1 rows pass steps=None = auto).
-FULL_BASE_STEPS_EST = 11_213_028
+#: The filing's full §D4 base, for ESTIMATES only (the engine derives the real
+#: one; full-base rows pass steps=None = auto). MEASURED on this filing by the
+#: G7a run: the sheet's 11 213 028 belongs to the 17.8 GHz filing.
+FULL_BASE_STEPS_EST = 11_895_145
 
 #: Drop counts (raised from the first pass: 20 k / 200 k were setup-bound).
 DROPS_ANNULUS = 2_000_000       # ~0.7 h — the annulus/in_zone rows
