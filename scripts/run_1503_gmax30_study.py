@@ -128,12 +128,26 @@ GRID_SPACING_KM = 21.0
 # 5x apparent drop in ms/step between 20 k and 200 k is just this setup being
 # diluted — short runs are setup-dominated, so LONG runs are nearly free per
 # extra drop:
-SETUP_S = 224.0                 # grid build + ECEF cache + mask load (~3.7 min)
+# Setup is per profile: the heavy scope pays a much larger fixed cost (its
+# Numba kernels compile for a far bigger candidate set), which is what made
+# the 20 k run look 3x more expensive per drop than it really is.
+SETUP_S = {
+    None: 224.0,                # grid build + ECEF cache + mask load
+    "annulus_gmax30": 224.0,
+    "in_zone": 224.0,
+    "all_non_nco": 400.0,       # measured: fits both the 20 k and 500 k points
+}
 MS_PER_STEP = {                 # marginal cost per drop, by SL2SL profile
     None: 0.86,                 # calibrated to the measured 2 h 44 full run
     "annulus_gmax30": 1.10,
     "in_zone": 1.40,
-    "all_non_nco": 20.3,        # ~800 candidate sats/step — the only heavy one
+    # MEASURED on G5a (0.6 m, 500 000 drops, run ce65a1285b71): the EPFD phase
+    # ran 21:34:46 -> 23:07:57 = 5591 s, i.e. 11.18 ms/drop, under the machine's
+    # normal background load. The earlier 20.3 came from the 20 k run alone,
+    # where setup and JIT are most of the wall time and got charged to the
+    # margin. Do NOT re-derive this from a short window: the instantaneous rate
+    # swings between 6 and 18 ms/drop as other work comes and goes.
+    "all_non_nco": 11.2,
 }
 #: Step count of the filing's full §D4 base, for ESTIMATES only (the engine
 #: derives the real one; level-1 rows pass steps=None = auto).
@@ -148,7 +162,7 @@ DROPS_PLAIN = 2_000_000         # ~0.5 h — the matched no-SL2SL references
 def _est_hours(steps: int | None, scope: str | None) -> float:
     """Wall time from the measured model. ``steps=None`` = full §D4 base."""
     n = FULL_BASE_STEPS_EST if steps is None else int(steps)
-    return (SETUP_S + n * MS_PER_STEP[scope] / 1000.0) / 3600.0
+    return (SETUP_S[scope] + n * MS_PER_STEP[scope] / 1000.0) / 3600.0
 
 
 def _g(id_: str, node: int, diameter: float, config: str,
@@ -547,9 +561,9 @@ def cmd_list(args) -> None:
     print("\nestimated wall time — " + " · ".join(
         f"node {k}: {v:.1f} h" for k, v in sorted(tot.items())))
     print(f"total compute: {sum(tot.values()):.1f} h over {n_nodes} node(s)")
-    print("cost model: setup 3.7 min + marginal "
-          + ", ".join(f"{k or 'no-SL2SL'}={v} ms/drop"
-                      for k, v in MS_PER_STEP.items()))
+    print("cost model (measured): "
+          + " · ".join(f"{k or 'no-SL2SL'} {SETUP_S[k]/60:.1f} min + "
+                       f"{v} ms/drop" for k, v in MS_PER_STEP.items()))
 
 
 def cmd_run(args) -> None:
@@ -705,7 +719,7 @@ def main() -> None:
                         f"(default {DROPS_ANNULUS:,})")
     r.add_argument("--drops-all-non-nco", type=int, default=None,
                    help=f"drops for the all_non_nco rows "
-                        f"(default {DROPS_ALL_NON_NCO:,}; 2 M is ~11 h)")
+                        f"(default {DROPS_ALL_NON_NCO:,}; 2 M is ~6.3 h)")
     r.add_argument("--drops-plain", type=int, default=None,
                    help=f"drops for the matched no-SL2SL rows "
                         f"(default {DROPS_PLAIN:,})")
