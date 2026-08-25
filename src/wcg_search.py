@@ -2811,6 +2811,27 @@ def _wcgd_calc_at_lat(
     return state
 
 
+def wcga_theta_equal_density() -> bool:
+    """Whether to keep the theta sample DENSITY equal between sweep modes.
+
+    S.1503-4 D.3.1.3.4 sets ``NumThetaSteps = RoundUp(2*pi*phi/PhiStepSize)``
+    unconditionally and then divides ``ThetaMax - ThetaMin`` by it. With the
+    symmetric assumption that interval is pi; without it, 2*pi. So the FULL
+    sweep samples theta half as finely as the symmetric one, and a peak
+    narrow in theta can be resolved by the symmetric grid and stepped over by
+    the full one — "more coverage, worse winner", which cannot be right.
+
+    Off by default: the literal pseudocode is what the Recommendation says,
+    and reproducing it is the point. Turn on via
+    ``SHARC_WCGA_THETA_EQUAL_DENSITY=1`` (param ``wcga_theta_equal_density``)
+    to test whether that sampling asymmetry is what decides a given case.
+    An env var rather than a keyword because the value must survive into the
+    Pool workers that evaluate the grid.
+    """
+    return str(os.environ.get("SHARC_WCGA_THETA_EQUAL_DENSITY", "")).strip(
+    ).lower() in ("1", "true", "on", "yes")
+
+
 def _wcgd_calc_at_lat_fixed_raan(
     oe: "OrbitalElements",
     lat_deg: float,
@@ -2862,6 +2883,7 @@ def _wcgd_calc_at_lat_fixed_raan(
                      epfd_threshold_by_lat_fn=epfd_threshold_by_lat_fn)
 
     # S.1503-4 §D.3.1.3.4: NumPhiSteps = RoundUp(φ0/StepSize); PhiStepSize = φ0/NumPhiSteps
+    _theta_equal_density = wcga_theta_equal_density()
     num_phi_steps = max(1, math.ceil(phi0_deg / step_size_deg))
     phi_step_rad = phi0_rad / num_phi_steps
     phi_step_deg = phi0_deg / num_phi_steps  # = PhiStepSize (degrees)
@@ -2881,6 +2903,15 @@ def _wcgd_calc_at_lat_fixed_raan(
         num_theta = max(16, math.ceil(2.0 * math.pi * phi_deg_v / phi_step_deg))
         theta_min = 0.0          if symmetric_mask else -0.5 * math.pi
         theta_max = math.pi      if symmetric_mask else  1.5 * math.pi
+        if _theta_equal_density and not symmetric_mask:
+            # The pseudocode fixes NumThetaSteps regardless of the interval,
+            # then divides (ThetaMax - ThetaMin) by it — so the full circle
+            # gets HALF the angular density of the symmetric half. A narrow
+            # peak in theta can therefore be resolved by the symmetric sweep
+            # and stepped over by the full one, which is the opposite of what
+            # "more coverage" should mean. This scales the count by the swept
+            # range so both sweeps sample equally finely.
+            num_theta = int(num_theta * round((theta_max - theta_min) / math.pi))
         theta_vals = theta_grid_cache.get(num_theta)
         if theta_vals is None:
             theta_step = (theta_max - theta_min) / num_theta

@@ -408,6 +408,7 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             "theta_max_deg": 270.0,
             "s1503_trail_all_points": False,
             "wcga_flat_threshold": False,
+            "wcga_theta_equal_density": False,
         },
         "simulation": {
             "coarse_time_step_s": 1.0,
@@ -620,6 +621,7 @@ def load_from_manual(manual: dict) -> dict:
             "theta_max_deg": 270.0,
             "s1503_trail_all_points": False,
             "wcga_flat_threshold": False,
+            "wcga_theta_equal_density": False,
             **(manual.get("wcg_search") or {}),
         },
         "simulation": {
@@ -2333,6 +2335,13 @@ def run_wcg_downlink(config: dict) -> tuple[
         # constant and the ordering coincides with that of absolute EPFD (legacy).
         from .article22_tables import build_epfd_threshold_by_lat_fn
         wcga_flat_threshold = bool(wcg_cfg.get("wcga_flat_threshold", False))
+        if wcg_cfg.get("wcga_theta_equal_density"):
+            os.environ["SHARC_WCGA_THETA_EQUAL_DENSITY"] = "1"
+            logger.info(
+                "  WCGA theta density EQUALISED across sweep modes "
+                "(NON-DEFAULT): the full-circle sweep gets the same angular "
+                "sampling as the symmetric one, instead of half of it."
+            )
         epfd_threshold_by_lat_fn = build_epfd_threshold_by_lat_fn(
             rr_reference=art22_cfg.get("rr_reference"),
             rf_diam_cm=art22_cfg.get("_epfd_rf_diam_cm"),

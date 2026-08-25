@@ -196,6 +196,9 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         wcg_search_cfg["s1503_trail_all_points"] = True
     if params.get("wcga_flat_threshold"):
         wcg_search_cfg["wcga_flat_threshold"] = True
+    if params.get("wcga_theta_equal_density"):
+        wcg_search_cfg["wcga_theta_equal_density"] = True
+        os.environ["SHARC_WCGA_THETA_EQUAL_DENSITY"] = "1"
     if params.get("gso_longitude_mode"):
         wcg_search_cfg["gso_longitude_mode"] = params["gso_longitude_mode"]
     if params.get("alpha_method"):
