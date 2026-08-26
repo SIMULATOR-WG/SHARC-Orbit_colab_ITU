@@ -779,15 +779,30 @@ def _render_wcg_explanation(data: dict[str, Any]) -> None:
             f"= {e['epfd_dBW']:.2f} dBW  ·  at ES {es_lat:.1f}°"
         )
         if sel == "angular-velocity tie-break":
-            lr = e.get("plateau_es_lat_range") or [es_lat, es_lat]
+            n_tied = int(e.get("n_tied_top_bin", 0) or 0)
+            win = float(e.get("tie_window_db", 0.1) or 0.1)
+            lats = e.get("tied_es_lats") or []
+            if e.get("tie_is_mirror_pair"):
+                where = (f"the north/south mirror pair ES ±{abs(lats[0]):.2f}°"
+                         if lats else "a north/south mirror pair")
+            elif lats and n_tied <= 6:
+                where = "ES " + ", ".join(f"{x:.2f}°" for x in lats)
+            else:
+                lr = e.get("plateau_es_lat_range") or [es_lat, es_lat]
+                where = (f"{n_tied} latitudes spread between ES {lr[0]:.1f}° and "
+                         f"{lr[1]:.1f}° — not necessarily contiguous")
             st.markdown(
                 f"**Selected by the angular-velocity tie-break.** "
-                f"{e.get('n_tied_top_bin', 0)} latitudes tie within "
-                f"**{e.get('plateau_db', 0.0):.2f} dB** (a flat EPFD plateau over ES "
-                f"{lr[0]:.0f}° … {lr[1]:.0f}°). Per S.1503-4 §D3.1.2 the worst geometry "
-                f"is then the one with the **lowest apparent angular velocity** "
-                f"(**{e.get('angular_velocity_deg_s', 0.0):.3f}°/s** here) — it persists "
-                f"longest and dominates the time statistics → ES **{es_lat:.1f}°**."
+                f"{n_tied} latitude(s) fall within the **{win:.2f} dB** tie "
+                f"window of the peak (spread **{e.get('plateau_db', 0.0):.3f} dB**): "
+                f"{where}. Per S.1503-4 §D3.1.2 the worst geometry is then the one "
+                f"with the **lowest apparent angular velocity** "
+                f"(**{e.get('angular_velocity_deg_s', 0.0):.3f}°/s** here) — it "
+                f"persists longest and dominates the time statistics → ES "
+                f"**{es_lat:.1f}°**. So this WCG is deliberately NOT the highest "
+                f"EPFD point: it sits up to the tie window below the peak "
+                f"(peak {float(e.get('profile_max_epfd_dBW', e['epfd_dBW'])):.3f} "
+                f"dBW)."
             )
         else:
             st.markdown(
@@ -818,10 +833,14 @@ def _render_wcg_explanation(data: dict[str, Any]) -> None:
                 legend=dict(orientation="h", y=1.02, x=0),
             )
             st.plotly_chart(fig, use_container_width=True)
+            _dec = int(e.get("profile_decimation", 1) or 1)
             st.caption(
                 "EPFD vs ES latitude across the WCGA latitude sweep. A flat top → "
                 "the tie-break (lowest angular velocity) sets the WCG; a sharp peak → "
                 "EPFD magnitude sets it."
+                + (f" Curve sampled 1-in-{_dec} for size, with the tied points kept, "
+                   f"so between markers the true profile can sit higher than drawn."
+                   if _dec > 1 else "")
             )
 
 

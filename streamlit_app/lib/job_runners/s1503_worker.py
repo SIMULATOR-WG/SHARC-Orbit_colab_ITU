@@ -670,7 +670,20 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             top = [p for p in prof if p["epfd_dBW"] >= max_epfd - bin_db]
             top_es = sorted(p["es_lat_deg"] for p in top)
             spread = max_epfd - min(p["epfd_dBW"] for p in top)
-            stepd = max(1, len(prof) // 240)  # compact profile for storage/chart
+            # Compact the profile for storage/chart — but NEVER by dropping the
+            # points that decided the outcome. Plain `prof[::stepd]` did, and
+            # since the winner sits on a needle-thin latitude it was dropped
+            # every time: the chart then showed the WCG star floating up to
+            # 7.5 dB above a curve that never contained it.
+            stepd = max(1, len(prof) // 240)
+            _keep_lat = {round(float(p_["es_lat_deg"]), 6) for p_ in top}
+            _keep_lat.add(round(float(wcg_dl.es_lat_deg), 6))
+            _sampled = list(prof[::stepd])
+            _have = {round(float(p_["es_lat_deg"]), 6) for p_ in _sampled}
+            _sampled += [p_ for p_ in prof
+                         if round(float(p_["es_lat_deg"]), 6) in _keep_lat
+                         and round(float(p_["es_lat_deg"]), 6) not in _have]
+            _sampled.sort(key=lambda p_: float(p_["es_lat_deg"]))
             sim_data["wcg_explanation"] = {
                 "selection": ("angular-velocity tie-break" if len(top) > 1 else "epfd-peak"),
                 "epfd_dBW": float(wcg_dl.epfd_dBW),
@@ -685,11 +698,25 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
                 ),
                 "angular_velocity_deg_s": float(wcg_dl.angular_velocity_deg_s),
                 "n_tied_top_bin": int(len(top)),
+                "tie_window_db": float(bin_db),
+                "profile_max_epfd_dBW": float(max_epfd),
                 "plateau_db": float(spread),
                 "plateau_es_lat_range": (
                     [float(top_es[0]), float(top_es[-1])] if top_es else None
                 ),
-                "profile": prof[::stepd],
+                # The tied latitudes themselves. The min/max range above says
+                # nothing about what lies between them: these ties are usually
+                # north/south MIRROR geometries (e.g. -74.75 and +74.75), not a
+                # contiguous flat span, and reading the range as a plateau is
+                # what makes the chart look wrong.
+                "tied_es_lats": [float(x) for x in top_es],
+                "tie_is_mirror_pair": bool(
+                    len(top_es) == 2
+                    and abs(top_es[0] + top_es[-1]) < 0.05
+                    and abs(top_es[0]) > 1.0
+                ),
+                "profile": _sampled,
+                "profile_decimation": int(stepd),
             }
 
     if sim_result_dl is not None:
