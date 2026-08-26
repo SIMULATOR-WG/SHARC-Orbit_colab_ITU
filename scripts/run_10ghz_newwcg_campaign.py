@@ -371,22 +371,43 @@ def cmd_geometry(args) -> None:
                 continue
             print(f"\n[{row['id']}] WCGA 0.1° · D={row['diameter']} m · "
                   f"filing {row['filing']} · ~{row['est_h']:.2f} h")
+            print("  geometry only: the EPFD phase runs 8 token steps, "
+                  "so this run's CCDF/max/compliance mean nothing - the "
+                  "band's numbers come from blocks C, D and E on the "
+                  "pinned geometry.")
             run_id, ok = camp._run_one(row["id"], _params_for(row, state))
-            if not ok:
-                print(f"[{row['id']}] FAILED — see its worker.log")
+            # Read the geometry BEFORE judging the exit code. A block-A row is
+            # a search; the 8-step EPFD phase after it exists only because the
+            # pipeline always runs one, and its output is discarded. If that
+            # token phase dies (the engine's nested Pool does fail
+            # occasionally), the search that already succeeded is still in
+            # sim_data.json — throwing away 3.5 h over a phase whose result
+            # nobody reads would be absurd.
+            d = REPO / "streamlit_app" / "data" / "runs" / run_id
+            w = {}
+            try:
+                sim = json.loads((d / "sim_data.json").read_text(encoding="utf-8"))
+                w = sim.get("wcg") or {}
+            except Exception:  # noqa: BLE001
+                pass
+            if not w.get("es_lat_deg"):
+                print(f"[{row['id']}] no WCG in run {run_id} - see its "
+                      f"worker.log ({'worker exited ok' if ok else 'worker failed'})")
                 if not args.keep_going:
                     raise SystemExit(1)
                 continue
-            d = REPO / "streamlit_app" / "data" / "runs" / run_id
-            sim = json.loads((d / "sim_data.json").read_text(encoding="utf-8"))
-            w = sim.get("wcg") or {}
-            if not w.get("es_lat_deg"):
-                raise SystemExit(f"[{row['id']}] run {run_id} reported no WCG")
+            if not ok:
+                print(f"[{row['id']}] the token EPFD phase failed, but the "
+                      f"WCGA produced a geometry - keeping it, since that is "
+                      f"block A's only output (run {run_id})")
             state["geometry"][row["id"]] = {
                 "es_lat": float(w["es_lat_deg"]),
                 "es_lon": float(w["es_lon_deg"]),
                 "gso_lon": float(w["gso_lon_deg"]),
-                "source": f"run {run_id} (0.1°, D={row['diameter']} m)"}
+                # Labelled geometry-only so nobody later mines this run's EPFD:
+                # 8 steps make its CCDF, max and compliance verdict meaningless.
+                "source": f"run {run_id} (0.1 deg, D={row['diameter']} m, "
+                          f"GEOMETRY ONLY - its EPFD phase is a token)"}
             camp._save_state(state)
 
     print("\nresolved geometries:")
