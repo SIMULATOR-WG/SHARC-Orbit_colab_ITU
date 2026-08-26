@@ -969,6 +969,50 @@ def _run_method_1(params: dict[str, Any]) -> dict[str, Any]:
 # ─── method_2 ────────────────────────────────────────────────────────────────
 
 
+def _dump_raw(result_path: Any, label: str, name: str,
+              payload: dict[str, Any]) -> None:
+    """Persist a completed parallel phase before anything can lose it.
+
+    The incremental snapshot writer (``_partial_snapshot_writer``) is wired
+    into ``_run_method_3`` only, so every other driver held hours of finished
+    computation in memory and wrote nothing until the very end. Three
+    aggregate campaigns died at 99.6%, 99.8% and 100% of tasks computed
+    without leaving a byte — one of them in the convolution itself, with
+    3456/3456 tasks done.
+
+    This does not replace incremental snapshots: it protects against a failure
+    AFTER the parallel phase, not against dying inside it. Output goes to
+    ``partial/`` so raw task output is never mistaken for a finished run.
+    """
+    try:
+        import gzip as _gzip
+        d = Path(result_path) / "partial"
+        d.mkdir(parents=True, exist_ok=True)
+
+        def _np_ok(o):        # numpy does not serialise to JSON
+            if hasattr(o, "tolist"):
+                return o.tolist()
+            if hasattr(o, "item"):
+                return o.item()
+            raise TypeError(repr(o))
+
+        try:
+            with _gzip.open(d / f"{name}.json.gz", "wt", encoding="utf-8") as fh:
+                json.dump({"partial": True, "method": label, **payload},
+                          fh, default=_np_ok)
+            written = f"{name}.json.gz"
+        except Exception:  # noqa: BLE001
+            # Last resort: pickle. Less portable, but the computation survives.
+            import pickle as _pickle
+            with _gzip.open(d / f"{name}.pkl.gz", "wb") as fh:
+                _pickle.dump({"partial": True, "method": label, **payload},
+                             fh, protocol=4)
+            written = f"{name}.pkl.gz"
+        _emit(f"[{label}] raw phase output saved to partial/{written}")
+    except Exception as exc:  # noqa: BLE001
+        _emit(f"[{label}] WARNING: could not save the raw output: {exc}")
+
+
 def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str, Any]:
     """Common ES×GSO-grid aggregation — keeps **all** curves at every stage.
 
@@ -1036,6 +1080,14 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
         on_done=_progress_cb(2.0, 95.0),
         costs=costs,
     )
+    _dump_raw(params["result_path"], method_label, "raw_task_results", {
+        "keys": [list(k) for k in keys],
+        "grid_points": [{"es_lat_deg": float(g.es_lat_deg),
+                         "es_lon_deg": float(g.es_lon_deg),
+                         "gso_lon_deg": float(g.gso_lon_deg)}
+                        for g in grid_points],
+        "results": results,
+    })
 
     # Regroup by grid point
     by_pi: dict[int, list[tuple[int, dict[str, Any]]]] = {}
@@ -1914,6 +1966,11 @@ def _run_method_4(params: dict[str, Any]) -> dict[str, Any]:
         on_done=_progress_cb(2.0, 30.0),
         costs=wcg_costs,
     )
+    # Phase 1 is the expensive half — one WCGA search plus a full single-entry
+    # EPFD run per filing. A 4-filing run spent 15.5 h here and lost all of it
+    # when phase 2 died, so it is written out the moment it completes.
+    _dump_raw(params["result_path"], "method_4", "raw_wcg_phase",
+              {"wcg_results": wcg_results})
     wcgs = [{"index": i, **(r.get("wcg") or {})} for i, r in enumerate(wcg_results)]
     # Per-filing §D4 time base from the WCG phase (full single-entry pipeline).
     per_system_tb = [
@@ -1947,6 +2004,11 @@ def _run_method_4(params: dict[str, Any]) -> dict[str, Any]:
         on_done=_progress_cb(30.0, 95.0),
         costs=sim_costs,
     )
+    _dump_raw(params["result_path"], "method_4", "raw_task_results", {
+        "keys": [list(k) for k in keys],
+        "wcgs": [dict(w) for w in wcgs],
+        "results": sim_results,
+    })
 
     by_wi: dict[int, list[tuple[int, dict[str, Any]]]] = {}
     for k, r in enumerate(sim_results):

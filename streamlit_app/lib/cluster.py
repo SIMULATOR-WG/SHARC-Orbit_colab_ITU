@@ -488,7 +488,25 @@ def parallel_starmap_progress(
             total_cpus = float(ray.cluster_resources().get("CPU", 0)) or None
         except Exception:  # noqa: BLE001
             total_cpus = None
-        cpu_cap = max(num_cpus, (total_cpus or float(os.cpu_count() or 1)) / 4.0)
+        # The cap has to come from ONE node's capacity, not the cluster's.
+        # `cluster_resources()` grows with the number of machines, so the cap
+        # grew with it and each heavy task reserved more than a whole node:
+        # measured on 8x32 threads, the cap became 64, per-task reservation
+        # {'CPU': 32.0}, and only 4 tasks ran concurrently on 256 threads.
+        # Perverse property — adding machines made it slower. Taking the
+        # smallest live node instead brought the cap to 8, the reservation to
+        # {'CPU': 2.2} and occupancy from 4 to 169 threads.
+        try:
+            _per_node = min(
+                (float(nd.get("Resources", {}).get("CPU", 0.0))
+                 for nd in ray.nodes()
+                 if nd.get("Alive") and nd.get("Resources", {}).get("CPU")),
+                default=0.0,
+            ) or None
+        except Exception:  # noqa: BLE001
+            _per_node = None
+        _base_cpus = _per_node or total_cpus or float(os.cpu_count() or 1)
+        cpu_cap = max(num_cpus, _base_cpus / 4.0)
         per_item_cpus = _costs_to_num_cpus(costs, base_num_cpus=num_cpus, cpu_cap=cpu_cap)
 
         results: list = [None] * n
@@ -499,9 +517,20 @@ def parallel_starmap_progress(
         # peer-to-peer to each node once (object store, not the client
         # channel). Submit heaviest-first for LPT.
         fut_to_idx: dict[Any, int] = {}
+        # `_task_scoped` returns a NEW closure per call and every
+        # `ray.remote(...)` registers that function in the GCS. One per task
+        # exported a ~10 MiB function thousands of times: 7392 tasks
+        # accumulated tens of GB in `gcs_server` (48 GB resident measured) and
+        # took a head node down — memory exhausted, sshd unable to fork.
+        # Earlier runs of 756 tasks stayed under it, which is why it surfaced
+        # only at scale. One handle per distinct reservation value instead.
+        _rfn_cache: dict[float, Any] = {}
         for i in order:
             item_cpus = per_item_cpus[i] if per_item_cpus is not None else num_cpus
-            rfn = ray.remote(_task_scoped(fn, item_cpus))
+            rfn = _rfn_cache.get(item_cpus)
+            if rfn is None:
+                rfn = ray.remote(_task_scoped(fn, item_cpus))
+                _rfn_cache[item_cpus] = rfn
             opts = {"num_cpus": item_cpus, "scheduling_strategy": "SPREAD"}
             fut_to_idx[rfn.options(**opts).remote(*items[i])] = i
         pending = list(fut_to_idx.keys())

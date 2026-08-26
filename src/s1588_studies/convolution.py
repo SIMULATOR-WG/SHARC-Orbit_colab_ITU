@@ -174,9 +174,15 @@ def _ccdf_db_desc_to_pmf(
     """
     bins_arr = np.asarray(bins_db, dtype=float)
     pct_arr = np.asarray(pct, dtype=float)
-    if bins_arr.size != pct_arr.size or bins_arr.size < 2:
+    # A single-point CCDF is legitimate, not malformed: a small constellation
+    # seen from an extreme latitude can produce one step. It is a delta, and
+    # `_ccdf_to_pmf` already handles it — the [:-1]/[1:] slices come out empty
+    # and the mass lands on pmf[-1] (verified: ccdf=[0.25] -> pmf=[0.25]).
+    # Rejecting it killed an aggregate campaign in the convolution AFTER all
+    # 3456 tasks had been computed.
+    if bins_arr.size != pct_arr.size or bins_arr.size < 1:
         raise ValueError(
-            f"{name}: invalid CCDF (size={bins_arr.size}); needs >= 2 points"
+            f"{name}: invalid CCDF (size={bins_arr.size}); needs >= 1 point"
         )
     order_asc = np.argsort(bins_arr)
     bins_asc = bins_arr[order_asc]
