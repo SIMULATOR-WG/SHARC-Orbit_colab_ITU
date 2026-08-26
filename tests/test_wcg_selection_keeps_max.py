@@ -84,6 +84,55 @@ def test_tie_window_is_the_documented_width():
     assert _WCGState.BIN_SIZE == 0.1
 
 
+
+# ─── the merge/cap ordering defect ──────────────────────────────────────────
+# Found from real logs: orbits reporting "no valid geometry found" after
+# admitting ~10^9 points. Capping the candidate list by angular velocity BEFORE
+# pruning it to the margin window could discard the very candidate that had
+# just raised the window, then drop every survivor for being outside it.
+
+
+def _fill_to_cap(state, margin=-171.60, base_av=0.001):
+    """Saturate the candidate list inside one tight, slow, low-margin bin."""
+    for k in range(_WCGState.BIN_CAND_MAX):
+        state.update(margin - (k % 90) * 0.001, base_av + k * 1e-7,
+                     _res(margin))
+    return state
+
+
+def test_merging_a_better_but_faster_candidate_keeps_it():
+    acc = _fill_to_cap(_WCGState())
+    assert len(acc._bin_candidates) == _WCGState.BIN_CAND_MAX
+    incoming = _WCGState()
+    incoming.update(-162.75, 0.90, _res(-162.75))   # far better, but fast
+    acc.merge(incoming)
+    assert acc.best_result is not None, (
+        "merge dropped the only candidate in the new window — the search would "
+        "report 'no valid geometry found' with ~10^9 admitted points")
+    assert acc.best_epfd == -162.75, acc.best_epfd
+    assert acc.bin_top_margin == -162.75
+
+
+def test_update_keeps_a_candidate_that_raises_the_top_on_a_full_list():
+    st = _fill_to_cap(_WCGState())
+    st.update(-171.55, 9.99, _res(-171.55))   # raises the top, fastest of all
+    assert st.best_result is not None, "full list + new top emptied the bin"
+    assert st.bin_top_margin == -171.55
+    # D3.1.2 still governs the choice: slowest inside the window wins.
+    assert st.best_ang_vel <= 9.99
+
+
+def test_a_winner_survives_however_many_partials_are_merged():
+    """The real search merges one partial per swept latitude — thousands."""
+    acc = _WCGState()
+    for _ in range(40):
+        acc.merge(_fill_to_cap(_WCGState()))
+    winner = _WCGState()
+    winner.update(-150.00, 5.0, _res(-150.00))
+    acc.merge(winner)
+    assert acc.best_result is not None and acc.best_epfd == -150.00
+
+
 if __name__ == "__main__":
     fails = 0
     for name, fn in sorted(globals().items()):

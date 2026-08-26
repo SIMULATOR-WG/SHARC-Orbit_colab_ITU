@@ -1683,19 +1683,15 @@ class _WCGState:
         # Raise the top, if applicable.
         if margin > self.bin_top_margin:
             self.bin_top_margin = margin
-        # Insert and prune.
-        if len(self._bin_candidates) < self.BIN_CAND_MAX:
-            self._bin_candidates.append((margin, ang_vel, epfd, result))
-        else:
-            # In degenerate scenarios: replace the worst candidate (highest
-            # ang_vel) if the new one is better; otherwise discard.
-            worst_i = max(
-                range(len(self._bin_candidates)),
-                key=lambda i: self._bin_candidates[i][1],
-            )
-            if ang_vel < self._bin_candidates[worst_i][1]:
-                self._bin_candidates[worst_i] = (margin, ang_vel, epfd, result)
+        # Insert, prune to the window, then cap — same ordering argument as
+        # merge(). The old code refused the insert when the list was full
+        # unless the newcomer was slower, so a point that RAISED the top while
+        # moving fast was dropped and the following prune could empty the list.
+        self._bin_candidates.append((margin, ang_vel, epfd, result))
         self._prune_candidates()
+        if len(self._bin_candidates) > self.BIN_CAND_MAX:
+            self._bin_candidates.sort(key=lambda t: t[1])
+            del self._bin_candidates[self.BIN_CAND_MAX:]
         self._recompute_winner()
         new_winner_key = (self.best_ang_vel, -self.best_margin)
         return new_winner_key != prev_winner_key and (
@@ -1715,13 +1711,21 @@ class _WCGState:
         # Merge the two lists, update the top, and recompute the winner.
         self.bin_top_margin = max(self.bin_top_margin, other.bin_top_margin)
         self._bin_candidates.extend(other._bin_candidates)
-        if len(self._bin_candidates) > self.BIN_CAND_MAX:
-            # Keep the BIN_CAND_MAX with the lowest ang_vel (these are the
-            # winner candidates; those with higher ang_vel will never win
-            # while the lower ones are in the window).
-            self._bin_candidates.sort(key=lambda t: t[1])
-            self._bin_candidates = self._bin_candidates[: self.BIN_CAND_MAX]
+        # ORDER MATTERS. Prune to the margin window FIRST, cap by angular
+        # velocity only afterwards. Capping first sorts by ang_vel and keeps
+        # the slowest BIN_CAND_MAX — but "slowest" says nothing about margin,
+        # so a merge that RAISES bin_top_margin could drop the very candidate
+        # that raised it (it need not be slow) and then prune every survivor
+        # for sitting more than BIN_SIZE below the new top. The list came out
+        # empty and the search reported "no valid geometry found" despite
+        # hundreds of millions of admitted points. Pruning first bounds the
+        # list to the window, where comparing ang_vel is meaningful.
         self._prune_candidates()
+        if len(self._bin_candidates) > self.BIN_CAND_MAX:
+            # Keep the BIN_CAND_MAX with the lowest ang_vel: within the
+            # window those are the only ones that can win.
+            self._bin_candidates.sort(key=lambda t: t[1])
+            del self._bin_candidates[self.BIN_CAND_MAX:]
         self._recompute_winner()
 
     def add_point(
@@ -3458,7 +3462,21 @@ def search_wcg_s1503(
     logger.info(f"  WCGA extreme cases phase (6 sequential): {_dt_extreme:.2f}s")
 
     if state.best_result is None:
-        logger.warning("WCGA S.1503-4: no valid geometry found.")
+        if state.n_ok > 0:
+            # Admitted points but no winner is not a physical outcome: every
+            # ok point is a candidate. It means the bin bookkeeping lost them.
+            logger.error(
+                "WCGA S.1503-4: no winner despite %d ADMITTED point(s) "
+                "(bin_top_margin=%.3f). This is a bookkeeping failure, not an "
+                "empty search space — the result must not be used.",
+                state.n_ok, state.bin_top_margin,
+            )
+        else:
+            logger.warning(
+                "WCGA S.1503-4: no valid geometry found (no point passed "
+                "admission: %d excluded, %d below minimum elevation).",
+                state.n_excl, state.n_low_elev,
+            )
         return None
 
     best = state.best_result
