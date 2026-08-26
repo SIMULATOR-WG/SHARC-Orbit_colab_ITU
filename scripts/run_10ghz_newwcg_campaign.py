@@ -489,8 +489,17 @@ def cmd_run(args) -> None:
     todo.sort(key=lambda r: (r["block"], r["id"]))
     print(f"campaign {CAMPAIGN_ID}: {len(todo)} row(s) queued · "
           f"{time.strftime('%Y-%m-%d %H:%M:%S')}")
+    # Geometries arrive asynchronously across nodes, so a blocked row is a
+    # normal state, not a failure: skip it, keep going, and say at the end what
+    # is still waiting on which block-A row. Aborting on the first one left a
+    # node idle while it had hours of runnable work.
+    blocked: dict[str, list[str]] = {}
     for pos, row in enumerate(todo, 1):
-        params = _params_for(row, state)   # raises if the geometry is missing
+        try:
+            params = _params_for(row, state)
+        except SystemExit:
+            blocked.setdefault(_geom_key(row), []).append(row["id"])
+            continue
         key = _run_key(row, params)
         rec = (state.get("runs") or {}).get(key)
         if rec and rec.get("status") == "success" and not args.force:
@@ -513,6 +522,15 @@ def cmd_run(args) -> None:
         if not ok and not args.keep_going:
             raise SystemExit(f"[{key}] failed — see worker.log. "
                              "Use --keep-going to continue.")
+
+    if blocked:
+        print("\nnot run — geometry still unresolved here:")
+        for gk in sorted(blocked):
+            print(f"  waiting on {gk}: " + " ".join(sorted(blocked[gk])))
+        print("Bring each one over from the node that owns it:\n"
+              "  geometry --from-run <run_dir> --key <A1|A2|A3>\n"
+              "  geometry --set <A1|A2|A3>=lat,lon,gso\n"
+              "then re-run this same command; finished rows are skipped.")
 
 
 def cmd_adopt(args) -> None:
