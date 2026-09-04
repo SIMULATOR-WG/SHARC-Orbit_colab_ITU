@@ -14,7 +14,10 @@ from lib import storage, theme, engine, git_revision
 
 st.set_page_config(
     page_title="SHARC-Orbit",
-    page_icon=":material/satellite_alt:",
+    # An emoji favicon is rendered by the frontend as an inline `data:image/svg+xml`
+    # URI. A `:material/…:` icon would instead be fetched from
+    # fonts.gstatic.com — the only other outbound call the UI used to make.
+    page_icon="🛰️",
     layout="wide",
     initial_sidebar_state="expanded",
 )

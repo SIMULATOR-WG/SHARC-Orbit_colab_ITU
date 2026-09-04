@@ -1,5 +1,11 @@
 [server]
 headless = false
+# Serves streamlit_app/static/ at /app/static/ — carries the vendored Plotly
+# topojson so geo charts never call out to cdn.plot.ly (see lib/plots.py).
+enableStaticServing = true
+# No first-run `Email:` prompt: it is the only code path that would reach
+# data.streamlit.io, and it blocks startup until answered.
+showEmailPrompt = false
 runOnSave = true
 fileWatcherType = "auto"
 maxUploadSize = 1024

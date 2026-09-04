@@ -920,7 +920,7 @@ def _render_globe(data: dict[str, Any]) -> None:
         event = st.plotly_chart(
             fig, width='stretch',
             on_select="rerun", selection_mode="points",
-            key=chart_key,
+            key=chart_key, config=plots.GEO_CONFIG,
         )
 
         # Translate a click into the corresponding geometry label and pre-set

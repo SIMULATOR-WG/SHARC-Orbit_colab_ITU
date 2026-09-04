@@ -149,7 +149,7 @@ def epfd_timeline_multi_chart(
     series: Sequence[dict[str, Any]],
     *,
     title: str = "EPFD↓ time series — per system",
-    height: int = 380,
+    height: int = 420,
 ) -> go.Figure:
     """Overlay several decimated EPFD-vs-time traces on one chart.
 
@@ -165,12 +165,15 @@ def epfd_timeline_multi_chart(
             line=dict(width=1.2, color=s.get("color")),
         ))
     fig.update_layout(
-        title=title,
+        # The horizontal legend sits above the plot, so the top margin has to
+        # carry both it and the title: pin the title to the very top of that
+        # band and leave room underneath, otherwise the series labels crowd it.
+        title=dict(text=title, y=0.97, yanchor="top"),
         xaxis_title="time (s)",
         yaxis_title="EPFD↓ (dBW/m²/40 kHz)",
         height=height,
         template="plotly_dark",
-        margin=dict(l=60, r=20, t=50, b=50),
+        margin=dict(l=60, r=20, t=92, b=50),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
     )
     return fig
@@ -193,6 +196,14 @@ def percentiles_chart(percentiles: dict[str, float], *, title: str = "Normative 
     )
     return fig
 
+
+# Plotly geo traces fetch coastline/country topojson at render time; the
+# built-in default is ``https://cdn.plot.ly/un/``, which a restrictive firewall
+# blocks — the globe then draws the points over an empty sphere. Serve the
+# bundle from the app instead (streamlit_app/static/topojson/, exposed by
+# ``server.enableStaticServing``), so no chart reaches the public internet.
+# Pass as ``st.plotly_chart(fig, config=GEO_CONFIG)`` for any geo figure.
+GEO_CONFIG: dict[str, str] = {"topojsonURL": "/app/static/topojson/"}
 
 # ─── Globe with WCG / grid points (Scattergeo orthographic) ────────────────
 

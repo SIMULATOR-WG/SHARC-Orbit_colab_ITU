@@ -518,6 +518,21 @@ def _grid_pfd(lat: float, lon: float, lat_deg, lon_deg, pfd_grid) -> float | Non
     return float(v) if np.isfinite(v) else None
 
 
+@st.cache_resource(show_spinner=False)
+def _plotlyjs_tag() -> str:
+    """`<script>` with the plotly.js bundle shipped inside the ``plotly`` wheel.
+
+    The two globes below are raw-Plotly iframes, so they need their own copy of
+    plotly.js — ``st.plotly_chart``'s bundle does not reach into a
+    ``components.html`` document. ``include_plotlyjs="cdn"`` would fetch it from
+    ``cdn.plot.ly``, which fails on air-gapped / firewalled installs, so the
+    bundle is inlined from the installed package instead (~4.9 MB, read once per
+    process and cached here).
+    """
+    from plotly.offline import get_plotlyjs
+    return f"<script>{get_plotlyjs()}</script>"
+
+
 def _globe_component_html(
     fig: go.Figure,
     *,
@@ -539,7 +554,7 @@ def _globe_component_html(
         survive the step/clear reruns that reload the iframe.
     """
     fig_html = fig.to_html(
-        include_plotlyjs="cdn", full_html=False, div_id="cglobe",
+        include_plotlyjs=False, full_html=False, div_id="cglobe",
         config={"displaylogo": False, "scrollZoom": True, "responsive": True},
     )
     grid = np.asarray(pfd_grid, dtype=float)
@@ -551,6 +566,7 @@ def _globe_component_html(
     lon_j = json.dumps([round(float(v), 4) for v in np.asarray(lon_deg, float)])
     heat_j = "null" if heat_curve is None else str(int(heat_curve))
     return f"""
+{_plotlyjs_tag()}
 <div style="position:relative;width:100%;">
   {fig_html}
   <div id="creadout" style="position:absolute;top:64px;left:14px;z-index:1000;
@@ -622,13 +638,14 @@ def _globe_scenario_html(
     Camera is persisted in ``localStorage`` (shared with the footprint globe).
     """
     fig_html = fig.to_html(
-        include_plotlyjs="cdn", full_html=False, div_id="sglobe",
+        include_plotlyjs=False, full_html=False, div_id="sglobe",
         config={"displaylogo": False, "scrollZoom": True, "responsive": True},
     )
     # sat_pos rows: [x, y, z, global_index]
     sat_j = json.dumps([[round(float(a), 5), round(float(b), 5),
                          round(float(c), 5), int(i)] for a, b, c, i in sat_pos])
     return f"""
+{_plotlyjs_tag()}
 <div style="position:relative;width:100%;">
   {fig_html}
 </div>
