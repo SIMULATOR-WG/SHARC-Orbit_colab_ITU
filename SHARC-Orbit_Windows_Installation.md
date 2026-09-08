@@ -17,14 +17,23 @@ Companion to the root [`README.md`](README.md).
 One-time procedure, in PowerShell (no Administrator needed). If this machine
 already has a working clone, go to [§ 3. Update](#updating) instead.
 
-**a. Install the tools** — Git, GitHub CLI, uv — then **close and reopen
-PowerShell** so `PATH` refreshes:
+**a. Install the tools** — Git, GitHub CLI and uv. `winget` writes the new
+`PATH` to the registry but cannot change a shell that is already running, so
+the last two lines re-read it and check the tools answer. Run the whole block:
 
 ```powershell
 winget install --id Git.Git -e --source winget --accept-package-agreements --accept-source-agreements
 winget install --id GitHub.cli -e --source winget --accept-package-agreements --accept-source-agreements
 winget install --id astral-sh.uv -e --source winget --accept-package-agreements --accept-source-agreements
+
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+git --version; gh --version; uv --version
 ```
+
+**Three version numbers must print.** Ignore winget's *"restart your shell"*
+notice — the line above does that job without a restart. Skipping it is the
+most common way this install fails: the next step then stops with
+*"gh is not recognized"*.
 
 **b. Sign in to GitHub and clone.** The browser opens — sign in with an account
 that has access to `SIMULATOR-WG/SHARC-Orbit` and authorize GitHub CLI:
@@ -148,7 +157,8 @@ Then run as in [§ 2](#executing).
 
 | Problem | Fix |
 |---|---|
-| `winget` / `git` / `gh` / `uv` not recognized | Close and reopen PowerShell. For `winget` itself: install **App Installer** from the Microsoft Store |
+| `git` / `gh` / `uv` not recognized (`CommandNotFoundException`) | `PATH` in this window is stale — re-run the last two lines of § 1a. Opening a new tab does **not** help: Windows Terminal tabs and the VS Code integrated terminal both inherit the environment of the app that is already running |
+| `winget` not recognized | Install or update **App Installer** from the Microsoft Store, then reopen PowerShell |
 | `repository not found` | `gh auth status`, then `gh auth login --hostname github.com --git-protocol https --web`. Org uses SSO: `gh auth refresh -h github.com` and authorize in the browser |
 | `Your local changes … would be overwritten` on pull | Tracked files were edited locally — copy them aside or commit them on another branch, then pull again |
 | `Not possible to fast-forward` | Local `main` has commits GitHub does not: `git switch -c backup-local-main`, then ask whoever maintains the clone. Never force with plain `git pull` or `reset --hard` |
@@ -182,7 +192,8 @@ $env:UV_PYTHON_INSTALL_MIRROR = "https://github.com/astral-sh/python-build-stand
 
 Those five are what SHARC-Orbit itself needs. Git, GitHub CLI and `uv` are
 prerequisites — if `winget` cannot reach them on that network, ask whoever
-administers it to install the three tools, then continue from § 1b.
+administers it to install the three tools, then run the `$env:PATH` and
+`--version` lines from § 1a and continue from § 1b.
 
 <a id="offline-install"></a>
 
@@ -215,7 +226,14 @@ pairs, via the Java helper in `tools\jackcess\`. It needs a full JDK
 
 ```powershell
 winget install --id Microsoft.OpenJDK.21 -e --source winget --accept-package-agreements --accept-source-agreements
+
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
+java --version
 ```
+
+The `PATH` line is the same one from § 1a — a fresh winget install is not
+visible to a shell that is already running. Restart Streamlit afterwards so it
+inherits the new `PATH`.
 
 Without a JDK the button falls back to a YAML + mask-XML filing; everything
 else works unchanged. Nothing else needs Java.
