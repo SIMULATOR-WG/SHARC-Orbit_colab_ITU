@@ -367,3 +367,71 @@ def test_run_epfd_simulation_ref_vec_rejects_multi_set_windows():
         assert False, "expected ValueError for a multi-set TrackDurationWindows"
     except ValueError:
         pass
+
+
+# ── progress reporting (§D5.1.4.2 driver) ────────────────────────────────────
+
+def _windowed_progress_lines(caplog, n_jobs: int) -> list[str]:
+    """Run a small windowed sim and return its progress log lines."""
+    import logging
+    const = _constellation()
+    common = dict(
+        constellation=const, wcg=_wcg(), pfd_mask=_alpha_mask(), es_antenna=_ant(),
+        alpha0_deg=2.0, min_elevation_deg=5.0, pfd_bw_correction_db=0.0,
+    )
+    windows = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=len(const),
+    )
+    with caplog.at_level(logging.INFO, logger="src.epfd_calculator"):
+        run_epfd_simulation_windowed(windows=windows, n_jobs=n_jobs, **common)
+    return [r.getMessage() for r in caplog.records if "block " in r.getMessage()]
+
+
+def test_windowed_emits_progress_reaching_100pct(caplog):
+    """The windowed path must report progress like the standard path does."""
+    lines = _windowed_progress_lines(caplog, n_jobs=1)
+    assert lines, "windowed run emitted no progress lines"
+    # Every block ticks once, and the last line closes the run at 100%.
+    assert "100.00%" in lines[-1]
+    assert lines[-1].rstrip().endswith(f"block {len(lines)}/{len(lines)}")
+    # Percentage is monotonic non-decreasing.
+    pcts = [float(m.split("%")[0].split()[-1]) for m in lines]
+    assert pcts == sorted(pcts)
+    assert pcts[-1] == 100.0
+
+
+def test_windowed_progress_step_counts_are_exact(caplog):
+    """`step done/total` must land exactly on the §D5.1.3 propagation total."""
+    lines = _windowed_progress_lines(caplog, n_jobs=1)
+    done, total = lines[-1].split("step ")[1].split()[0].split("/")
+    # N_TW · N_Repeat · N_SW for the fixture above.
+    windows = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=300,
+    )
+    expected = windows.n_tw * windows.n_repeat * windows.n_sw
+    assert int(total) == expected
+    assert int(done) == expected  # no block unaccounted for
+
+
+def test_windowed_progress_totals_match_across_dispatch_paths(caplog):
+    """Block granularity tracks n_jobs, but the propagation total must not.
+
+    ``win_per_block`` is sized from ``n_jobs`` (finer blocks fan out better), so
+    the sequential and Pool runs legitimately tick a different number of times.
+    What has to agree is the accounting: both close at 100% on the same total.
+    """
+    def _last(n_jobs):
+        caplog.clear()
+        lines = _windowed_progress_lines(caplog, n_jobs=n_jobs)
+        done, total = lines[-1].split("step ")[1].split()[0].split("/")
+        return len(lines), int(done), int(total)
+
+    seq_blocks, seq_done, seq_total = _last(1)
+    par_blocks, par_done, par_total = _last(4)
+
+    assert (seq_done, seq_total) == (par_done, par_total)
+    assert seq_done == seq_total  # both fully accounted for
+    # Finer blocks with more jobs — the property that makes the fan-out work.
+    assert par_blocks > seq_blocks

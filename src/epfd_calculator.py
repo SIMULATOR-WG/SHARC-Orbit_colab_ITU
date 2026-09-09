@@ -3912,7 +3912,9 @@ def _simulate_window_block(args):
             )
             buffer = []
 
-    return {"w": int(w), "win": win_stats}
+    # ``n_prop`` is this block's share of the run's step-propagations, carried
+    # back so the driver can report progress without assuming result order.
+    return {"w": int(w), "win": win_stats, "n_prop": int(end - start)}
 
 
 def _build_worst_envelope(
@@ -4082,12 +4084,27 @@ def run_epfd_simulation_windowed(
 
     win_by_index: list = [None] * windows.n_tw
 
+    # Progress accounting mirrors the standard path's chunk model: the parallel
+    # unit (there a chunk, here a window block) is the tick, and the percentage
+    # runs on step-propagations so blocks of unequal size weigh correctly.
+    total_blocks = len(tasks)
+    blocks_done = 0
+    prop_done = 0
+
     def _consume(res):
+        nonlocal blocks_done, prop_done
         w = int(res["w"])
         if win_by_index[w] is None:
             win_by_index[w] = res["win"]
         else:
             win_by_index[w].merge(res["win"])  # merge blocks of the same set
+        blocks_done += 1
+        prop_done += int(res.get("n_prop", 0))
+        pct = min(100.0, prop_done / max(1, total_prop) * 100.0)
+        logger.info(
+            f"  {_progress_bar(pct)} {pct:6.2f}%  "
+            f"step {prop_done}/{total_prop}  block {blocks_done}/{total_blocks}"
+        )
 
     if n_jobs == 1:
         for task in tasks:

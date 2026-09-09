@@ -202,9 +202,9 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
     logger.info(f"Reading SRS MDB: {mdb_path}")
     system = read_srs_mdb(mdb_path, ntc_id=ntc_id)
     constellation_cfg = srs_to_constellation_config(system)
-    constellation_cfg["max_co_freq_by_lat"] = read_sat_oper(mdb_path, system.ntc_id)
-    # MIN_DURATION bands (§D5.1.4.2 track-duration variant); empty ⇒ standard path.
-    constellation_cfg["min_duration_by_lat"] = read_sat_oper_min_duration(mdb_path, system.ntc_id)
+    # MAX_CO_FREQ / MIN_DURATION are read further below, once the run frequency
+    # is known: when `sat_oper` is empty the S.1503-4 operating-parameter mask
+    # supplies them, and picking the right set needs the frequency.
 
     # Read mask information to obtain the run frequency.
     # S.1503 D2: FrequencyRun = fmin + RefBW/2.
@@ -334,6 +334,19 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         freq_ghz = min(max(freq_ghz, float(effective_freq_min_ghz)), float(effective_freq_max_ghz))
 
     constellation_cfg["frequency_ghz"] = freq_ghz
+
+    # MAX_CO_FREQ (Nco) and MIN_DURATION. Primary source is `sat_oper`; when it
+    # is empty — the S.1503-4 / EPS V41 structure retires that table — both come
+    # from the operating-parameter mask (f_mask='R') set covering this run
+    # frequency. `pfd_mask_mdb` is where those blobs live in a filing package;
+    # the SRS itself is tried as a fallback inside the reader.
+    _op_freq_mhz = float(freq_ghz) * 1000.0 if freq_ghz else None
+    constellation_cfg["max_co_freq_by_lat"] = read_sat_oper(
+        mdb_path, system.ntc_id, pfd_mask_mdb, _op_freq_mhz)
+    # MIN_DURATION bands (§D5.1.4.2 track-duration variant); empty ⇒ standard path.
+    constellation_cfg["min_duration_by_lat"] = read_sat_oper_min_duration(
+        mdb_path, system.ntc_id, pfd_mask_mdb, _op_freq_mhz)
+
     if selected_group is not None and selected_group.elev_min_deg is not None:
         constellation_cfg["min_elevation_deg"] = float(selected_group.elev_min_deg)
     gso_min_elev_default_deg, theta_adb_default_deg = _s1503_table8_gso_defaults(freq_ghz)

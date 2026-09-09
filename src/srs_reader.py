@@ -496,45 +496,13 @@ def _run_mdb_export(mdb_path: str, table: str) -> list[dict]:
     return rows
 
 
-def read_pfd_mask_xml_from_mdb(
-    mask_mdb_path: str,
-    mask_id: int,
-    ntc_id: str | None = None,
-) -> str:
-    """Read the PFD mask XML directly from the MASK MDB (table ``masks``).
+def _mask_blob_to_xml(payload_txt: str, mask_id: int, mask_mdb_path: str) -> str:
+    """Decode a ``masks.mask`` blob (usually a ZIP holding one XML) to text.
 
-    The ``mask`` field usually stores a ZIP (OLE/BINARY blob) containing the XML.
+    Shared by the PFD/e.i.r.p. masks and the S.1503-4 operating-parameter masks
+    (``f_mask='R'``) — the container is identical, only the payload schema
+    differs, so the caller validates the root element it expects.
     """
-    if not os.path.exists(mask_mdb_path):
-        raise FileNotFoundError(f"MASK MDB file not found: {mask_mdb_path}")
-
-    rows = _run_mdb_export(mask_mdb_path, "masks")
-    if not rows:
-        raise ValueError(
-            "Table 'masks' empty or not found in the MASK MDB."
-        )
-
-    mask_id_s = str(int(mask_id))
-    ntc_id_s = str(ntc_id).strip() if ntc_id is not None else None
-    candidates = []
-    for row in rows:
-        row_mid = str(_parse_int(row.get("mask_id", "")))
-        row_ntc = row.get("ntc_id", "").strip().strip('"')
-        if row_mid != mask_id_s:
-            continue
-        if ntc_id_s is not None and row_ntc != ntc_id_s:
-            continue
-        candidates.append(row)
-
-    if not candidates:
-        raise ValueError(
-            f"Mask mask_id={mask_id} not found in {mask_mdb_path}"
-            + (f" for ntc_id={ntc_id_s}" if ntc_id_s else "")
-            + "."
-        )
-
-    row = candidates[0]
-    payload_txt = row.get("mask", "")
     if payload_txt is None or payload_txt == "":
         raise ValueError(
             f"Empty 'mask' field for mask_id={mask_id} in {mask_mdb_path}."
@@ -573,9 +541,50 @@ def read_pfd_mask_xml_from_mdb(
         xml_bytes = xml_bytes[xml_start:]
 
     try:
-        xml_text = xml_bytes.decode("utf-8-sig")
+        return xml_bytes.decode("utf-8-sig")
     except UnicodeDecodeError:
-        xml_text = xml_bytes.decode("latin1", errors="replace")
+        return xml_bytes.decode("latin1", errors="replace")
+
+
+def read_pfd_mask_xml_from_mdb(
+    mask_mdb_path: str,
+    mask_id: int,
+    ntc_id: str | None = None,
+) -> str:
+    """Read the PFD mask XML directly from the MASK MDB (table ``masks``).
+
+    The ``mask`` field usually stores a ZIP (OLE/BINARY blob) containing the XML.
+    """
+    if not os.path.exists(mask_mdb_path):
+        raise FileNotFoundError(f"MASK MDB file not found: {mask_mdb_path}")
+
+    rows = _run_mdb_export(mask_mdb_path, "masks")
+    if not rows:
+        raise ValueError(
+            "Table 'masks' empty or not found in the MASK MDB."
+        )
+
+    mask_id_s = str(int(mask_id))
+    ntc_id_s = str(ntc_id).strip() if ntc_id is not None else None
+    candidates = []
+    for row in rows:
+        row_mid = str(_parse_int(row.get("mask_id", "")))
+        row_ntc = row.get("ntc_id", "").strip().strip('"')
+        if row_mid != mask_id_s:
+            continue
+        if ntc_id_s is not None and row_ntc != ntc_id_s:
+            continue
+        candidates.append(row)
+
+    if not candidates:
+        raise ValueError(
+            f"Mask mask_id={mask_id} not found in {mask_mdb_path}"
+            + (f" for ntc_id={ntc_id_s}" if ntc_id_s else "")
+            + "."
+        )
+
+    row = candidates[0]
+    xml_text = _mask_blob_to_xml(row.get("mask", ""), mask_id, mask_mdb_path)
 
     if "<pfd_mask" not in xml_text:
         raise ValueError(
@@ -920,12 +929,21 @@ def read_srs_mdb(mdb_path: str, ntc_id: str | None = None) -> SRSNonGeoSystem:
     return system
 
 
-def read_sat_oper(mdb_path: str, ntc_id: str) -> list[tuple[float, float, int]]:
+def read_sat_oper(
+    mdb_path: str,
+    ntc_id: str,
+    mask_mdb_path: str | None = None,
+    freq_mhz: float | None = None,
+) -> list[tuple[float, float, int]]:
     """Read the ``sat_oper`` table from the SRS MDB and return MAX_CO_FREQ per latitude band.
 
     Returns a list of tuples ``(lat_fr, lat_to, nbr_op_sat)`` sorted by ``lat_fr``.
     ``nbr_op_sat`` is the maximum number of co-frequency satellites operating simultaneously
     (Step 19 of Annex D of ITU-R S.1503-4). Returns an empty list if the table does not exist.
+
+    When ``sat_oper`` yields nothing and ``mask_mdb_path`` is given, falls back to
+    the S.1503-4 operating-parameter mask — see
+    :func:`read_operating_params_mask`. ``freq_mhz`` picks the parameter set.
 
     See :func:`read_sat_oper_min_duration` for the parallel MIN_DURATION table
     (§D5.1.4.2 track-duration variant), which is now implemented.
@@ -936,16 +954,35 @@ def read_sat_oper(mdb_path: str, ntc_id: str) -> list[tuple[float, float, int]]:
             f"  MAX_CO_FREQ (sat_oper): {len(result)} latitude band(s) — "
             + ", ".join(f"[{f:.0f}°,{t:.0f}°]→{n}" for f, t, n in result)
         )
+        return result
+
+    op = _operating_params_fallback(mdb_path, ntc_id, mask_mdb_path, freq_mhz)
+    if op is not None and op.max_co_freq:
+        bands = [(f, t, int(round(v))) for f, t, v in op.max_co_freq]
+        logger.info(
+            "  MAX_CO_FREQ (operating-parameter mask param_id=%s): %d latitude "
+            "band(s) — " % (op.param_id, len(bands))
+            + ", ".join(f"[{f:.0f}°,{t:.0f}°]→{n}" for f, t, n in bands)
+        )
+        return bands
     return result
 
 
-def read_sat_oper_min_duration(mdb_path: str, ntc_id: str) -> list[tuple[float, float, float]]:
+def read_sat_oper_min_duration(
+    mdb_path: str,
+    ntc_id: str,
+    mask_mdb_path: str | None = None,
+    freq_mhz: float | None = None,
+) -> list[tuple[float, float, float]]:
     """MIN_DURATION per latitude band from ``sat_oper`` (S.1503-4 §D5.1.4.2).
 
     Returns ``(lat_fr, lat_to, min_duration_s)`` sorted by ``lat_fr`` for the
     bands with a non-zero MIN_DURATION; an empty list means the standard
     §D5.1.4.1 path applies (no track-duration handling needed). The ``min_dur``
     (Access) / ``min_duration`` (XML) column absent ⇒ 0.
+
+    Falls back to the operating-parameter mask the same way :func:`read_sat_oper`
+    does when ``sat_oper`` carries no MIN_DURATION.
     """
     _bands, min_dur = _read_sat_oper_bands(mdb_path, ntc_id)
     nz = [(f, t, d) for f, t, d in min_dur if abs(d) > 1e-9]
@@ -956,7 +993,185 @@ def read_sat_oper_min_duration(mdb_path: str, ntc_id: str) -> list[tuple[float, 
             + ", ".join(f"[{f:.0f}°,{t:.0f}°]→{d:.0f}s" for f, t, d in nz),
             len(nz),
         )
+        return nz
+
+    op = _operating_params_fallback(mdb_path, ntc_id, mask_mdb_path, freq_mhz)
+    if op is not None:
+        nz = [(f, t, d) for f, t, d in op.min_duration if abs(d) > 1e-9]
+        if nz:
+            logger.info(
+                "  MIN_DURATION (operating-parameter mask param_id=%s): %d "
+                "latitude band(s) — triggers §D5.1.4.2 sliding-window variant: "
+                % (op.param_id, len(nz))
+                + ", ".join(f"[{f:.0f}°,{t:.0f}°]→{d:.0f}s" for f, t, d in nz)
+            )
+            return nz
     return nz
+
+
+@dataclass
+class OperatingParamsMask:
+    """One ``f_mask='R'`` operating-parameter set (S.1503-4 / EPS V41 §6.5.4).
+
+    The S.1503-4 structure retires ``sat_oper`` and moves its content into an
+    XML mask that also carries per-latitude exclusion zones and elevations.
+    Each set covers one contiguous frequency range; an examined band resolves to
+    the set containing it (EPS: set ranges never overlap).
+
+    Latitude-indexed fields are ``(lat_fr, lat_to, value)``. The XML gives a
+    single latitude per entry with nearest-latitude semantics, so a lone entry is
+    widened to −90…+90 and multiple entries split at midpoints.
+    """
+    param_id: int
+    low_freq_mhz: float
+    high_freq_mhz: float
+    max_co_freq: list[tuple[float, float, float]] = field(default_factory=list)
+    min_duration: list[tuple[float, float, float]] = field(default_factory=list)
+    min_elev: list[tuple[float, float, float]] = field(default_factory=list)
+    exclusion_zone: list[tuple[float, float, float]] = field(default_factory=list)
+
+
+def _lat_entries_to_bands(
+    entries: list[tuple[float, float]],
+) -> list[tuple[float, float, float]]:
+    """Turn ``(latitude, value)`` points into contiguous ``(from, to, value)`` bands.
+
+    Nearest-latitude semantics: one point covers the whole sphere; N points split
+    at the midpoints between consecutive latitudes.
+    """
+    if not entries:
+        return []
+    pts = sorted(entries, key=lambda e: e[0])
+    if len(pts) == 1:
+        return [(-90.0, 90.0, pts[0][1])]
+    bands = []
+    for i, (lat, val) in enumerate(pts):
+        lo = -90.0 if i == 0 else (pts[i - 1][0] + lat) / 2.0
+        hi = 90.0 if i == len(pts) - 1 else (lat + pts[i + 1][0]) / 2.0
+        bands.append((lo, hi, val))
+    return bands
+
+
+def parse_operating_params_xml(xml_text: str) -> list[OperatingParamsMask]:
+    """Parse ``<non_gso_operating_parameters>`` sets from an operating-parameter mask."""
+    import xml.etree.ElementTree as ET  # noqa: PLC0415 — only this path needs it
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as exc:
+        raise ValueError(f"Invalid operating-parameter mask XML: {exc}") from exc
+
+    nodes = root.iter("non_gso_operating_parameters")
+    out: list[OperatingParamsMask] = []
+    for node in nodes:
+        def _pts(tag: str, child: str | None = None) -> list[tuple[float, float]]:
+            pts = []
+            for el in node.findall(tag):
+                lat = _parse_float(el.get("a", ""), default=0.0)
+                if child is None:
+                    txt = (el.text or "").strip()
+                    if txt:
+                        pts.append((lat, _parse_float(txt, default=0.0)))
+                    continue
+                # Nested form: <min_exclude c=..><exclusion_zone_angle a=..>v
+                for sub in el.iter(child):
+                    sub_lat = _parse_float(sub.get("a", ""), default=lat)
+                    txt = (sub.text or "").strip()
+                    if txt:
+                        pts.append((sub_lat, _parse_float(txt, default=0.0)))
+            return pts
+
+        out.append(OperatingParamsMask(
+            param_id=_parse_int(node.get("param_id", "0")),
+            low_freq_mhz=_parse_float(node.get("low_freq_mhz", "0")),
+            high_freq_mhz=_parse_float(node.get("high_freq_mhz", "0")),
+            max_co_freq=_lat_entries_to_bands(_pts("max_co_freq")),
+            min_duration=_lat_entries_to_bands(_pts("min_duration")),
+            min_elev=_lat_entries_to_bands(_pts("min_elev", "elev_angle")),
+            exclusion_zone=_lat_entries_to_bands(
+                _pts("min_exclude", "exclusion_zone_angle")),
+        ))
+    return out
+
+
+def read_operating_params_mask(
+    mask_mdb_path: str,
+    ntc_id: str | None = None,
+    freq_mhz: float | None = None,
+) -> OperatingParamsMask | None:
+    """Read the ``f_mask='R'`` operating-parameter set covering ``freq_mhz``.
+
+    Returns ``None`` when the MASK MDB holds no R mask (every pre-S.1503-4
+    filing) or when no set contains the frequency. With ``freq_mhz`` omitted and
+    exactly one set present, that set is returned.
+    """
+    if not mask_mdb_path or not os.path.exists(mask_mdb_path):
+        return None
+    try:
+        rows = _run_mdb_export(mask_mdb_path, "masks")
+    except Exception as exc:  # noqa: BLE001 — absent/unreadable table is not fatal
+        logger.debug("operating-parameter mask: cannot read 'masks' (%s)", exc)
+        return None
+
+    ntc_s = str(ntc_id).strip().strip('"') if ntc_id is not None else None
+    sets: list[OperatingParamsMask] = []
+    for row in rows or []:
+        if row.get("f_mask", "").strip().strip('"').upper() != "R":
+            continue
+        if ntc_s is not None and row.get("ntc_id", "").strip().strip('"') != ntc_s:
+            continue
+        mid = _parse_int(row.get("mask_id", "0"))
+        try:
+            xml_text = _mask_blob_to_xml(row.get("mask", ""), mid, mask_mdb_path)
+            sets.extend(parse_operating_params_xml(xml_text))
+        except Exception as exc:  # noqa: BLE001 — skip a bad set, keep the rest
+            logger.warning(
+                "  Operating-parameter mask mask_id=%s could not be parsed (%s); "
+                "skipping it.", mid, exc,
+            )
+    if not sets:
+        return None
+
+    if freq_mhz is None:
+        if len(sets) == 1:
+            return sets[0]
+        logger.warning(
+            "  %d operating-parameter sets present but no frequency given — "
+            "cannot pick one (param_ids: %s).",
+            len(sets), ", ".join(str(s.param_id) for s in sets),
+        )
+        return None
+
+    f = float(freq_mhz)
+    for s in sets:
+        if s.low_freq_mhz - 1e-6 <= f <= s.high_freq_mhz + 1e-6:
+            return s
+    logger.warning(
+        "  No operating-parameter set covers %.4f MHz (available: %s).",
+        f, ", ".join(f"{s.param_id}:{s.low_freq_mhz:.0f}-{s.high_freq_mhz:.0f}"
+                     for s in sets),
+    )
+    return None
+
+
+def _operating_params_fallback(
+    mdb_path: str,
+    ntc_id: str,
+    mask_mdb_path: str | None,
+    freq_mhz: float | None,
+) -> OperatingParamsMask | None:
+    """Operating-parameter set to use when ``sat_oper`` carries nothing.
+
+    Looks in the separate MASK MDB when given, else in the SRS itself (some
+    packages keep the mask blobs alongside the tables).
+    """
+    for path in (mask_mdb_path, mdb_path):
+        if not path:
+            continue
+        op = read_operating_params_mask(path, ntc_id=ntc_id, freq_mhz=freq_mhz)
+        if op is not None:
+            return op
+    return None
 
 
 def _read_sat_oper_bands(
@@ -995,27 +1210,67 @@ def _read_sat_oper_bands(
     return result, min_dur_bands
 
 
+# Above this value a mask_info frequency cannot be GHz: no space service is
+# notified anywhere near 1000 GHz, while the lowest band the EPFD tables cover
+# (3.7 GHz) is 3700 MHz. Any real band therefore lands unambiguously on one
+# side of the threshold.
+_MASK_INFO_MHZ_THRESHOLD_GHZ = 1000.0
+
+
+def _mask_info_freq_to_ghz(value: float) -> float:
+    """Normalise a ``mask_info`` frequency to GHz.
+
+    The column changes unit with the schema version: SNS v10 stores **GHz**,
+    while the S.1503-4 structure (EPS V41 §6.5.1.1) stores **MHz** — a
+    migration the EPS itself flags ("in SNS v10 it is currently GHz, care
+    should be taken to introduce this change in new SNS structure"). Filings of
+    both vintages reach this reader, and nothing in the row says which it is,
+    so the unit is inferred from magnitude.
+
+    Note this differs from ``grp.freq_min``/``freq_max``, which are MHz in
+    *both* versions and are converted unconditionally by their own reader.
+    """
+    if value > _MASK_INFO_MHZ_THRESHOLD_GHZ:
+        return value / 1000.0
+    return value
+
+
 def read_mask_info(mdb_path: str, ntc_id: str | None = None) -> list[SRSMaskInfo]:
     """Read mask information from the SRS MDB.
 
     If ``ntc_id`` is provided and the table has an ``ntc_id`` column, keeps only
     rows for that system (aligned with ``read_srs_mdb``).
+
+    Frequencies are returned in GHz regardless of the unit the file stores —
+    see :func:`_mask_info_freq_to_ghz`.
     """
     rows = _run_mdb_export(mdb_path, "mask_info")
     ntc_f = str(ntc_id).strip().strip('"') if ntc_id else None
     masks = []
+    rescaled = 0
     for row in rows:
         if ntc_f is not None:
             row_ntc = row.get("ntc_id", "").strip().strip('"')
             if row_ntc and row_ntc != ntc_f:
                 continue
+        raw_min = _parse_float(row.get("freq_min", "0"))
+        raw_max = _parse_float(row.get("freq_max", "0"))
+        freq_min_ghz = _mask_info_freq_to_ghz(raw_min)
+        freq_max_ghz = _mask_info_freq_to_ghz(raw_max)
+        if freq_min_ghz != raw_min or freq_max_ghz != raw_max:
+            rescaled += 1
         masks.append(SRSMaskInfo(
             mask_id=_parse_int(row.get("mask_id", "0")),
-            freq_min_ghz=_parse_float(row.get("freq_min", "0")),
-            freq_max_ghz=_parse_float(row.get("freq_max", "0")),
+            freq_min_ghz=freq_min_ghz,
+            freq_max_ghz=freq_max_ghz,
             f_mask=row.get("f_mask", "").strip().strip('"'),
             f_mask_type=row.get("f_mask_type", "").strip().strip('"'),
         ))
+    if rescaled:
+        logger.info(
+            "mask_info: %d row(s) held MHz (S.1503-4 / EPS V41 structure); "
+            "converted to GHz.", rescaled,
+        )
     return masks
 
 
