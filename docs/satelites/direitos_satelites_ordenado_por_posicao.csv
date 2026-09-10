@@ -1,0 +1,124 @@
+﻿Código do Direito (Code);Posição Orbital (Orbital slot);Banda do satélite exercendo o direito (Satellite Band);Satélite (Satellite);Operadora (Operator);Tipo de Direito (Type of landing right);Status;Data de lançamento (Launch date);Validade (Validity);Direito prorrogado (Landing right postponed);posicao_orb_docs_portal_decimal
+-98L;98ºO;L;INMARSAT-4 F3;MARLINK SAS;Estrangeiro;operação comercial;18/08/2008;31/12/2033;SIM;-98
+-98L;98ºO;L;INMARSAT-4 F3;INMARSAT SOLUTIONS (CANADA) INC.;Estrangeiro;operação comercial;18/08/2008;31/12/2033;SIM;-98
+-98L;98ºO;L;INMARSAT-4 F3;INMARSAT SOLUTIONS B.V.;Estrangeiro;operação comercial;18/08/2008;31/12/2033;SIM;-98
+-95,2Ka;95,2ºO;Ka;JUPITER 3;HUGUES NETWORK SYSTEMS LLC;Estrangeiro;operação comercial;a ser lançado;25/06/2035;NÃO;-95,2
+-95Ku;95,05ºO;Ku (não planejada);IS-30;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;16/10/2014;18/10/2026;NÃO;-95,05
+-95Ku_3;95,05ºO;Ku (não planejada);IS-31;INTELSAT LICENSE LLC;Estrangeiro;CLASSIFICAR;08/06/2016;26/07/2031;NÃO;-95,05
+-89Ka;89ºO;Ka;ViaSat-3 (89W);VIASAT SATELLITE HOLDINGS, LTD.;Estrangeiro;operação comercial;a ser lançado;22/10/2036;NÃO;-89
+-89Ka;89ºO;Ka;ViaSat-3 (89W);"VIASAT INCORPORATED's";Estrangeiro;operação comercial;a ser lançado;22/10/2036;NÃO;-89
+-89CKU_3;88,7ºO;Ku (não planejada);GALAXY 28;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;31/07/2005;29/04/2030;NÃO;-88,7
+-89CKU_3;88,7ºO;C (não planejada);GALAXY 28;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;31/07/2005;29/04/2030;NÃO;-88,7
+-84KuKa;84ºO;Ka;STARONE D1;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;21/12/2016;06/02/2027;NÃO;-84
+-84C;84ºO;C (não planejada);STARONE D1;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;21/12/2016;31/12/2040;SIM;-84
+-84KuKa;84ºO;Ku (não planejada);STARONE D1;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;21/12/2016;06/02/2027;NÃO;-84
+-79Ka_2;79ºO;Ka;ViaSat-3 (79W);VIASAT SATELLITE HOLDINGS, LTD.;Estrangeiro;a ser lançado;a ser lançado;03/07/2040;NÃO;-79
+-75Ka;75ºO;Ka;SGDC;TELECOMUNICACOES BRASILEIRAS SA TELEBRAS;Brasileiro;operação comercial;04/05/2017;29/08/2029;NÃO;-75
+-75CKu;75ºO;Ku (não planejada);STARONE C3;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;10/11/2012;30/04/2029;SIM;-75
+-75CKu;75ºO;C (não planejada);STARONE C3;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;10/11/2012;30/04/2029;SIM;-75
+-74Ku3030A;74ºO;Ku (AP30/30A);HISPASAT 74W-1;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;22/03/2014;04/03/2031;NÃO;-74
+-70Ku;70ºO;Ku (não planejada);STARONE C4;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;15/07/2015;13/11/2033;SIM;-70
+-70Ku3030AKa;70ºO;Ku (AP30/30A);STARONE C4;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;15/07/2015;28/03/2027;NÃO;-70
+-70CX;70ºO;X;STARONE D2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;30/07/2021;31/12/2040;SIM;-70
+-70CX;70ºO;C (não planejada);STARONE D2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;30/07/2021;31/12/2040;SIM;-70
+-70Ku;70ºO;Ku (não planejada);STARONE D2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;30/07/2021;13/11/2033;SIM;-70
+-70Ku3030AKa;70ºO;Ka;STARONE D2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;30/07/2021;28/03/2027;NÃO;-70
+-68C;68ºO;N/D;ND;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;N/D;a ser lançado;31/12/2025;SIM;-68
+-67Ku;67ºO;Ku (não planejada);SES-10;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;30/03/2017;26/09/2038;SIM;-67
+-67Ka;67ºO;Ka;SES-17;SES ASTRA S.A.;Estrangeiro;operação comercial;a ser lançado;02/02/2036;NÃO;-67
+-65Ku;65ºO;Ku (não planejada);EUTELSAT 65 West A;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;08/03/2016;06/03/2033;SIM;-65
+-65C30BKu30BKa;65ºO;C (AP30B);EUTELSAT 65 West A;EUTELSAT DO BRASIL LTDA;Brasileiro;operação comercial;08/03/2016;05/06/2028;NÃO;-65
+-65C30BKu30BKa;65ºO;Ku (AP30B);EUTELSAT 65 West A;EUTELSAT DO BRASIL LTDA;Brasileiro;operação comercial;08/03/2016;05/06/2028;NÃO;-65
+-65C30BKu30BKa;65ºO;Ka;EUTELSAT 65 West A;EUTELSAT DO BRASIL LTDA;Brasileiro;operação comercial;08/03/2016;05/06/2028;NÃO;-65
+-65CX;65ºO;C (não planejada);STARONE C2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;17/04/2008;31/12/2032;SIM;-65
+-65Ku;65ºO;Ku (não planejada);STARONE C2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;17/04/2008;06/03/2033;SIM;-65
+-65CX;65ºO;X;STARONE C2;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;operação comercial;17/04/2008;31/12/2032;SIM;-65
+-63Ku;63ºO;Ku (não planejada);Estrela do Sul 2;TELESAT BRASIL CAPACIDADE DE SATÉLITES LTDA;Brasileiro;operação comercial;20/05/2011;31/12/2026;SIM;-63
+-63C;63ºO;N/D;ND;EMBRATEL TVSAT TELECOMUNICAÇÕES S.A.;Brasileiro;N/D;03/02/1998;31/12/2025;SIM;-63
+-63Ku;63ºO;Ku (não planejada);Telstar 19 Vantage;TELESAT BRASIL CAPACIDADE DE SATÉLITES LTDA;Brasileiro;operação comercial;22/07/2018;31/12/2037;NÃO;-63
+-63Ku30B;63ºO;Ku (AP30B);Telstar 19 Vantage;TELESAT BRASIL CAPACIDADE DE SATÉLITES LTDA;Brasileiro;operação comercial;22/07/2018;04/03/2031;NÃO;-63
+-63Ka;63ºO;Ka;Telstar 19 Vantage;TELESAT BRASIL CAPACIDADE DE SATÉLITES LTDA;Brasileiro;operação comercial;22/07/2018;04/03/2031;NÃO;-63
+-61KuKa;61ºO;Ka;AMAZONAS 3;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;07/02/2013;02/10/2030;SIM;-61
+-61KuKa;61ºO;Ku (não planejada);AMAZONAS 3;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;07/02/2013;02/10/2030;SIM;-61
+-61C;61ºO;C (não planejada);AMAZONAS 3;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;07/02/2013;31/03/2031;SIM;-61
+-61Ku3030A;61ºO;Ku (AP30/30A);AMAZONAS 5;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;12/09/2017;13/08/2029;NÃO;-61
+-61KuKa;61ºO;Ka;AMAZONAS 5;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;11/09/2017;02/10/2030;SIM;-61
+-61KuKa;61ºO;Ka;AMAZONAS NEXUS;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;07/02/2023;02/10/2030;SIM;-61
+-61Ku30B;61ºO;Ku (AP30B);AMAZONAS NEXUS;HISPASAT S.A.;Estrangeiro;operação comercial;07/02/2023;03/03/2038;NÃO;-61
+-61KuKa;61ºO;Ku (não planejada);AMAZONAS NEXUS;HISPAMAR SATELITES S.A.;Brasileiro;operação comercial;07/02/2023;02/10/2030;SIM;-61
+-58CKu_2;58ºO;Ku (não planejada);IS-21;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;19/08/2012;03/10/2027;NÃO;-58
+-58CKu_2;58ºO;C (não planejada);IS-21;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;19/08/2012;03/10/2027;NÃO;-58
+-55,5CKu;55,5ºO;Ku (não planejada);IS-34;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;18/08/2015;02/10/2030;SIM;-55,5
+-55,5CKu;55,5ºO;C (não planejada);IS-34;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;18/08/2015;02/10/2030;SIM;-55,5
+-55Ka;55ºO;Ka;Global Xpress;INMARSAT GLOBAL LIMITED;Estrangeiro;operação comercial;18/08/2018;16/06/2033;SIM;-55
+-54L_4;54ºO;L;INMARSAT-3 AOR WEST;MARLINK SAS;Estrangeiro;operação comercial;03/06/1997;31/12/2028;NÃO;-54
+-54L_4;54ºO;L;INMARSAT-3 AOR WEST;INMARSAT SOLUTIONS (CANADA) INC.;Estrangeiro;operação comercial;03/06/1997;31/12/2028;NÃO;-54
+-54L_3;54ºO;L;INMARSAT-4 F1;INMARSAT SOLUTIONS (CANADA) INC.;Estrangeiro;pendente licença estação espacial;11/03/2005;31/12/2028;NÃO;-54
+-47,5CKuKa;47,5ºO;Ka;SES-14;SES DTH DO BRASIL LTDA;Brasileiro;operação comercial;25/01/2018;13/08/2029;NÃO;-47,5
+-47,5CKuKa;47,5ºO;Ku (não planejada);SES-14;SES DTH DO BRASIL LTDA;Brasileiro;operação comercial;25/01/2018;13/08/2029;NÃO;-47,5
+-47,5CKuKa;47,5ºO;C (não planejada);SES-14;SES DTH DO BRASIL LTDA;Brasileiro;operação comercial;25/01/2018;13/08/2029;NÃO;-47,5
+-45C;45ºO;C (não planejada);IS-14;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;23/11/2009;13/12/2029;SIM;-45
+-43,1KuKu30B;43,1ºO;Ku (AP30B);SKY-B1;DIRECTV LATIN AMERICA LLC;Estrangeiro;operação comercial;01/02/2017;28/03/2032;NÃO;-43,1
+-43,1KuKu30B;43,1ºO;Ku (não planejada);SKY-B1;DIRECTV LATIN AMERICA LLC;Estrangeiro;operação comercial;01/02/2017;28/03/2032;NÃO;-43,1
+-40,5CC30BKu;40,5ºO;C (AP30B);SES-6;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;06/04/2013;12/06/2028;NÃO;-40,5
+-40,5CC30BKu;40,5ºO;C (não planejada);SES-6;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;06/04/2013;12/06/2028;NÃO;-40,5
+-40,5CC30BKu;40,5ºO;Ku (não planejada);SES-6;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;06/04/2013;12/06/2028;NÃO;-40,5
+-36Ku;36ºO;Ku (não planejada);HISPASAT 36W-1;HISPASAT S.A.;Estrangeiro;operação comercial;27/01/2017;05/02/2031;NÃO;-36
+-34,5C;34,5ºO;C (não planejada);IS-35e;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;05/07/2017;16/08/2032;SIM;-34,5
+-30C30BKu30BKu;30ºO;C (AP30B);HISPASAT 30W-6;HISPASAT S.A.;Estrangeiro;operação comercial;06/03/2018;05/08/2033;SIM;-30
+-30C30BKu30BKu;30ºO;Ku (não planejada);HISPASAT 30W-6;HISPASAT S.A.;Estrangeiro;operação comercial;06/03/2018;05/08/2033;SIM;-30
+-30C30BKu30BKu;30ºO;Ku (AP30B);HISPASAT 30W-6;HISPASAT S.A.;Estrangeiro;operação comercial;06/03/2018;05/08/2033;SIM;-30
+-22CKu;22ºO;Ku (não planejada);SES-4;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;14/02/2012;30/06/2029;SIM;-22
+-22CKu;22ºO;C (não planejada);SES-4;NEW SKIES SATELLITES B.V.;Estrangeiro;operação comercial;14/02/2012;30/06/2029;SIM;-22
+-20Ka;20ºO;Ka;AL YAH 3;HUGHES TELECOMUNICAÇÕES DO BRASIL LTDA.;Brasileiro;operação comercial;25/01/2018;04/03/2031;NÃO;-20
+-20CKu;20ºO;Ku (não planejada);NSS7;NEW SKIES SATELLITES B.V.;Estrangeiro;De-orbit;15/04/2002;12/08/2034;SIM;-20
+-20CKu;20ºO;C (não planejada);NSS7;NEW SKIES SATELLITES B.V.;Estrangeiro;De-orbit;15/04/2002;12/08/2034;SIM;-20
+-18CKu;18ºO;C (não planejada);IS-37e;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;29/09/2017;07/03/2033;SIM;-18
+-18CKu;18ºO;Ku (não planejada);IS-37e;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;29/09/2017;07/03/2033;SIM;-18
+-15Ku;15ºO;Ku (não planejada);Telstar 12V;SKYNET SATELLITE CORPORATION;Estrangeiro;operação comercial;24/11/2015;05/01/2031;SIM;-15
+-14C_1;14ºO;Ku (não planejada);EXPRESS AM8;RUSSIAN SATELLITE COMMUNICATIONS COMPANY (RSCC);Estrangeiro;operação comercial;13/09/2015;01/12/2033;NÃO;-14
+-14C_1;14ºO;C (não planejada);EXPRESS AM8;RUSSIAN SATELLITE COMMUNICATIONS COMPANY (RSCC);Estrangeiro;operação comercial;13/09/2015;01/12/2033;NÃO;-14
+-8CKu;8ºO;C (não planejada);EUTELSAT 8 WEST B;EUTELSAT S/A;Estrangeiro;operação comercial;19/08/2015;24/06/2034;SIM;-8
+-8CKu;8ºO;Ku (não planejada);EUTELSAT 8 WEST B;EUTELSAT S/A;Estrangeiro;operação comercial;19/08/2015;24/06/2034;SIM;-8
+-3KuC;3ºO;C (não planejada);ABS-3A;ABS SINGAPORE SATELLITE PTE. LTD.;Estrangeiro;operação comercial;03/01/2015;24/12/2030;SIM;-3
+-3KuC;3ºO;Ku (não planejada);ABS-3A;ABS SINGAPORE SATELLITE PTE. LTD.;Estrangeiro;operação comercial;03/01/2015;24/12/2030;SIM;-3
+-1C;1ºO;C (não planejada);IS 10-02;INTELSAT LICENSE LLC;Estrangeiro;operação comercial;16/06/2004;31/12/2026;NÃO;-1
+3CKa;3ºL;C (não planejada);EUTELSAT 3B;EUTELSAT S/A;Estrangeiro;operação comercial;26/05/2014;24/10/2029;NÃO;3
+3CKa;3ºL;Ka;EUTELSAT 3B;EUTELSAT S/A;Estrangeiro;operação comercial;26/05/2014;24/10/2029;NÃO;3
+IRI-L;NGEO;L;IRIDIUM;IRIDIUM SATELLITE LLC;Estrangeiro;operação comercial;a ser lançado;23/02/2032;SIM;NGEO
+A4A-UHF;NGEO;VHF/UHF;Sistema Argos-4A;KINÉIS SAS;Estrangeiro;pendente licença estação espacial;a ser lançado;02/05/2039;NÃO;NGEO
+ECH-S;NGEO;S;Sistema Echostar Global;ECHOSTAR GLOBAL AUSTRALIA PTY;Estrangeiro;pendente licença estação espacial;a ser lançado;05/06/2029;NÃO;NGEO
+GLO-CSL;NGEO;C (não planejada);Sistema Globalstar;GLOBALSTAR LICENSEE LLC;Estrangeiro;operação comercial;a ser lançado;30/09/2039;SIM;NGEO
+GLO-CSL;NGEO;S;Sistema Globalstar;GLOBALSTAR LICENSEE LLC;Estrangeiro;operação comercial;a ser lançado;30/09/2039;SIM;NGEO
+GLO-CSL;NGEO;L;Sistema Globalstar;GLOBALSTAR LICENSEE LLC;Estrangeiro;operação comercial;a ser lançado;30/09/2039;SIM;NGEO
+KPL-LSKu;NGEO;Ku (AP30B);Sistema Kepler;KEPLER COMMUNICATIONS INC.;Estrangeiro;operação comercial;a ser lançado;20/01/2037;NÃO;NGEO
+KPL-LSKu;NGEO;L;Sistema Kepler;KEPLER COMMUNICATIONS INC.;Estrangeiro;operação comercial;a ser lançado;20/01/2037;NÃO;NGEO
+KPL-LSKu;NGEO;Ku (AP30/30A);Sistema Kepler;KEPLER COMMUNICATIONS INC.;Estrangeiro;operação comercial;a ser lançado;20/01/2037;NÃO;NGEO
+KPL-LSKu;NGEO;Ku (não planejada);Sistema Kepler;KEPLER COMMUNICATIONS INC.;Estrangeiro;operação comercial;a ser lançado;20/01/2037;NÃO;NGEO
+KPL-LSKu;NGEO;S;Sistema Kepler;KEPLER COMMUNICATIONS INC.;Estrangeiro;operação comercial;a ser lançado;20/01/2037;NÃO;NGEO
+KNS-UHF;NGEO;VHF/UHF;Sistema Kinéis;KINÉIS SAS;Estrangeiro;pendente licença estação espacial;a ser lançado;30/01/2039;NÃO;NGEO
+KUP-Ka;NGEO;Ka;Sistema Kuiper;KUIPER SYSTEMS LLC;Estrangeiro;sistema licenciado;a ser lançado;20/12/2027;NÃO;NGEO
+MYT-S;NGEO;VHF/UHF;Sistema Myriota;MYRIOTA PTY. LTD.;Estrangeiro;pendente licença estação espacial;a ser lançado;05/02/2040;NÃO;NGEO
+O3B-Ka;NGEO;Ka;Sistema O3B;ASTRA (GB) LIMITED;Estrangeiro;operação comercial;24/06/2013;02/11/2038;SIM;NGEO
+OMN-S;NGEO;S;Sistema Omnispace F2;OMNISPACE LLC;Estrangeiro;operação comercial;a ser lançado;25/09/2028;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (AP30/30A);Sistema Oneweb;ONEWEB LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ka;Sistema Oneweb;ONEWEB LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (AP30B);Sistema Oneweb;ONEWEB LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (não planejada);Sistema Oneweb;ONEWEB LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (AP30B);Sistema Oneweb;WORLDVU SATELLITES LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (não planejada);Sistema Oneweb;WORLDVU SATELLITES LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ku (AP30/30A);Sistema Oneweb;WORLDVU SATELLITES LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+OWB-KuKa;NGEO;Ka;Sistema Oneweb;WORLDVU SATELLITES LIMITED;Estrangeiro;operação comercial;27/02/2019;18/07/2037;NÃO;NGEO
+ORB-VHF;NGEO;VHF/UHF;Sistema Orbcomm;ORBCOMM INC.;Estrangeiro;operação comercial;a ser lançado;11/04/2040;SIM;NGEO
+SLT-S;NGEO;S;Sistema Sateliot;SATELIO IOT SERVICES S.L.;Estrangeiro;pendente licença estação espacial;a ser lançado;31/01/2030;NÃO;NGEO
+SEM-VHF;NGEO;VHF/UHF;Sistema Semaphore;E-SPACE AFRICA LIMITED;Estrangeiro;pendente licença estação espacial;a ser lançado;11/09/2029;NÃO;NGEO
+SMB-SQV;NGEO;Q/V;Sistema Spacemobile;AST & SCIENCE, LLC;Estrangeiro;pendente licença estação espacial;a ser lançado;19/09/2039;NÃO;NGEO
+SMB-SQV;NGEO;S;Sistema Spacemobile;AST & SCIENCE, LLC;Estrangeiro;pendente licença estação espacial;a ser lançado;19/09/2039;NÃO;NGEO
+SPS-KuQV;NGEO;Ku (não planejada);Sistema Spacesail;SHANGHAI SPACESAIL TECHNOLOGIES CO. LTD.;Estrangeiro;sistema licenciado;a ser lançado;31/07/2031;NÃO;NGEO
+SPS-KuQV;NGEO;Q/V;Sistema Spacesail;SHANGHAI SPACESAIL TECHNOLOGIES CO. LTD.;Estrangeiro;sistema licenciado;a ser lançado;31/07/2031;NÃO;NGEO
+SLK-KuKaE;NGEO;Ku (não planejada);Sistema Starlink;SPACE EXPLORATION HOLDINGS, LLC;Estrangeiro;operação comercial;23/05/2019;28/03/2027;NÃO;NGEO
+SLK-KuKaE;NGEO;E;Sistema Starlink;SPACE EXPLORATION HOLDINGS, LLC;Estrangeiro;operação comercial;23/05/2019;28/03/2027;NÃO;NGEO
+SLK-KuKaE;NGEO;Ku (AP30/30A);Sistema Starlink;SPACE EXPLORATION HOLDINGS, LLC;Estrangeiro;operação comercial;23/05/2019;28/03/2027;NÃO;NGEO
+SLK-KuKaE;NGEO;Ka;Sistema Starlink;SPACE EXPLORATION HOLDINGS, LLC;Estrangeiro;operação comercial;23/05/2019;28/03/2027;NÃO;NGEO
+SLK-KuKaE;NGEO;Ku (AP30B);Sistema Starlink;SPACE EXPLORATION HOLDINGS, LLC;Estrangeiro;operação comercial;23/05/2019;28/03/2027;NÃO;NGEO
+TLS-Ka;NGEO;Ka;Sistema Telesat Lightspeed;TELESAT LEO ULC;Estrangeiro;a ser lançado;a ser lançado;31/03/2036;NÃO;NGEO

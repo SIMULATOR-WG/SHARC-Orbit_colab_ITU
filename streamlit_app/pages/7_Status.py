@@ -63,7 +63,7 @@ def _status_block() -> None:
     st.markdown(theme.pill(cur["status"].upper(), status_color), unsafe_allow_html=True)
     st.progress(min(1.0, max(0.0, (cur.get("progress_pct") or 0) / 100.0)))
     st.caption(
-        f"run_id `{cur['id']}` · type `{storage.display_kind(cur['kind'])}` · method `{cur.get('method') or '—'}`"
+        f"run_id `{cur['id']}` · type `{storage.display_kind(cur['kind'])}` · method `{storage.display_method(cur.get('method'))}`"
         f" · progress {(cur.get('progress_pct') or 0):.1f}%"
     )
     if cur.get("error_message"):

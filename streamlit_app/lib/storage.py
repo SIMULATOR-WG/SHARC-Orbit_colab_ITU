@@ -108,12 +108,19 @@ def fmt_local(
 
 
 _KIND_LEGACY_MAP = {"s1503": "single", "s1588": "aggregate"}
+_METHOD_DISPLAY_MAP = {"country_constrained": "territorial"}
 
 
 def display_kind(kind: str | None) -> str:
     if not kind:
         return "—"
     return _KIND_LEGACY_MAP.get(kind, kind)
+
+
+def display_method(method: str | None) -> str:
+    if not method:
+        return "—"
+    return _METHOD_DISPLAY_MAP.get(method, method)
 
 
 def _conn() -> sqlite3.Connection:

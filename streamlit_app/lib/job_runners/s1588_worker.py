@@ -254,8 +254,10 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
         raise NotImplementedError(
             "This filing declares MIN_DURATION != 0 (S.1503-4 §D5.1.4.2 "
             "track-duration variant). That variant is supported only in the "
-            "single-entry EPFD↓ run, not in aggregate/S.1588 studies. "
-            "Run it via Single-entry, or use a filing with MIN_DURATION=0."
+            "single-entry WCGA EPFD↓ run, not in aggregate/S.1588 studies "
+            "or the Single-entry ES×GSO grid. "
+            "Run it via Single-entry with S.1503-4 WCGA, or use a filing "
+            "with MIN_DURATION=0."
         )
 
     sim = cfg.setdefault("simulation", {})
@@ -2090,10 +2092,17 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
                     _a22["frequency_run_ghz"] = float(_fr)
                     _a22["frequency_run_mhz"] = float(_fr) * 1000.0
                 out["article22"] = _a22
-            if res76:
+            # Res. 76 is an aggregate limit. Single-entry grid (N=1) is
+            # judged against Article 22 only.
+            if res76 and params.get("study_mode") != "single_grid":
                 out["resolution76"] = {k: res76[k] for k in res76 if k != "_full_table"}
         except Exception as exc:  # noqa: BLE001
             _emit(f"WARN: could not attach Art22/Res76 limits: {exc}")
+
+    if params.get("study_mode"):
+        out["study_mode"] = params["study_mode"]
+    if params.get("study_mode") == "single_grid":
+        out["kind"] = "single"
 
     hardware = hwinfo.run_hardware()
     timing = hwinfo.run_timing(_started_at, _t0)

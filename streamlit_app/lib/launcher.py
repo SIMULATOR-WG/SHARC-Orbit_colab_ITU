@@ -97,11 +97,11 @@ def launch_s1503(*, system_id: str, params: dict[str, Any]) -> str:
 
 
 def launch_country_wcg(*, system_id: str, params: dict[str, Any]) -> str:
-    """Launch a country-constrained single-entry run.
+    """Launch a territorial single-entry run.
 
     Runs the same S.1503-4 WCGA + EPFD↓ pipeline as Single-entry, with the
-    WCGA ES domain restricted to ``params['country_codes']``. Aggregate /
-    Single-entry leave that filter unset and are unchanged.
+    WCGA ES domain restricted to ``params['country_codes']``. Single-entry
+    calls this when the user picks countries under Geometry → WCGA.
     """
     sys_row = _system_to_filing(system_id)
     if not sys_row:
@@ -175,8 +175,15 @@ def launch_s1503_manual(*, manual_cfg: dict[str, Any],
 
 
 def launch_s1588(*, method: str, system_ids: list[str],
-                  params: dict[str, Any], campaign_id: str | None = None) -> str:
-    """Launch a multi-system S.1588 run for the listed system_ids."""
+                  params: dict[str, Any], campaign_id: str | None = None,
+                  kind: str = "aggregate") -> str:
+    """Launch an S.1588 worker for the listed system_ids.
+
+    ``kind`` defaults to ``aggregate`` (Resolution 76). Single-entry's
+    ES×GSO grid path uses ``kind="single"`` with ``method="method_2"``
+    and ``params['study_mode']="single_grid"`` so Runs/Results treat it
+    as one filing without WCGA.
+    """
     filings_payload = []
     for sid in system_ids:
         row = _system_to_filing(sid)
@@ -186,8 +193,14 @@ def launch_s1588(*, method: str, system_ids: list[str],
     if not filings_payload:
         raise ValueError("no valid systems provided")
 
+    # Single-filing Art. 22 leaf: pin the same mask_id onto every filing
+    # row (N=1 in the grid path). Aggregate never sets mask_id.
+    if params.get("mask_id") is not None:
+        for row in filings_payload:
+            row["mask_id"] = params["mask_id"]
+
     payload = dict(params, method=method, filings=filings_payload, system_ids=system_ids)
-    run_id = storage.create_run(kind="aggregate", method=method, params=payload,
+    run_id = storage.create_run(kind=kind, method=method, params=payload,
                                   campaign_id=campaign_id)
     pp = _params_path(run_id)
     pp.parent.mkdir(parents=True, exist_ok=True)

@@ -123,11 +123,19 @@ st.markdown(
     "See [Mask Viewer](#mask-viewer)."
 )
 st.markdown(
-    "**Single-entry** — Run **ITU-R S.1503-4** (WCG search + EPFD↓ "
-    "simulation + Article 22 compliance) on one system. Advanced options "
-    "expose the §D.3.1 WCGA grid step, §D.4.7 dual time step, and the "
-    "manual WCG override. Form labels are human-readable; the engine key "
-    "for each field is shown in its tooltip."
+    "**Single-entry** — Run **ITU-R S.1503-4** on one system. Geometry "
+    "is the §D.3.1 WCGA (select countries to restrict the ES domain — "
+    "territorial WCGA + RAAN sweep), a defined ES/GSO point, or the "
+    "**ES×GSO grid** (same algorithm as Aggregate method 2, no WCGA; "
+    "countries optional). Advanced options expose the WCGA grid step, "
+    "§D.4.7 dual time step, and orbital dynamics."
+)
+st.markdown(
+    "**Brazil occupancy** — survey of licensed / filed frequency "
+    "occupancy in Brazil. Refresh pulls Anatel `satelites.zip` and the "
+    "latest Space IFIC SNS from ITU. Selecting systems shows occupied "
+    "bands on the same shared-axis strip chart as Aggregate, including "
+    "the **common overlap**."
 )
 st.markdown(
     "**Aggregate** — Run a multi-system aggregation study with one of "

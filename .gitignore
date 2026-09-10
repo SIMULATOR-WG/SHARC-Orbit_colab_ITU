@@ -58,6 +58,7 @@ streamlit_app/data/runs/
 streamlit_app/data/uploads/
 streamlit_app/data/state_*.json
 streamlit_app/data/cluster.json
+streamlit_app/data/br_occupancy/
 *.MDB
 *.mdb
 # …but keep the SRS/EPFD test fixtures under docs/ tracked
@@ -66,6 +67,11 @@ streamlit_app/data/cluster.json
 # Large downloaded ITU filing fixtures — fetched from a GitHub release, not tracked
 docs/test_data/NGSO_CRC_filings/
 docs/test_data/STEAM_2-CRC-Notice_ID-121520026-IFIC-2985/
+
+# BR IFIC ISO / ITU bookshop zip (several GB, local only)
+docs/*.iso
+docs/R-SP-LN*.zip
+docs/S_IFIC*
 
 # Local-only filing archives / scraper / bulk-import tooling — not tracked
 /Fillings/

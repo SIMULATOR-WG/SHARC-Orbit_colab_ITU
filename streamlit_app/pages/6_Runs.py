@@ -51,30 +51,60 @@ def _load_config(run: dict) -> None:
         # Article 22 scenario (carried so reload reproduces the exact run).
         "reference_bandwidth_khz", "simulation_frequency_ghz",
     ]
-    if run["kind"] == "single" and (
-        run.get("method") == "country_constrained"
-        or params.get("study_mode") == "country_constrained"
-    ):
+    if run["kind"] == "single" and params.get("study_mode") == "single_grid":
         keys = common_keys + [
-            "mask_id", "country_codes",
+            "grid_step_deg", "gso_pointing_step_deg", "n_geom_max",
+            "country_codes", "mask_id",
             "s1503_trail_all_points", "restrict_emitters_to_sim_band",
-            "disable_gso_min_elevation", "min_duration_s",
+            "disable_gso_min_elevation",
         ]
         state = {k: params[k] for k in keys if k in params}
-        state["system_id"] = params.get("system_id")
+        state["system_id"] = params.get("system_id") or (
+            (params.get("system_ids") or [None])[0]
+        )
+        state["geom_mode"] = "grid"
+        state["wcg_manual"] = False
+        state["wcga_s1503"] = False
         state["artificial_prec_mode"] = ap_mode
         if any(state.get(k) is not None for k in
                ("reference_bandwidth_khz", "simulation_frequency_ghz",
                 "mask_id")):
             state["art22_from_reload"] = True
-        set_persisted_state("country_wcg.form", state)
+        set_persisted_state("s1503.form", state)
+        sid = state.get("system_id")
+        if sid and sid not in _valid:
+            st.toast("Original filing was deleted — pick a system.",
+                     icon=":material/warning:")
+        elif sid:
+            set_current_system_id(sid)
+        st.switch_page("pages/3_Single_entry.py")
+    elif run["kind"] == "single" and (
+        run.get("method") == "country_constrained"
+        or params.get("study_mode") == "country_constrained"
+    ):
+        keys = common_keys + [
+            "mask_id", "country_codes", "country_raan_sweep",
+            "s1503_trail_all_points", "restrict_emitters_to_sim_band",
+            "disable_gso_min_elevation", "min_duration_s",
+        ]
+        state = {k: params[k] for k in keys if k in params}
+        state["system_id"] = params.get("system_id")
+        state["geom_mode"] = "wcga"
+        state["wcg_manual"] = False
+        state["wcga_s1503"] = True
+        state["artificial_prec_mode"] = ap_mode
+        if any(state.get(k) is not None for k in
+               ("reference_bandwidth_khz", "simulation_frequency_ghz",
+                "mask_id")):
+            state["art22_from_reload"] = True
+        set_persisted_state("s1503.form", state)
         sid = params.get("system_id")
         if sid and sid not in _valid:
             st.toast("Original filing was deleted — pick a system.",
                      icon=":material/warning:")
         elif sid:
             set_current_system_id(sid)
-        st.switch_page("pages/G_Country_Single_entry.py")
+        st.switch_page("pages/3_Single_entry.py")
     elif run["kind"] == "single":
         keys = common_keys + [
             "s1503_trail_all_points", "wcg_manual",
@@ -84,6 +114,7 @@ def _load_config(run: dict) -> None:
         state = {k: params[k] for k in keys if k in params}
         state["system_id"] = params.get("system_id")
         state["artificial_prec_mode"] = ap_mode
+        state["geom_mode"] = "defined" if params.get("wcg_manual") else "wcga"
         # Flag the carried Art.22 scenario as coming from an explicit reload —
         # the form pages only pre-enable "Apply reloaded Article 22 scenario"
         # for this flow (not for values left over from an old launch).
@@ -393,7 +424,7 @@ for r in rows:
         if _ntc:
             st.caption(f"ntc {_ntc}")
     cols[2].write(storage.display_kind(r["kind"]))
-    cols[3].write(r.get("method") or "—")
+    cols[3].write(storage.display_method(r.get("method")))
     status = r["status"]
     status_color = {
         "success": ":green[",
@@ -451,7 +482,7 @@ sel = st.selectbox(
     "Inspect / delete run",
     options=_options,
     index=(_options.index(_default_pick) if _default_pick in _options else 0),
-    format_func=lambda i: f"{i} · {storage.display_kind(next((r['kind'] for r in rows if r['id']==i), ''))} · {next((r.get('method') or '—' for r in rows if r['id']==i), '')}",
+    format_func=lambda i: f"{i} · {storage.display_kind(next((r['kind'] for r in rows if r['id']==i), ''))} · {storage.display_method(next((r.get('method') for r in rows if r['id']==i), None))}",
     key="inspect_pick",
 )
 if sel:

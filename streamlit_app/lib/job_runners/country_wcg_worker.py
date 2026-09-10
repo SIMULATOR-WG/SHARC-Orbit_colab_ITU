@@ -1,4 +1,4 @@
-"""Country-constrained single-entry worker.
+"""Territorial single-entry worker.
 
 Usage:
     python -m streamlit_app.lib.job_runners.country_wcg_worker <params.json>
@@ -143,7 +143,7 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         meta["filing_rpt_period_days"] = float(det["rpt_period_days"])
 
     _emit(
-        f"Country-constrained WCGA: countries={codes} · "
+        f"Territorial WCGA: countries={codes} · "
         f"RAAN sweep={sweep_label} "
         f"(mode={det.get('mode')}, mixed={mixed}, "
         f"repeating_planes={n_rep}, non_repeating_planes={n_non}, "

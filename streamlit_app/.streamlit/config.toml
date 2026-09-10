@@ -8,7 +8,7 @@ enableStaticServing = true
 showEmailPrompt = false
 runOnSave = true
 fileWatcherType = "auto"
-maxUploadSize = 1024
+maxUploadSize = 2048
 
 [browser]
 gatherUsageStats = false

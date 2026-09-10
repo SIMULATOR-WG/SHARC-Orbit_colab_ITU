@@ -45,7 +45,7 @@ def _wcga_remote_task(worker_fn: Callable, args: tuple, init: dict[str, Any]) ->
             _w.set_alpha_method(alpha_method)
         except Exception:  # noqa: BLE001
             pass
-    # Optional country-constrained ES domain (country single-entry only).
+    # Optional territorial ES domain (territorial single-entry only).
     country_codes = init.get("country_codes") or ""
     if country_codes:
         os.environ["WCG_COUNTRY_CODES"] = str(country_codes)

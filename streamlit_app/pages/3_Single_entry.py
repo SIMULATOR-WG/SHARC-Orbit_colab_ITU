@@ -82,15 +82,21 @@ _ALPHA_DESC = {
     "sweep": "Numerical sweep over α (slower, robust near singular geometries).",
     "analytical": "Closed-form α per S.1503-4 §D (faster, requires regular geometry).",
 }
-_WCG_SOURCE_OPTS = ["S.1503-4 WCGA", "Defined geometry"]
+_WCG_SOURCE_OPTS = ["S.1503-4 WCGA", "Defined geometry", "ES×GSO grid (no WCGA)"]
 _WCG_SOURCE_DESC = {
     "S.1503-4 WCGA": (
         "Normative search per S.1503-4 §D.3 (latitude + θ/φ grid). "
-        "Engine: `wcga_s1503=True`, `wcg_manual=False`."
+        "Select countries below to restrict the ES domain (territorial "
+        "WCGA + RAAN sweep). Engine: `wcga_s1503=True`."
     ),
     "Defined geometry": (
         "Skip the WCGA and run EPFD↓ at the ES / GSO coordinates in "
         "section 4. Engine: `wcg_manual=True`, `wcga_s1503=False`."
+    ),
+    "ES×GSO grid (no WCGA)": (
+        "Same algorithm as Aggregate method 2 on this one filing: EPFD↓ "
+        "at every ES×GSO grid point, envelope = worst CCDF. Optional "
+        "country filter. Engine: `method_2`, `study_mode=single_grid`."
     ),
 }
 _DUAL_TS_DESC = {
@@ -124,6 +130,16 @@ _ARTIFICIAL_PREC_DESC = {
     "on": "Force artificial RAAN precession on.",
     "off": "Force artificial RAAN precession off.",
 }
+_RAAN_SWEEP_DESC = {
+    "auto": (
+        "Per orbit from the filing (S.1503 §D4.6.1): each repeating shell "
+        "(f_stn_keep=Y and rpt_period ≥ 1 h) → Ω sweep OFF; each "
+        "non-repeating shell → ON. ΔΩ (from the winner) rotates all ON "
+        "orbits together; OFF / repeating shells keep filed RAAN."
+    ),
+    "on": "Force Ω sweep + ΔΩ for every orbit (even locked repeating tracks).",
+    "off": "Force Ω sweep OFF for every orbit — keep filed RAAN (ES filter only).",
+}
 
 st.set_page_config(page_title="Single-entry · SHARC-Orbit", page_icon=":material/looks_one:", layout="wide")
 theme.inject()
@@ -131,7 +147,7 @@ theme.inject()
 st.title("Single-entry EPFD↓")
 help_expander("single_entry")
 tour.maybe_render("single_entry")
-st.caption("ITU-R S.1503-4 — WCGA search + EPFD↓ simulation + Article 22 compliance.")
+st.caption("ITU-R S.1503-4 — WCGA (optional territorial ES) or ES×GSO grid + EPFD↓ + Article 22.")
 
 systems = storage.list_systems()
 orphans = storage.list_orphan_uploads()
@@ -180,6 +196,12 @@ prev = use_persisted_state("s1503.form", {
     "wcg_manual_es_lat": "",
     "wcg_manual_es_lon": "",
     "wcg_manual_gso_lon": "",
+    "geom_mode": "wcga",
+    "grid_step_deg": 30.0,
+    "gso_pointing_step_deg": 30.0,
+    "n_geom_max": 50000,
+    "country_codes": [],
+    "country_raan_sweep": "auto",
 })
 if not prev.get("_full_theta_default_v1"):
     prev = dict(prev)
@@ -392,13 +414,174 @@ if _carried_art22 is not None:
         icon=":material/warning:",
     )
 
-# When an Article 22 scenario leaf is picked in section 1, mirror its
-# Service + ES antenna into the section-2 widgets so they show what will run.
 _forced_service = str(art22_leaf["service"]).upper() if art22_leaf is not None else None
 _forced_diam_m = float(art22_leaf["rf_diam_m"]) if art22_leaf is not None else None
 
+# Geometry source lives OUTSIDE the form so grid / WCGA widgets appear
+# immediately (widgets inside st.form do not rerun until submit).
+st.subheader("2. Geometry")
+_geom_idx = 0
+if prev.get("geom_mode") == "grid":
+    _geom_idx = 2
+elif prev.get("geom_mode") == "defined" or prev.get("wcg_manual"):
+    _geom_idx = 1
+geom_mode = select_described(
+    "Geometry",
+    _WCG_SOURCE_OPTS, _WCG_SOURCE_DESC,
+    index=_geom_idx,
+    help="WCGA = S.1503-4 §D.3.1. Defined geometry = one ES/GSO point. "
+         "ES×GSO grid = Aggregate method 2 on this filing (no WCGA).",
+)
+use_grid = geom_mode.startswith("ES×GSO")
+wcga_s1503 = geom_mode == "S.1503-4 WCGA"
+wcg_manual = geom_mode == "Defined geometry"
+
+# Defaults for knobs that live in expanders skipped in grid mode.
+s1503_step = str(prev.get("s1503_step_deg") or "")
+wcga_no_mask_symmetry = bool(prev.get("wcga_no_mask_symmetry", True))
+s1503_trail = bool(prev.get("s1503_trail_all_points", False))
+gso_lon_mode = prev.get("gso_longitude_mode") or "arc_optimal"
+alpha_method = prev.get("alpha_method") or "analytical"
+emulate_s1503_2 = False
+apply_table8_egso = not bool(prev.get("disable_gso_min_elevation", False))
+wm_es_lat = str(prev.get("wcg_manual_es_lat") or "")
+wm_es_lon = str(prev.get("wcg_manual_es_lon") or "")
+wm_gso_lon = str(prev.get("wcg_manual_gso_lon") or "")
+min_duration_s = str(prev.get("min_duration_s") or "")
+grid_step = str(prev.get("grid_step_deg") or "")
+gpts = str(prev.get("gso_pointing_step_deg") or "")
+n_geom = str(prev.get("n_geom_max") or "")
+country_codes: list[str] = list(prev.get("country_codes") or [])
+_raan_prev = str(prev.get("country_raan_sweep") or "auto").lower()
+if _raan_prev in ("true", "1"):
+    _raan_prev = "on"
+elif _raan_prev in ("false", "0"):
+    _raan_prev = "off"
+if _raan_prev not in ("auto", "on", "off"):
+    _raan_prev = "auto"
+country_raan_sweep = _raan_prev
+use_territorial = False
+
+if use_grid:
+    st.info(
+        "Same ES×GSO grid as **Aggregate → method 2**: EPFD↓ at each "
+        "point, no WCGA. Headline CCDF is the worst-per-percentile "
+        "envelope. Empty country list = world-wide. Filings with "
+        "MIN_DURATION ≠ 0 are not supported on this path.",
+        icon=":material/grid_view:",
+    )
+    col_g1, col_g2, col_g3 = st.columns(3)
+    with col_g1:
+        grid_step = st.text_input(
+            "Grid step (°)",
+            value=str(prev.get("grid_step_deg") or ""),
+            placeholder="10 (typical)",
+            help="Engine key: `grid_step_deg`. ES lat/lon grid spacing. "
+                 "Smaller = finer (denser sims).",
+        )
+    with col_g2:
+        gpts = st.text_input(
+            "GSO pointing step (°)",
+            value=str(prev.get("gso_pointing_step_deg") or ""),
+            placeholder="same as grid",
+            help="Engine key: `gso_pointing_step_deg`. GSO satellite "
+                 "longitude grid spacing. Empty = same as Grid step.",
+        )
+    with col_g3:
+        n_geom = st.text_input(
+            "Max geometries",
+            value=str(prev.get("n_geom_max") or ""),
+            placeholder="50000",
+            help="Engine key: `n_geom_max`. Hard cap on grid point count "
+                 "to keep runtime bounded.",
+        )
+
+if not wcg_manual:
+    try:
+        from src.s1588_studies.countries import list_countries
+        _all_countries = list_countries()
+    except Exception:  # noqa: BLE001
+        _all_countries = []
+    _country_label = {c["id"]: f"{c['name']}  ({c['id']})"
+                      for c in _all_countries}
+    _default_codes = [
+        c for c in (prev.get("country_codes") or [])
+        if c in _country_label
+    ]
+    country_codes = st.multiselect(
+        "Restrict ES to countries (empty = world-wide)",
+        options=list(_country_label.keys()),
+        default=_default_codes,
+        format_func=lambda c: _country_label.get(c, c),
+        help="Engine key: `country_codes`. WCGA: worst-case ES must fall "
+             "inside at least one selected territory (territorial WCGA). "
+             "Grid: only ES points inside the polygons are simulated.",
+    )
+    if use_grid:
+        st.caption("Grid filter — empty selection simulates the world-wide ES×GSO grid.")
+    elif country_codes:
+        st.caption(
+            "Territorial WCGA — same §D.3.1 search as world-wide, with the "
+            "ES domain limited to the selected countries."
+        )
+    else:
+        st.caption("World-wide WCGA — S.1503-4 §D.3.1 unrestricted ES domain.")
+
+use_territorial = bool(wcga_s1503 and country_codes)
+if use_territorial:
+    from src.country_constrained_wcg import resolve_country_raan_sweep  # noqa: E402
+    _sys_for_raan = storage.get_system(sel_sys) or {}
+    _auto_policy, _raan_det = resolve_country_raan_sweep(
+        "auto",
+        srs_path=_sys_for_raan.get("srs_path"),
+        ntc_id=_sys_for_raan.get("ntc_id"),
+    )
+    _rpt_d = _raan_det.get("rpt_period_days")
+    _rpt_txt = f"{_rpt_d:.2f} d" if _rpt_d else "—"
+    _n_rep = int(_raan_det.get("n_repeating_planes") or 0)
+    _n_non = int(_raan_det.get("n_non_repeating_planes") or 0)
+    _auto_sweep = (_auto_policy is True) or (
+        _auto_policy == "auto" and not _raan_det.get("repeating")
+    )
+    if _raan_det.get("mixed"):
+        st.warning(
+            f"Filing: **mixed orbits** — {_n_rep} repeating plane(s) (sweep **OFF**) "
+            f"+ {_n_non} non-repeating (sweep **ON**). Auto applies §D4.6.1 "
+            f"**per orbit**; ΔΩ rotates all ON orbits relative to the winner.",
+            icon=":material/join:",
+        )
+    elif _raan_det.get("repeating"):
+        st.success(
+            f"Filing: **repeating ground track** "
+            f"(f_stn_keep={_raan_det.get('f_stn_keep')}, P_repeat={_rpt_txt}, "
+            f"planes={_n_rep}) → auto RAAN sweep **OFF** (preserve filed track).",
+            icon=":material/lock:",
+        )
+    else:
+        st.warning(
+            f"Filing: **non-repeating** "
+            f"(f_stn_keep={_raan_det.get('f_stn_keep')}, P_repeat={_rpt_txt}, "
+            f"planes={_n_non or _raan_det.get('n_planes') or '—'}) → "
+            f"auto RAAN sweep **ON** (worst-case phasing over the country).",
+            icon=":material/sync:",
+        )
+    country_raan_sweep = select_described(
+        "RAAN (Ω) sweep",
+        ["auto", "on", "off"], _RAAN_SWEEP_DESC,
+        index=["auto", "on", "off"].index(_raan_prev),
+        help="Territorial WCGA only. Engine key: `country_raan_sweep`.",
+    )
+    if country_raan_sweep == "auto":
+        if _raan_det.get("mixed"):
+            st.caption(f"Effective: **per orbit** — {_n_rep} OFF / {_n_non} ON.")
+        else:
+            st.caption(
+                f"Effective for this filing: sweep "
+                f"**{'ON' if _auto_sweep else 'OFF'}** (all orbits)."
+            )
+
 with st.form("s1503_form"):
-    st.subheader("2. Simulation parameters")
+    st.subheader("3. Simulation parameters")
     st.caption("Empty fields = engine defaults (auto).")
     col1, col2 = st.columns(2)
     with col1:
@@ -464,108 +647,106 @@ with st.form("s1503_form"):
         if art22_leaf is not None:
             st.caption("↑ Service, ES antenna & frequency set by the Article 22 scenario.")
 
-    with st.expander("3. WCG search (S.1503-4 §D.3)", expanded=False):
-        wcg_source = select_described(
-            "WCG source",
-            _WCG_SOURCE_OPTS, _WCG_SOURCE_DESC,
-            index=1 if prev.get("wcg_manual") else 0,
-            help="Mutually exclusive. Engine keys: `wcga_s1503` / `wcg_manual`.",
-        )
-        wcga_s1503 = wcg_source == "S.1503-4 WCGA"
-        wcg_manual = not wcga_s1503
-        s1503_step = st.text_input(
-            "WCGA grid step (°)",
-            value=str(prev.get("s1503_step_deg") or ""),
-            placeholder="auto",
-            help="Engine key: `s1503_step_deg`. Latitude step of the WCGA "
-                 "grid. Smaller = finer search, slower.",
-        )
-        col_a, col_b = st.columns(2)
-        with col_a:
-            wcga_no_mask_symmetry = st.checkbox(
-                "Full θ — no mask symmetry",
-                value=bool(prev.get("wcga_no_mask_symmetry", True)),
-                help="Engine key: `wcga_no_mask_symmetry`. DEFAULT ON: full θ "
-                     "(no Δlon symmetry). Uncheck to restrict θ ∈ [0, π] when "
-                     "the mask is symmetric in Δlon (faster).",
+    if not use_grid:
+        with st.expander("4. WCG search (S.1503-4 §D.3)", expanded=False):
+            if use_territorial:
+                st.caption(
+                    "Territorial ES domain is set in section 2. WCGA knobs "
+                    "below are the same as the world-wide search."
+                )
+            s1503_step = st.text_input(
+                "WCGA grid step (°)",
+                value=str(prev.get("s1503_step_deg") or ""),
+                placeholder="auto",
+                help="Engine key: `s1503_step_deg`. Latitude step of the WCGA "
+                     "grid. Smaller = finer search, slower.",
             )
-            s1503_trail = st.checkbox(
-                "Export all visited points",
-                value=bool(prev.get("s1503_trail_all_points", False)),
-                help="Engine key: `s1503_trail_all_points`. Save every WCGA "
-                     "trial point to the run artifacts (for debugging / "
-                     "visualisation). Bigger output files.",
-            )
-        with col_b:
-            gso_lon_mode = select_described(
-                "GSO longitude mode",
-                ["arc_optimal", "es_meridian"], _GSO_LON_DESC,
-                index=0 if prev.get("gso_longitude_mode") == "arc_optimal" else 1,
-                help="Engine key: `gso_longitude_mode`.",
-            )
-            # NOTE: no dynamic `disabled=` here — widgets inside a form don't
-            # rerun until submit, so the enabled state could never react to
-            # the GSO-mode pick above. The engine simply ignores
-            # `alpha_method` when GSO mode = es_meridian.
-            alpha_method = select_described(
-                "α computation method",
-                ["sweep", "analytical"], _ALPHA_DESC,
-                index=0 if prev.get("alpha_method") == "sweep" else 1,
-                help="Engine key: `alpha_method`. Ignored when GSO mode = "
-                     "es_meridian (irrelevant in that case).",
+            col_a, col_b = st.columns(2)
+            with col_a:
+                wcga_no_mask_symmetry = st.checkbox(
+                    "Full θ — no mask symmetry",
+                    value=bool(prev.get("wcga_no_mask_symmetry", True)),
+                    help="Engine key: `wcga_no_mask_symmetry`. DEFAULT ON: full θ "
+                         "(no Δlon symmetry). Uncheck to restrict θ ∈ [0, π] when "
+                         "the mask is symmetric in Δlon (faster).",
+                )
+                s1503_trail = st.checkbox(
+                    "Export all visited points",
+                    value=bool(prev.get("s1503_trail_all_points", False)),
+                    help="Engine key: `s1503_trail_all_points`. Save every WCGA "
+                         "trial point to the run artifacts (for debugging / "
+                         "visualisation). Bigger output files.",
+                )
+            with col_b:
+                gso_lon_mode = select_described(
+                    "GSO longitude mode",
+                    ["arc_optimal", "es_meridian"], _GSO_LON_DESC,
+                    index=0 if prev.get("gso_longitude_mode") == "arc_optimal" else 1,
+                    help="Engine key: `gso_longitude_mode`.",
+                )
+                # NOTE: no dynamic `disabled=` here — widgets inside a form don't
+                # rerun until submit, so the enabled state could never react to
+                # the GSO-mode pick above. The engine simply ignores
+                # `alpha_method` when GSO mode = es_meridian.
+                alpha_method = select_described(
+                    "α computation method",
+                    ["sweep", "analytical"], _ALPHA_DESC,
+                    index=0 if prev.get("alpha_method") == "sweep" else 1,
+                    help="Engine key: `alpha_method`. Ignored when GSO mode = "
+                         "es_meridian (irrelevant in that case).",
+                )
+
+            # "Emulate S.1503-2 (ITU BR GIBC reference)" widget hidden — the engine
+            # always runs the literal S.1503-4 path. Forced OFF (unchecked): sets
+            # `emulate_s1503_2=False` → `strict_exclusion_zone=False`, so the WCGD
+            # keeps the gain OR-branch (§D3.1.2) and the temporal EPFD↓ follows
+            # Step 18 (no elGSO term). Re-expose the checkbox to reproduce
+            # EPFDRESULTS_*.mdb (diverges from S.1503-4).
+            emulate_s1503_2 = False
+
+            apply_table8_egso = st.checkbox(
+                "Apply Table 8 εGSO gate (S.1503-4)",
+                value=not bool(prev.get("disable_gso_min_elevation", False)),
+                help="Engine key: `disable_gso_min_elevation` (= not this box). "
+                     "Table 8 εGSO is the minimum GSO-arc elevation (20° ≥17 GHz, "
+                     "10° <17 GHz) in the WCGD store criterion AND-branch (§D3.1.2) "
+                     "and the temporal gate. "
+                     "DEFAULT ON: apply εGSO per the literal S.1503-4 (excludes "
+                     "victim ES where the GSO arc is below the threshold). "
+                     "OFF: Table 8 is NOT applied — the WCGA may place the "
+                     "worst-case ES at high latitude (e.g. ≈66°), matching the ITU "
+                     "BR / S.1503-2 reference; deviates from the literal S.1503-4.",
             )
 
-        # "Emulate S.1503-2 (ITU BR GIBC reference)" widget hidden — the engine
-        # always runs the literal S.1503-4 path. Forced OFF (unchecked): sets
-        # `emulate_s1503_2=False` → `strict_exclusion_zone=False`, so the WCGD
-        # keeps the gain OR-branch (§D3.1.2) and the temporal EPFD↓ follows
-        # Step 18 (no elGSO term). Re-expose the checkbox to reproduce
-        # EPFDRESULTS_*.mdb (diverges from S.1503-4).
-        emulate_s1503_2 = False
-
-        apply_table8_egso = st.checkbox(
-            "Apply Table 8 εGSO gate (S.1503-4)",
-            value=not bool(prev.get("disable_gso_min_elevation", False)),
-            help="Engine key: `disable_gso_min_elevation` (= not this box). "
-                 "Table 8 εGSO is the minimum GSO-arc elevation (20° ≥17 GHz, "
-                 "10° <17 GHz) in the WCGD store criterion AND-branch (§D3.1.2) "
-                 "and the temporal gate. "
-                 "DEFAULT ON: apply εGSO per the literal S.1503-4 (excludes "
-                 "victim ES where the GSO arc is below the threshold). "
-                 "OFF: Table 8 is NOT applied — the WCGA may place the "
-                 "worst-case ES at high latitude (e.g. ≈66°), matching the ITU "
-                 "BR / S.1503-2 reference; deviates from the literal S.1503-4.",
-        )
-
-    with st.expander("4. Defined geometry", expanded=False):
-        st.caption(
-            "Used only when **WCG source** = Defined geometry. "
-            "Coordinates are ignored if S.1503-4 WCGA is selected."
-        )
-        col_c, col_d, col_e = st.columns(3)
-        with col_c:
-            wm_es_lat = st.text_input(
-                "ES latitude (°)",
-                value=str(prev.get("wcg_manual_es_lat") or ""),
-                help="Engine key: `wcg_manual_es_lat`. Latitude of the fixed "
-                     "earth station (-90 … +90).",
+        with st.expander("5. Defined geometry", expanded=wcg_manual):
+            st.caption(
+                "Used only when **Geometry** = Defined geometry. "
+                "Coordinates are ignored if S.1503-4 WCGA is selected."
             )
-        with col_d:
-            wm_es_lon = st.text_input(
-                "ES longitude (°)",
-                value=str(prev.get("wcg_manual_es_lon") or ""),
-                help="Engine key: `wcg_manual_es_lon`. Longitude of the fixed "
-                     "earth station (-180 … +180).",
-            )
-        with col_e:
-            wm_gso_lon = st.text_input(
-                "GSO satellite longitude (°)",
-                value=str(prev.get("wcg_manual_gso_lon") or ""),
-                help="Engine key: `wcg_manual_gso_lon`. Longitude of the "
-                     "victim GSO satellite (-180 … +180).",
-            )
+            col_c, col_d, col_e = st.columns(3)
+            with col_c:
+                wm_es_lat = st.text_input(
+                    "ES latitude (°)",
+                    value=str(prev.get("wcg_manual_es_lat") or ""),
+                    help="Engine key: `wcg_manual_es_lat`. Latitude of the fixed "
+                         "earth station (-90 … +90).",
+                )
+            with col_d:
+                wm_es_lon = st.text_input(
+                    "ES longitude (°)",
+                    value=str(prev.get("wcg_manual_es_lon") or ""),
+                    help="Engine key: `wcg_manual_es_lon`. Longitude of the fixed "
+                         "earth station (-180 … +180).",
+                )
+            with col_e:
+                wm_gso_lon = st.text_input(
+                    "GSO satellite longitude (°)",
+                    value=str(prev.get("wcg_manual_gso_lon") or ""),
+                    help="Engine key: `wcg_manual_gso_lon`. Longitude of the "
+                         "victim GSO satellite (-180 … +180).",
+                )
 
-    with st.expander("5. Time step (dual mode — S.1503-4 §D.4.7)", expanded=False):
+    with st.expander("6. Time step (dual mode — S.1503-4 §D.4.7)", expanded=False):
         col_f, col_g = st.columns(2)
         with col_f:
             fine_dt = st.text_input(
@@ -596,7 +777,7 @@ with st.form("s1503_form"):
         itu_software = ("itu_epfd" if itu_software_label.startswith("Reading B")
                         else "s1503_4")
 
-    with st.expander("6. Orbital dynamics (station keeping / precession — S.1503-4 §D6.3)", expanded=False):
+    with st.expander("7. Orbital dynamics (station keeping / precession — S.1503-4 §D6.3)", expanded=False):
         col_h, col_i = st.columns(2)
         with col_h:
             artificial_prec_mode = select_described(
@@ -647,23 +828,29 @@ with st.form("s1503_form"):
                      "constellation.",
             )
 
-    with st.expander("7. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
+    if not use_grid:
+        with st.expander("8. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
+            st.caption(
+                "Sliding-window variant. When the SRS `sat_oper` declares "
+                "MIN_DURATION ≠ 0 (minimum time the ES tracks a satellite), the "
+                "engine runs the §D5.1.4.2 algorithm automatically. Set a value "
+                "below to **force** or **override** MIN_DURATION for all latitudes "
+                "(useful for manual systems or what-if studies). 0 / empty = use "
+                "the filing's own value (or the standard §D5.1.4.1 path)."
+            )
+            min_duration_s = st.text_input(
+                "MIN_DURATION (s) — override",
+                value=str(prev.get("min_duration_s") or ""),
+                placeholder="auto (from SRS sat_oper; 0 = standard path)",
+                help="Engine key: `min_duration_s`. > 0 forces the sliding-window "
+                     "variant with N_SW = ⌊MIN_DURATION/T_fine⌋ fine steps per "
+                     "window. Cost scales with N_TW ≈ N_SW/N_MSL window sets — a "
+                     "large MIN_DURATION with a small T_fine is expensive.",
+            )
+    else:
         st.caption(
-            "Sliding-window variant. When the SRS `sat_oper` declares "
-            "MIN_DURATION ≠ 0 (minimum time the ES tracks a satellite), the "
-            "engine runs the §D5.1.4.2 algorithm automatically. Set a value "
-            "below to **force** or **override** MIN_DURATION for all latitudes "
-            "(useful for manual systems or what-if studies). 0 / empty = use "
-            "the filing's own value (or the standard §D5.1.4.1 path)."
-        )
-        min_duration_s = st.text_input(
-            "MIN_DURATION (s) — override",
-            value=str(prev.get("min_duration_s") or ""),
-            placeholder="auto (from SRS sat_oper; 0 = standard path)",
-            help="Engine key: `min_duration_s`. > 0 forces the sliding-window "
-                 "variant with N_SW = ⌊MIN_DURATION/T_fine⌋ fine steps per "
-                 "window. Cost scales with N_TW ≈ N_SW/N_MSL window sets — a "
-                 "large MIN_DURATION with a small T_fine is expensive.",
+            "MIN_DURATION (§D5.1.4.2) is not supported on the ES×GSO grid "
+            "(same as Aggregate)."
         )
 
     # ── Workload + runtime estimate ────────────────────────────────────────
@@ -732,8 +919,20 @@ with st.form("s1503_form"):
     )
     # Feed the real NSTEPS into the wall-time estimate when available.
     _nsteps = _tsp.nsteps if _tsp.ok else (_i(num_steps) or 86_400)
-    est = _est.estimate_single_entry(n_sat=_n_sat, n_time_steps=_nsteps,
-                                       s1503_step_deg=_step)
+    if use_grid:
+        _gs = _f(grid_step) or 30.0
+        _gso = _f(gpts) or _gs
+        est = _est.estimate_aggregate(
+            method="method_2", n_systems=1, n_sat_per_system=_n_sat,
+            n_time_steps=_nsteps,
+            grid_step_deg=_gs,
+            gso_pointing_step_deg=_gso,
+            min_elevation_deg=_f(min_elev),
+            country_codes=list(country_codes) if country_codes else None,
+        )
+    else:
+        est = _est.estimate_single_entry(n_sat=_n_sat, n_time_steps=_nsteps,
+                                           s1503_step_deg=_step)
     with st.container(border=True):
         cal_tag = (
             f" · calibrated from {_cal.get('n_samples', 0)} past run(s)"
@@ -774,6 +973,11 @@ with st.form("s1503_form"):
             "**Recalculate** to refresh N / Δt with the current values "
             "(without launching)."
         )
+        if use_territorial:
+            st.caption(
+                "Territorial RAAN sweep (when ON) adds Ω candidates inside "
+                "WCGA — wall-time estimate is a lower bound."
+            )
         st.form_submit_button("🔄 Recalculate estimate")
 
     submit = st.form_submit_button("Launch run", type="primary", icon=":material/play_circle:")
@@ -835,6 +1039,26 @@ if submit:
     params["emulate_s1503_2"] = bool(emulate_s1503_2)
     # Table 8 εGSO gate: checkbox unchecked (default) → disable it.
     params["disable_gso_min_elevation"] = not bool(apply_table8_egso)
+    if use_grid:
+        params["wcga_s1503"] = False
+        params["wcg_manual"] = False
+        params.pop("min_duration_s", None)
+        _gs = _f(grid_step)
+        _gso = _f(gpts)
+        _set("grid_step_deg", _gs)
+        _set("gso_pointing_step_deg", _gso if _gso is not None else _gs)
+        _set("n_geom_max", _i(n_geom))
+        if country_codes:
+            params["country_codes"] = list(country_codes)
+        params["study_mode"] = "single_grid"
+        params["system_id"] = sel_sys
+    elif use_territorial:
+        params["wcga_s1503"] = True
+        params["wcg_manual"] = False
+        params["country_codes"] = list(country_codes)
+        params["country_raan_sweep"] = country_raan_sweep
+        params["study_mode"] = "country_constrained"
+        params["system_id"] = sel_sys
 
     # Article 22 scenario leaf overrides service / ES antenna / ref BW /
     # frequency run and pins the PFD mask (see section 1 selector).
@@ -910,9 +1134,25 @@ if submit:
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),
         "restrict_emitters_to_sim_band": bool(restrict_emitters),
+        "geom_mode": "grid" if use_grid else ("defined" if wcg_manual else "wcga"),
+        "grid_step_deg": _f(grid_step),
+        "gso_pointing_step_deg": _f(gpts),
+        "n_geom_max": _i(n_geom),
+        "country_codes": list(country_codes) if country_codes else [],
+        "country_raan_sweep": country_raan_sweep,
     })
 
-    run_id = launcher.launch_s1503(system_id=sel_sys, params=params)
+    def _launch_one(system_id: str, p: dict) -> str:
+        if use_grid:
+            return launcher.launch_s1588(
+                method="method_2", system_ids=[system_id], params=p,
+                kind="single",
+            )
+        if use_territorial:
+            return launcher.launch_country_wcg(system_id=system_id, params=p)
+        return launcher.launch_s1503(system_id=system_id, params=p)
+
+    run_id = _launch_one(sel_sys, params)
     set_current_run_id(run_id)
     st.toast(f"Run `{run_id}` launched", icon=":material/play_circle:")
 
@@ -922,7 +1162,7 @@ if submit:
         for _sib in _mc_siblings:
             _sp = dict(params)
             _sp["system_id"] = _sib["system"]["id"]
-            _rid = launcher.launch_s1503(system_id=_sib["system"]["id"], params=_sp)
+            _rid = _launch_one(_sib["system"]["id"], _sp)
             st.toast(
                 f"Run `{_rid}` launched (config {_sib['config_label']})",
                 icon=":material/play_circle:",

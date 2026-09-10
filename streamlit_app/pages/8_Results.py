@@ -34,6 +34,11 @@ def _load_sim_data(run_id: str) -> dict[str, Any] | None:
         return None
 
 
+def _is_single_grid(data: dict[str, Any]) -> bool:
+    """True when this artifact is a Single-entry ES×GSO grid (no WCGA)."""
+    return data.get("study_mode") == "single_grid"
+
+
 def _limit_curves(data: dict[str, Any]) -> list[dict[str, Any]]:
     """Build limit_curves for Article 22 (single-entry) and Resolution 76 (aggregate)."""
     out: list[dict[str, Any]] = []
@@ -46,8 +51,10 @@ def _limit_curves(data: dict[str, Any]) -> list[dict[str, Any]]:
     def _split(pts):
         return [float(p[0]) for p in pts], [float(p[1]) for p in pts]
 
-    is_single_entry = method is None or data.get("kind") in (
-        "s1503", "single", "country_constrained_s1503",
+    is_single_entry = (
+        _is_single_grid(data)
+        or method is None
+        or data.get("kind") in ("s1503", "single", "country_constrained_s1503")
     )
     if a22_pts:
         bins_db, pct = _split(a22_pts)
@@ -56,7 +63,7 @@ def _limit_curves(data: dict[str, Any]) -> list[dict[str, Any]]:
             "epfd": bins_db, "percent": pct,
             "color": "#ef4444", "dash": "dash", "width": 1.6,
         })
-    if r76_pts:
+    if r76_pts and not _is_single_grid(data):
         bins_db, pct = _split(r76_pts)
         out.append({
             "name": "Resolution 76 limit (aggregate)",
@@ -71,6 +78,7 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
     bins = data.get("ccdf_bins_db") or []
     pct = data.get("ccdf_pct") or []
     method = data.get("method") or data.get("kind") or "result"
+    headline = "ES×GSO grid envelope" if _is_single_grid(data) else method
     color = {
         "method_1": "#ff8c42", "method_2": "#ef4444", "method_3": "#34d399",
         "method_4": "#a78bfa", "method_5": "#60a5fa",
@@ -80,7 +88,7 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
     # The top-level (worst) is suppressed to avoid duplication.
     is_method_4 = method == "method_4"
     if bins and pct and not is_method_4:
-        series.append({"name": method, "epfd": bins, "percent": pct,
+        series.append({"name": headline, "epfd": bins, "percent": pct,
                         "color": color, "width": 2.4})
 
     # Palette for per-WCG curves
@@ -122,10 +130,12 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
     # Grid convolution (method_2 / method_5): overlay the convolved CCDF of each
     # grid point (light); the headline is their worst-per-level envelope.
     if method in ("method_2", "method_5"):
+        _n_sys = int(data.get("n_systems") or 1)
+        _pt_tag = " (conv.)" if _n_sys > 1 else ""
         for p in data.get("per_point") or []:
             if p.get("ccdf_bins_db") and p.get("ccdf_pct"):
                 series.append({
-                    "name": f"pt#{p.get('index')} (conv.)",
+                    "name": f"pt#{p.get('index')}{_pt_tag}",
                     "epfd": p["ccdf_bins_db"], "percent": p["ccdf_pct"],
                     "color": "rgba(96,165,250,0.55)", "width": 1.3,
                 })
@@ -180,7 +190,7 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
     h = int(st.session_state.get("ccdf_height", 520))
     x_min, x_max = st.session_state.get("ccdf_xrange", (-220, -140))
     fig = plots.ccdf_chart(
-        series, title=f"CCDF — {method}",
+        series, title=f"CCDF — {headline}",
         limit_curves=_limit_curves(data),
         height=h, x_min=x_min, x_max=x_max,
     )
@@ -335,6 +345,13 @@ def _render_metrics(data: dict[str, Any]) -> None:
                 "(S.1503-4 §D2.1).",
                 icon=":material/call_split:",
             )
+    if _is_single_grid(data):
+        _codes = data.get("country_codes") or []
+        st.caption(
+            f"ES×GSO grid (no WCGA) · {data.get('n_grid_points', '—')} point(s)"
+            + (f" · countries {', '.join(str(c) for c in _codes)}"
+               if _codes else " · world-wide")
+        )
     cols = st.columns(5)
     me = data.get("max_epfd_dbw_m2_40khz")
     with cols[0]:
@@ -555,6 +572,34 @@ def _collect_geometry_points(data: dict[str, Any]) -> dict[str, Any]:
     grid_gso_lons: list[float] = []
     geometries: list[dict[str, Any]] = []  # for click-to-modal CCDF picker
 
+    # Grid first: a Single-entry ES×GSO run stores kind=single AND method_2.
+    if method in ("method_2", "method_5"):
+        per_point = data.get("per_point") or []
+        seen: set[tuple[float, float]] = set()
+        seen_g: set[float] = set()
+        for p in per_point:
+            la, lo, gl = p.get("es_lat_deg"), p.get("es_lon_deg"), p.get("gso_lon_deg")
+            if la is None or lo is None:
+                continue
+            k = (round(la, 3), round(lo, 3))
+            if k not in seen:
+                seen.add(k)
+                grid.append({"lat": la, "lon": lo})
+            if gl is not None and gl not in seen_g:
+                seen_g.add(gl)
+                grid_gso_lons.append(gl)
+            if p.get("ccdf_bins_db"):
+                geometries.append({
+                    "label": f"pt#{p.get('index')} · ES({la:.1f},{lo:.1f}) · GSO {gl:.1f}",
+                    "ccdf_bins_db": p.get("ccdf_bins_db"),
+                    "ccdf_pct": p.get("ccdf_pct"),
+                    "color": "#60a5fa",
+                    "max_epfd": p.get("max_epfd_dbw"),
+                    "es_lat": la, "es_lon": lo, "gso_lon": gl,
+                })
+        return {"es": es, "gso": gso, "grid": grid,
+                 "grid_gso_lons": grid_gso_lons, "geometries": geometries}
+
     if kind in ("single", "s1503", "country_constrained_s1503") or method == "method_1":
         # single-entry: from data["wcg"]; or method_1 per_system
         if kind in ("single", "s1503", "country_constrained_s1503"):
@@ -627,30 +672,6 @@ def _collect_geometry_points(data: dict[str, Any]) -> dict[str, Any]:
                 "max_epfd": w.get("max_epfd_dbw"),
                 "es_lat": la, "es_lon": lo, "gso_lon": gl,
             })
-    elif method in ("method_2", "method_5"):
-        per_point = data.get("per_point") or []
-        seen: set[tuple[float, float]] = set()
-        seen_g: set[float] = set()
-        for p in per_point:
-            la, lo, gl = p.get("es_lat_deg"), p.get("es_lon_deg"), p.get("gso_lon_deg")
-            if la is None or lo is None:
-                continue
-            k = (round(la, 3), round(lo, 3))
-            if k not in seen:
-                seen.add(k)
-                grid.append({"lat": la, "lon": lo})
-            if gl is not None and gl not in seen_g:
-                seen_g.add(gl)
-                grid_gso_lons.append(gl)
-            if method in ("method_2", "method_5") and p.get("ccdf_bins_db"):
-                geometries.append({
-                    "label": f"pt#{p.get('index')} · ES({la:.1f},{lo:.1f}) · GSO {gl:.1f}",
-                    "ccdf_bins_db": p.get("ccdf_bins_db"),
-                    "ccdf_pct": p.get("ccdf_pct"),
-                    "color": "#60a5fa",
-                    "max_epfd": p.get("max_epfd_dbw"),
-                    "es_lat": la, "es_lon": lo, "gso_lon": gl,
-                })
     return {"es": es, "gso": gso, "grid": grid,
              "grid_gso_lons": grid_gso_lons, "geometries": geometries}
 
@@ -690,7 +711,7 @@ def _render_country_constrained_wcg(data: dict[str, Any]) -> None:
         return
     codes = meta.get("country_codes") or []
     with st.expander(
-        "Country-constrained WCGA (ES domain filter)",
+        "Territorial WCGA (ES domain filter)",
         expanded=True,
     ):
         c1, c2, c3 = st.columns(3)
@@ -986,8 +1007,12 @@ def _render_percentiles_bar(data: dict[str, Any]) -> None:
     plottable = {k: v for k, v in pcts.items() if isinstance(v, (int, float))}
     below = [k for k, v in pcts.items() if v is None]
     if plottable:
-        fig = plots.percentiles_chart(
-            plottable, title="Normative percentiles (Resolution 76)")
+        _pct_title = (
+            "Normative percentiles (Article 22)"
+            if _is_single_grid(data)
+            else "Normative percentiles (Resolution 76)"
+        )
+        fig = plots.percentiles_chart(plottable, title=_pct_title)
         st.plotly_chart(fig, width='stretch')
     if below:
         st.caption(
@@ -1042,7 +1067,7 @@ if not run_id or storage.get_run(run_id) is None:
             "Pick a run",
             options=_run_ids,
             index=_idx,
-            format_func=lambda i: f"{i} · {storage.display_kind(next((r['kind'] for r in runs if r['id']==i), ''))} · {next((r.get('method') or '—' for r in runs if r['id']==i), '')}",
+            format_func=lambda i: f"{i} · {storage.display_kind(next((r['kind'] for r in runs if r['id']==i), ''))} · {storage.display_method(next((r.get('method') for r in runs if r['id']==i), None))}",
         )
     else:
         st.info("No runs yet. Launch from **Single-entry** or **Aggregate**.")
@@ -1055,7 +1080,7 @@ if run_id:
         st.stop()
 
     st.markdown(
-        f"**Run `{run['id']}`** · type `{storage.display_kind(run['kind'])}` · method `{run.get('method') or '—'}` · status `{run['status']}`"
+        f"**Run `{run['id']}`** · type `{storage.display_kind(run['kind'])}` · method `{storage.display_method(run.get('method'))}` · status `{run['status']}`"
     )
     data = _load_sim_data(run_id)
     if not data:
