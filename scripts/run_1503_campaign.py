@@ -367,6 +367,17 @@ def _run_one(run_key: str, params: dict[str, Any],
     )
     print(f"  [{run_key}] {'OK' if ok else 'FAILED'} in {_hms(dt)} "
           f"(run {run_id}) → {run_dir}")
+    # Publish the finished folder to the shared results directory, so
+    # every node's output lands in one place without hand-copying. After the
+    # run, never into it: the sync client would hold handles on files still
+    # being written. Failures here are warnings — a sync problem must not turn
+    # a successful simulation into a failed one.
+    if ok:
+        try:
+            from results_publish import publish_run  # noqa: PLC0415
+            publish_run(run_id, row=run_key, campaign=CAMPAIGN_ID)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [{run_key}] publish skipped: {exc}")
     return run_id, ok
 
 
