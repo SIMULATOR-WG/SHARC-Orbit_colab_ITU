@@ -62,6 +62,9 @@ from results_publish import publish_run  # noqa: E402
 from streamlit_app.lib import storage  # noqa: E402
 
 CAMPAIGN_ID = "contrib5_individual"
+
+#: Subfolder of the shared results directory these runs are published to.
+RESULTS_SUBDIR = "contrib5_individual"
 camp.use_campaign(CAMPAIGN_ID)
 
 #: §3 of the contribution. The victim is 1.2 m for every row: the comparison is
@@ -198,7 +201,8 @@ def _run_one(row: dict[str, Any], pos: str = "") -> tuple[str, bool]:
           f"{dt / 3600:.2f} h (run {run_id})")
     if ok:
         try:
-            publish_run(run_id, row=row["id"], campaign=CAMPAIGN_ID)
+            publish_run(run_id, row=row["id"], campaign=CAMPAIGN_ID,
+                        subdir=RESULTS_SUBDIR)
         except Exception as exc:  # noqa: BLE001
             print(f"  [{row['id']}] publish skipped: {exc}")
     return run_id, ok

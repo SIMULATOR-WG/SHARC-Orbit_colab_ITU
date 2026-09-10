@@ -88,12 +88,15 @@ def _label_for(run_dir: Path) -> tuple[str, str]:
 
 
 def publish_run(run_id: str, row: str = "", campaign: str = "",
-                quiet: bool = False) -> Path | None:
+                quiet: bool = False, subdir: str | None = None) -> Path | None:
     """Copy one finished run folder to the results directory.
 
     Idempotent: an already-published run is refreshed only if the source is
     newer, so backfilling twice costs nothing. Returns the destination, or
     None when publishing was skipped.
+
+    ``subdir`` overrides the campaign-derived folder, for work that belongs to
+    a named deliverable rather than to a campaign.
     """
     root = results_root()
     if root is None:
@@ -113,9 +116,10 @@ def publish_run(run_id: str, row: str = "", campaign: str = "",
         campaign = campaign or c
         row = row or r
     name = f"{row}__{run_id}" if row else run_id
-    dst = root / campaign / name
-    if len(str(dst)) + 40 > _MAX_PATH:      # 40 = room for artifact names
-        dst = root / campaign / run_id      # drop the label rather than fail
+    folder = subdir or campaign
+    dst = root / folder / name
+    if len(str(dst)) + 40 > _MAX_PATH:          # 40 = room for artifact names
+        dst = root / folder / run_id            # drop the label rather than fail
     try:
         if dst.exists():
             newest_src = max(f.stat().st_mtime for f in src.rglob("*")
@@ -130,7 +134,7 @@ def publish_run(run_id: str, row: str = "", campaign: str = "",
         shutil.copytree(src, dst, dirs_exist_ok=True)
         if not quiet:
             size = sum(f.stat().st_size for f in dst.rglob("*") if f.is_file())
-            print(f"  [publish] {campaign}/{name} ({size / 1e6:.1f} MB)")
+            print(f"  [publish] {folder}/{name} ({size / 1e6:.1f} MB)")
         return dst
     except OSError as exc:
         # Never fail a finished simulation over a sync problem.
