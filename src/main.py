@@ -149,7 +149,9 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
                   epfd_limits_mask_id: int | None = None,
                   ntc_id: str | None = None,
                   service: str = "FSS",
-                  simulation_frequency_ghz: float | None = None) -> dict:
+                  simulation_frequency_ghz: float | None = None,
+                  operating_params_paths: "list[str] | None" = None,
+                  strict_operating_params: bool = False) -> dict:
     """Load parameters from SRS files.
 
     Supported modes:
@@ -196,57 +198,6 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
     constellation_cfg["max_co_freq_by_lat"] = read_sat_oper(mdb_path, system.ntc_id)
     # MIN_DURATION bands (§D5.1.4.2 track-duration variant); empty ⇒ standard path.
     constellation_cfg["min_duration_by_lat"] = read_sat_oper_min_duration(mdb_path, system.ntc_id)
-
-    # ── §B3.3 operating-parameter masks (f_mask='R') ────────────────────────
-    # The Recommendation carries MIN_EXCLUDE, MIN_ELEV, MAX_CO_FREQ and
-    # MIN_DURATION in an XML set per frequency range, not in the SRS tables, and
-    # the Attachment to Part B is explicit that when they are supplied "values
-    # should be taken from that XML file rather than the relevant SRS table".
-    # One set applies per examined band (§B3.3: "only one set of operating
-    # parameters for any frequency band"), so resolution is by frequency
-    # containment. Track duration is downlink-only (§D5.2, printed p. 104).
-    constellation_cfg["_operating_params"] = None
-    if pfd_mask_mdb:
-        try:
-            from .operating_params import load_from_mask_mdb, to_engine_config
-            _op_reg = load_from_mask_mdb(pfd_mask_mdb, ntc_id=system.ntc_id)
-            if len(_op_reg):
-                _op_set = None
-                if simulation_frequency_ghz:
-                    _op_set = _op_reg.for_frequency(float(simulation_frequency_ghz) * 1000.0)
-                if _op_set is None:
-                    logger.warning(
-                        "  Operating-parameter masks present (%d set(s)) but none "
-                        "covers the simulation frequency; falling back to the "
-                        "legacy SRS columns. §B3.3 requires one set per examined "
-                        "band.", len(_op_reg),
-                    )
-                else:
-                    _frag = to_engine_config(_op_set, direction="down")
-                    constellation_cfg["min_duration_by_lat"] = _frag["min_duration_by_lat"]
-                    if _frag.get("max_co_freq_by_lat"):
-                        constellation_cfg["max_co_freq_by_lat"] = _frag["max_co_freq_by_lat"]
-                    constellation_cfg["min_angle_at_es_deg"] = _frag["min_angle_at_es_deg"]
-                    constellation_cfg["_operating_params"] = _frag["_operating_params"]
-                    logger.info(
-                        "  Operating regime from set %d (%s): %s; MAX_CO_FREQ=%s, "
-                        "MIN_ANGLE_AT_ES=%.2f°%s",
-                        _op_set.param_id, _op_set.band_label(),
-                        (f"MIN_DURATION {_op_set.min_duration_at(0.0):.0f}s → "
-                         "§D5.1.4.2 track-duration algorithm"
-                         if _frag["min_duration_by_lat"] else
-                         "no MIN_DURATION → classic §D5.1.4.1 algorithm"),
-                        _op_set.max_co_freq_at(0.0), _frag["min_angle_at_es_deg"],
-                        (" (MIN_ANGLE_AT_ES suppressed: §B3.3 makes it "
-                         "inapplicable when MIN_DURATION is non-zero)"
-                         if _frag["_operating_params"]["min_angle_at_es_suppressed"] else ""),
-                    )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "  Could not read operating-parameter masks (f_mask='R') from "
-                "%s: %s. Falling back to the legacy SRS columns.",
-                pfd_mask_mdb, exc,
-            )
 
     # Read mask information to obtain the run frequency.
     # S.1503 D2: FrequencyRun = fmin + RefBW/2.
@@ -402,6 +353,169 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         )
 
     # Build compatible config
+    # ── §B3.3 operating-parameter masks (f_mask='R') ────────────────────────
+    # The Recommendation carries MIN_EXCLUDE, MIN_ELEV, MAX_CO_FREQ and
+    # MIN_DURATION in an XML set per frequency range, not in the SRS tables, and
+    # the Attachment to Part B (printed p. 16) is explicit that when they are
+    # supplied "values should be taken from that XML file rather than the
+    # relevant SRS table". One set applies per examined band (§B3.3: "only one
+    # set of operating parameters for any frequency band"). Track duration is
+    # downlink-only (§D5.2, printed p. 104).
+    #
+    # Failures here are NOT interchangeable: "this filing supplies no extended
+    # set" is a legitimate fall-back to the SRS columns, while "the extended set
+    # is present but invalid or unresolvable" must be recorded and surfaced —
+    # swallowing it silently downgrades the run to §D5.1.4.1 with MIN_DURATION,
+    # MAX_CO_FREQ, α₀ and ε₀ all quietly lost.
+    constellation_cfg["_operating_params"] = None
+    constellation_cfg["_operating_params_error"] = None
+    _op_sources = list(operating_params_paths or [])
+    if pfd_mask_mdb or _op_sources:
+        from .operating_params import (
+            OperatingParameterRegistry, OperatingParamsError,
+            load_from_mask_mdb, load_from_paths, to_engine_config,
+        )
+        _mdb_sets, _xml_sets = [], []
+        try:
+            if pfd_mask_mdb:
+                _mdb_sets = list(load_from_mask_mdb(pfd_mask_mdb, ntc_id=system.ntc_id))
+        except FileNotFoundError as exc:
+            logger.info("  No masks database for operating parameters (%s).", exc)
+        except ValueError as exc:
+            # "Table 'masks' empty or not found" — an older mask database that
+            # simply predates f_mask='R'. Not an error.
+            logger.info("  No operating-parameter masks in %s (%s).", pfd_mask_mdb, exc)
+        if _op_sources:
+            _xml_sets = list(load_from_paths(_op_sources))
+
+        # The same filing usually ships the same sets twice: inside the masks
+        # database (f_mask='R') and as the standalone XML files the applicant
+        # uploaded. Concatenating both would make every set "overlap" itself and
+        # sink the whole registry on the §B3.3 one-set-per-band rule. The
+        # Attachment to Part B puts the XML above the SRS table, so an
+        # explicitly supplied file wins over the same band read from the mdb.
+        _op_sets = list(_xml_sets)
+        _superseded = []
+        for _m in _mdb_sets:
+            _hit = next((x for x in _xml_sets
+                         if x.param_id == _m.param_id
+                         or x.intersects_band(_m.low_freq_mhz, _m.high_freq_mhz)), None)
+            if _hit is None:
+                _op_sets.append(_m)
+            else:
+                _superseded.append((_m, _hit))
+        if _superseded:
+            logger.info(
+                "  §B3.3: %d set(s) from the masks database superseded by the "
+                "supplied XML (Attachment to Part B): %s",
+                len(_superseded),
+                "; ".join(f"{m.param_id} ({m.band_label()}) ← {h.source}"
+                          for m, h in _superseded),
+            )
+        if _op_sets:
+            _op_reg = OperatingParameterRegistry(_op_sets)
+            try:
+                _op_reg.raise_on_errors()          # overlapping set ranges
+                _op_set = None
+                # The frequency the run was asked to examine decides, because it
+                # is what §D2 calls FrequencyRun; the mask band is only a
+                # fall-back, and it inherits whatever mask selection chose.
+                if simulation_frequency_ghz:
+                    _op_set = _op_reg.for_frequency(float(simulation_frequency_ghz) * 1000.0)
+                    if (_op_set is not None and effective_freq_min_ghz
+                            and effective_freq_max_ghz
+                            and not _op_set.contains_band(
+                                float(effective_freq_min_ghz) * 1000.0,
+                                float(effective_freq_max_ghz) * 1000.0)):
+                        logger.warning(
+                            "  §B3.3 set %d (%s) covers the simulation frequency but "
+                            "not the whole examined band %.3f-%.3f GHz; §B3.3 binds "
+                            "one set per band.",
+                            _op_set.param_id, _op_set.band_label(),
+                            effective_freq_min_ghz, effective_freq_max_ghz,
+                        )
+                elif effective_freq_min_ghz and effective_freq_max_ghz:
+                    _op_set = _op_reg.for_band(
+                        float(effective_freq_min_ghz) * 1000.0,
+                        float(effective_freq_max_ghz) * 1000.0,
+                    )
+                else:
+                    raise OperatingParamsError(
+                        f"{len(_op_reg)} operating-parameter set(s) are declared but "
+                        "the run has no examined band or simulation frequency to "
+                        "resolve them against; §B3.3 binds one set per band."
+                    )
+                if _op_set is None:
+                    raise OperatingParamsError(
+                        f"{len(_op_reg)} operating-parameter set(s) are declared "
+                        f"({', '.join(x.band_label() for x in _op_reg)}) but none "
+                        "covers the examined band; §B3.3 requires one set for "
+                        "every band that is examined."
+                    )
+                _frag = to_engine_config(_op_set, direction="down")
+                constellation_cfg["min_duration_by_lat"] = _frag["min_duration_by_lat"]
+                # The override is symmetric: once a set is resolved it supersedes
+                # the SRS column, empty value included.
+                constellation_cfg["max_co_freq_by_lat"] = _frag.get("max_co_freq_by_lat", [])
+                constellation_cfg["min_angle_at_es_deg"] = _frag["min_angle_at_es_deg"]
+                for _k in ("alpha0_deg", "min_elevation_deg"):
+                    if _frag.get(_k) is not None:
+                        constellation_cfg[_k] = _frag[_k]
+                constellation_cfg["_alpha0_table"] = _frag.get("_alpha0_table")
+                constellation_cfg["_min_elev_table"] = _frag.get("_min_elev_table")
+                constellation_cfg["_operating_params"] = _frag["_operating_params"]
+                logger.info(
+                    "  Operating regime from §B3.3 set %d (%s), superseding the SRS "
+                    "columns: %s; MAX_CO_FREQ=%s, α₀=%s°, ε₀=%s°, MIN_ANGLE_AT_ES=%.2f°%s",
+                    _op_set.param_id, _op_set.band_label(),
+                    (f"MIN_DURATION {_op_set.min_duration_at(0.0):.0f}s → "
+                     "§D5.1.4.2 track-duration algorithm"
+                     if _frag["min_duration_by_lat"] else
+                     "no MIN_DURATION → classic §D5.1.4.1 algorithm"),
+                    _op_set.max_co_freq_at(0.0),
+                    _frag.get("alpha0_deg"), _frag.get("min_elevation_deg"),
+                    _frag["min_angle_at_es_deg"],
+                    (" (MIN_ANGLE_AT_ES suppressed: §B3.3 makes it inapplicable "
+                     "where MIN_DURATION is declared non-zero)"
+                     if _frag["_operating_params"]["min_angle_at_es_suppressed"] else ""),
+                )
+                # §B5.3: "if the MIN_EXCLUDE varies by orbit plane, that a
+                # value is defined for each orbit plane". Only checkable here,
+                # where the filing's plane list is known.
+                _plane_ids = [int(pl.get("orb_id", i + 1) or (i + 1))
+                              for i, pl in
+                              enumerate(constellation_cfg.get("planes") or [])]
+                if _plane_ids:
+                    from .operating_params import validate_set as _validate_set
+                    for _iss in _validate_set(_op_set, orbit_plane_ids=_plane_ids):
+                        if not _iss.rule.startswith("B5.3/"):
+                            continue
+                        if _iss.severity == "error":
+                            logger.error("  §B5.3: %s", _iss)
+                            if strict_operating_params:
+                                raise OperatingParamsError(str(_iss))
+                        else:
+                            logger.warning("  §B5.3: %s", _iss)
+
+                if _op_reg.invalid_sets:
+                    logger.warning(
+                        "  %d other operating-parameter set(s) carry §B5.2 errors "
+                        "and would fail if examined: %s",
+                        len(_op_reg.invalid_sets),
+                        "; ".join(f"{x.param_id} ({x.band_label()})"
+                                  for x in _op_reg.invalid_sets),
+                    )
+            except OperatingParamsError as exc:
+                constellation_cfg["_operating_params_error"] = str(exc)
+                logger.error(
+                    "  Operating-parameter masks are present but unusable: %s "
+                    "The run would silently revert to the classic §D5.1.4.1 "
+                    "algorithm with MIN_DURATION, MAX_CO_FREQ, α₀ and ε₀ taken "
+                    "from the legacy SRS columns.", exc,
+                )
+                if strict_operating_params:
+                    raise
+
     config = {
         "non_gso": {
             "semi_major_axis_km": constellation_cfg["semi_major_axis_km"],
@@ -418,6 +532,17 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             "min_operating_height_km": constellation_cfg.get("min_operating_height_km", 0.0),
             "max_co_freq_by_lat": constellation_cfg.get("max_co_freq_by_lat", []),
             "min_duration_by_lat": constellation_cfg.get("min_duration_by_lat", []),
+            # §B3.3 operating-parameter set, when the filing supplies one. The
+            # Attachment to Part B: "If the extended set of system operating
+            # parameters are provided, then values should be taken from that XML
+            # file rather than the relevant SRS table." These keys carry the rest
+            # of that set — the α₀/ε₀ tables and the provenance — which were
+            # previously computed onto constellation_cfg and then dropped here.
+            "min_angle_at_es_deg": constellation_cfg.get("min_angle_at_es_deg", 0.0),
+            "_alpha0_table": constellation_cfg.get("_alpha0_table"),
+            "_min_elev_table": constellation_cfg.get("_min_elev_table"),
+            "_operating_params": constellation_cfg.get("_operating_params"),
+            "_operating_params_error": constellation_cfg.get("_operating_params_error"),
             "frequency_ghz": freq_ghz,
             "gso_min_elevation_deg": gso_min_elev_default_deg,
             "apply_gso_min_elevation": True,
@@ -2647,6 +2772,19 @@ def run_wcg_downlink(config: dict) -> tuple[
 
     if sim_cfg.get("num_time_steps", 0) > 0:
         nsteps = int(sim_cfg["num_time_steps"])
+        # The §D4.6 run time is a derived quantity; a user override replaces it
+        # and (when the track-duration variant runs) also resizes N_Repeat and
+        # N_TotalSteps. Record it so the report can say the run was truncated
+        # or extended relative to the Recommendation's own dimensioning.
+        sim_meta["_num_time_steps_user_override"] = int(nsteps)
+        if nsteps != int(s1503_nsteps):
+            logger.warning(
+                "  num_time_steps overridden: %d steps requested vs %d from "
+                "§D4.6 (%.1f%% of the prescribed run). Statistics are NOT "
+                "comparable with a full-length examination.",
+                nsteps, int(s1503_nsteps),
+                100.0 * nsteps / max(1, int(s1503_nsteps)),
+            )
         fine_ov = bool(sim_cfg.get("_fine_step_overridden", False))
         coarse_ov = bool(sim_cfg.get("_coarse_step_overridden", False))
         fine_val = float(sim_cfg.get("fine_time_step_s", 0.0) or 0.0)
@@ -2808,9 +2946,51 @@ def run_wcg_downlink(config: dict) -> tuple[
     # does not apply — it is disabled while this variant runs.
     _min_dur_by_lat = ngso_cfg.get("min_duration_by_lat", []) or []
 
+    # §D5.1.4 picks the algorithm from the data, so any forced mode is a
+    # what-if. Carry it into the run provenance (report header, UI banner) —
+    # a result produced under an override must never be read as conformant.
+    _td_override = ngso_cfg.get("_track_duration_override")
+    if _td_override:
+        sim_meta["_track_duration_override"] = dict(_td_override)
+        logger.warning(
+            "  §D5.1.4 selection OVERRIDDEN (mode=%s): %s",
+            _td_override.get("mode", "?"), _td_override.get("note", ""),
+        )
+
+    # §D5.1.4.2 requested but degenerate at this latitude (N_SW ≤ 1): the run
+    # silently falls back to §D5.1.4.1, which the report must state.
+    _td_degenerate: list[dict] = []
+
+    # §D5.1.4 (printed p. 97) picks the algorithm at NOTICE level: "in the case
+    # that the non-GSO satellite selection method is defined by track duration
+    # (i.e. MIN_DURATION is non-zero for at least one latitude)". The window
+    # length, though, is MIN_DURATION at the ES latitude — so a filing can
+    # select §D5.1.4.2 while the examined ES sits at a latitude declaring 0,
+    # where the window has no length and the per-step result of §D5.1.4.1 is
+    # what §D5.1.4.2 degenerates to. Record that rather than silently running
+    # the classic path.
+    _td_declared_anywhere = any(
+        float(v) > 0.0 for *_x, v in (_min_dur_by_lat or []))
+
     def _windows_for_es(es_lat_deg: float):
         md = _resolve_min_duration(es_lat_deg, _min_dur_by_lat)
         if md <= 0.0:
+            if _td_declared_anywhere:
+                logger.warning(
+                    "  §D5.1.4 selects the track-duration algorithm for this "
+                    "notice (MIN_DURATION is non-zero at some latitude), but "
+                    "MIN_DURATION = 0 at ES latitude %.2f°: the sliding window "
+                    "has no length there and §D5.1.4.2 degenerates to the "
+                    "per-step selection of §D5.1.4.1, which is what runs.",
+                    es_lat_deg,
+                )
+                _td_degenerate.append({
+                    "es_lat_deg": float(es_lat_deg),
+                    "min_duration_s": 0.0,
+                    "t_fine_s": float(tstep),
+                    "n_sw": 0,
+                    "reason": "min_duration_zero_at_es_latitude",
+                })
             return None
         min_orb_s = min(
             (compute_orbital_period(oe.a) for oe in constellation), default=T_orb
@@ -2824,7 +3004,28 @@ def run_wcg_downlink(config: dict) -> tuple[
         # §D5.1.4.1 per-step result. Route to the standard engine (faster, keeps
         # the dual time step) instead of running ~Nstep all-fine steps for an
         # identical answer.
+        # N_SW ceiling. The single-pass engine holds a dense N_SW × n_sat ring
+        # per worker; a MIN_DURATION near the §B5.2 ceiling (99 999 s) against a
+        # sub-second T_fine asks for hundreds of GB. Fail with a message that
+        # names the knob instead of letting the OOM killer end the run.
+        _ring_mb = w.n_sw * max(1, len(constellation)) * 10 / 1e6
+        _ring_cap_mb = float(sim_cfg.get("track_duration_max_ring_mb", 8192.0))
+        if _ring_mb > _ring_cap_mb:
+            raise ValueError(
+                f"§D5.1.4.2 window is too large to buffer: MIN_DURATION={md:.0f}s "
+                f"/ T_fine={tstep:.3f}s → N_SW={w.n_sw} steps × "
+                f"{len(constellation)} satellites ≈ {_ring_mb:.0f} MB per worker "
+                f"(cap {_ring_cap_mb:.0f} MB). Raise "
+                "simulation.track_duration_max_ring_mb if the machine really has "
+                "that much RAM per job, or reduce n_jobs."
+            )
         if w.n_sw <= 1:
+            _td_degenerate.append({
+                "es_lat_deg": float(es_lat_deg),
+                "min_duration_s": float(md),
+                "t_fine_s": float(tstep),
+                "n_sw": int(w.n_sw),
+            })
             logger.warning(
                 "  MIN_DURATION (%.0fs) at ES lat %.2f° ≤ T_fine (%.3fs) → the "
                 "track-duration window is below the time resolution (N_SW=1); "
@@ -2866,6 +3067,20 @@ def run_wcg_downlink(config: dict) -> tuple[
     windows_static = (
         _windows_for_es(static_wcg.es_lat_deg) if static_wcg is not None else None
     )
+    if _td_degenerate:
+        sim_meta["_track_duration_degenerate"] = _td_degenerate
+
+    # §D5.1.4.2 Step 20: which reading of the gain ("OR") branch to apply. The
+    # printed text does not say whether a window-eligible satellite dropped by
+    # MAX_CO_FREQ may re-enter through it; default keeps the cap binding.
+    _or_rescues_capped = bool(ngso_cfg.get("step20_or_rescues_capped", False))
+    if _or_rescues_capped and (windows_main is not None or windows_static is not None):
+        logger.info(
+            "  §D5.1.4.2 Step 20: gain-branch reading set to 'not in the "
+            "tracked set' — satellites capped by MAX_CO_FREQ re-enter through "
+            "the OR branch (more conservative than the default reading)."
+        )
+    sim_meta["_step20_or_rescues_capped"] = _or_rescues_capped
     if windows_static is not None and windows_main is None:
         logger.info(
             "  §D5.1.4.2 track-duration variant ACTIVE for the Static ES only "
@@ -2960,6 +3175,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                 wdelta_deg=wdelta_deg,
                 t_run_s=t_run_s,
                 gso_min_elevation_deg=gso_min_elev_effective_deg,
+                or_rescues_capped=_or_rescues_capped,
             )
         else:
             # Main WCG ES has MIN_DURATION=0 → standard path (only the static ES
@@ -2999,6 +3215,7 @@ def run_wcg_downlink(config: dict) -> tuple[
                     strict_exclusion_zone=strict_exclusion_zone,
                     min_angle_at_es_deg=min_angle_at_es_deg, wdelta_deg=wdelta_deg,
                     t_run_s=t_run_s, gso_min_elevation_deg=gso_min_elev_effective_deg,
+                    or_rescues_capped=_or_rescues_capped,
                 )
             else:
                 # Static ES latitude has MIN_DURATION=0 → standard path for it.
@@ -3078,17 +3295,44 @@ def run_wcg_downlink(config: dict) -> tuple[
         )
         sim_elapsed_s = time.perf_counter() - sim_t0
 
+        # §D5.1.4.2 provenance that only the engine knows: which selection
+        # inputs it did not apply, which Step-20 reading ran, and the Step-19
+        # tallies (empty tracked sets are anti-conservative — see B09).
+        if getattr(sim_result, "window_stats", None) and "_track_duration" in sim_meta:
+            sim_meta["_track_duration"]["inputs_ignored"] = list(
+                getattr(sim_result, "selection_inputs_ignored", []))
+            sim_meta["_track_duration"]["or_rescues_capped"] = bool(
+                getattr(sim_result, "or_rescues_capped", False))
+            sim_meta["_track_duration"]["diagnostics"] = dict(
+                getattr(sim_result, "window_diagnostics", {}) or {})
+
         # Executed dual time step tally (fine vs coarse) from the run.
         try:
             _acc = sim_result.acc
-            sim_meta["_resolved_n_fine_steps"] = int(_acc.n_fine_steps)
-            sim_meta["_resolved_n_coarse_steps"] = int(_acc.n_coarse_steps)
-            sim_meta["_resolved_n_exec_steps"] = int(_acc.n_steps)
-            logger.info(
-                "  Dual time step executed: %d fine + %d coarse = %d iterations "
-                "(%d fine-equivalent steps).",
-                _acc.n_fine_steps, _acc.n_coarse_steps, _acc.n_steps, nsteps,
-            )
+            if getattr(sim_result, "window_stats", None):
+                # Windowed variant: ``acc`` is ONE window set, so its step count
+                # is that set's sample count (N_Repeat × N_SW), not the length of
+                # the timeline the engine walked. Report the timeline.
+                _n_timeline = int(getattr(sim_result, "n_timeline_steps", 0))
+                sim_meta["_resolved_n_fine_steps"] = _n_timeline
+                sim_meta["_resolved_n_coarse_steps"] = 0
+                sim_meta["_resolved_n_exec_steps"] = _n_timeline
+                sim_meta["_resolved_n_window_samples"] = int(_acc.n_steps)
+                logger.info(
+                    "  §D5.1.4.2 timeline executed: %d fine steps (all-fine; the "
+                    "dual time step does not apply); headline window set kept "
+                    "%d samples.",
+                    _n_timeline, int(_acc.n_steps),
+                )
+            else:
+                sim_meta["_resolved_n_fine_steps"] = int(_acc.n_fine_steps)
+                sim_meta["_resolved_n_coarse_steps"] = int(_acc.n_coarse_steps)
+                sim_meta["_resolved_n_exec_steps"] = int(_acc.n_steps)
+                logger.info(
+                    "  Dual time step executed: %d fine + %d coarse = %d iterations "
+                    "(%d fine-equivalent steps).",
+                    _acc.n_fine_steps, _acc.n_coarse_steps, _acc.n_steps, nsteps,
+                )
         except Exception:  # noqa: BLE001 — telemetry only
             pass
 
@@ -3175,6 +3419,17 @@ def run_wcg_downlink(config: dict) -> tuple[
         logger.info(f"    Mean:     {_acc.epfd_mean_db():.2f} dBW/m²/BWref")
         logger.info(f"    Minimum:  {_acc.epfd_min_valid_db:.2f} dBW/m²/BWref")
         logger.info(f"    Steps with contribution: {_acc.n_steps_valid}/{_acc.n_steps}")
+        if getattr(sim_result, "window_stats", None):
+            # ``acc`` is the worst window SET, not the whole run: its steps are
+            # that set's samples (N_Repeat × N_SW). Name it, so the counts above
+            # are not read as the timeline.
+            logger.info(
+                "    (§D5.1.4.2: the figures above are window set #%d of %d; "
+                "the run itself walked %d fine steps)",
+                int(getattr(sim_result, "worst_window_index", -1)),
+                len(sim_result.window_stats),
+                int(getattr(sim_result, "n_timeline_steps", 0)),
+            )
 
     # ================================================================
     #  9. FINAL SUMMARY — WORST-CASE GEOMETRY

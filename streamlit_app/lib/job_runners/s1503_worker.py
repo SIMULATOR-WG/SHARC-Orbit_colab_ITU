@@ -92,6 +92,13 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
                         else None)
     except (TypeError, ValueError):
         sim_freq_ghz = None
+    # §B3.3 operating-parameter masks (f_mask='R') registered with the filing.
+    # These carry MIN_DURATION / MIN_ELEV / MIN_EXCLUDE / MAX_CO_FREQ and, per
+    # the Attachment to Part B, supersede the SRS tables for the same band.
+    _op_paths = [str(p) for p in (params.get("op_param_paths") or []) if p]
+    _op_paths = [p for p in _op_paths if Path(p).exists()]
+    if _op_paths:
+        _emit(f"Operating-parameter masks: {len(_op_paths)} XML file(s)")
     manual_cfg = params.get("manual_cfg")
     # Registered manual filing: the systems row points at a YAML SRS (written
     # by the Manual System page through the Upload flow) — load it as the
@@ -121,7 +128,8 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, xml_path=str(mask_path), mask_id=mask_id,
                             ntc_id=ntc_id, service=service,
-                            simulation_frequency_ghz=sim_freq_ghz)
+                            simulation_frequency_ghz=sim_freq_ghz,
+                            operating_params_paths=_op_paths or None)
     elif mask_path:
         # .mdb mask: when mask_id is not explicitly chosen, leave it None so
         # load_from_srs resolves it from mask_lnk1 precedence (emi_rcp=E →
@@ -131,12 +139,14 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, pfd_mask_mdb=str(mask_path), mask_id=mask_id,
                             ntc_id=ntc_id, service=service,
-                            simulation_frequency_ghz=sim_freq_ghz)
+                            simulation_frequency_ghz=sim_freq_ghz,
+                            operating_params_paths=_op_paths or None)
     else:
         _emit(f"Loading filing: {srs_path}")
         cfg = load_from_srs(srs_path, xml_path=None, mask_id=mask_id,
                             ntc_id=ntc_id, service=service,
-                            simulation_frequency_ghz=sim_freq_ghz)
+                            simulation_frequency_ghz=sim_freq_ghz,
+                            operating_params_paths=_op_paths or None)
 
     sim = cfg.setdefault("simulation", {})
     ngso = cfg.setdefault("non_gso", {})
@@ -229,7 +239,26 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     # what-if studies and are recorded in the run provenance.
     _td_mode = str(params.get("track_duration_mode") or "auto")
     _md = params.get("min_duration_s")
-    if _td_mode == "force" and _md is not None and float(_md) > 0.0:
+    if _td_mode == "force":
+        # Fail loudly. A missing or out-of-range value silently reverted to the
+        # filing's own MIN_DURATION while the run was labelled "forced".
+        from src.operating_params import (  # type: ignore[import]
+            MIN_DURATION_MAX_S, MIN_DURATION_MIN_S,
+        )
+        try:
+            _mdv = float(_md)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "track_duration_mode='force' requires a numeric min_duration_s; "
+                f"got {_md!r}."
+            ) from None
+        if not (MIN_DURATION_MIN_S <= _mdv <= MIN_DURATION_MAX_S):
+            raise ValueError(
+                f"min_duration_s={_mdv:g}s is outside the §B5.2 range "
+                f"[{MIN_DURATION_MIN_S}, {MIN_DURATION_MAX_S}]s."
+            )
+        _md = _mdv
+    if _td_mode == "force":
         ngso["min_duration_by_lat"] = [(-90.0, 90.0, float(_md))]
         ngso["_track_duration_override"] = {
             "mode": "force", "min_duration_s": float(_md),
@@ -432,7 +461,11 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         # the Results panel does not advertise a coarse Δt / Ncoarse never used.
         _tf = float(sim["_track_duration"].get("t_fine_s") or 0.0)
         _ntot = int(sim["_track_duration"].get("n_total_steps") or 0)
-        _n_exec = getattr(_acc_dl, "n_steps", None)
+        # The engine walks ONE timeline of N_TotalSteps fine steps. ``acc`` is
+        # the headline window SET, so its n_steps is that set's sample count
+        # (N_Repeat × N_SW) — reporting it as "steps executed" understated or
+        # overstated the run depending on N_Repeat.
+        _n_exec = int(sim.get("_resolved_n_exec_steps") or _ntot or 0)
         sim_data["dual_time_step"] = {
             "mode": "fine-only (track duration §D5.1.4.2)",
             "fine_step_s": _tf,
@@ -442,6 +475,7 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
             "n_fine_steps_executed": _n_exec,
             "n_coarse_steps_executed": 0,
             "n_exec_steps": _n_exec,
+            "n_window_samples": int(sim.get("_resolved_n_window_samples") or 0),
         }
     else:
         sim_data["dual_time_step"] = {
@@ -541,6 +575,17 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     # S.1503-4 §D5.1.4.2 track-duration variant: expose the window parameters and
     # per-slide-window-set CCDFs. The headline CCDF above is the worst-per-level
     # envelope across sets (go/no-go holds iff every set complies).
+    # §D5.1.4 selection provenance travels even when no window ran: "Force
+    # classic" produces a standard run that must still be labelled an override,
+    # and a degenerate N_SW ≤ 1 silently fell back to §D5.1.4.1.
+    if sim.get("_track_duration_override"):
+        sim_data["track_duration_override"] = dict(sim["_track_duration_override"])
+    if sim.get("_track_duration_degenerate"):
+        sim_data["track_duration_degenerate"] = list(sim["_track_duration_degenerate"])
+    if sim.get("_num_time_steps_user_override"):
+        sim_data["num_time_steps_user_override"] = int(
+            sim["_num_time_steps_user_override"])
+
     _td = sim.get("_track_duration")
     if _td and getattr(sim_result_dl, "window_stats", None):
         sim_data["track_duration"] = _td

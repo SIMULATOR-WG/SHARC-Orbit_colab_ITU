@@ -1142,7 +1142,24 @@ if submit:
     # so a result produced under one is never mistaken for an examination.
     params["track_duration_mode"] = track_duration_mode
     _md_val = _f(min_duration_s)
-    if track_duration_mode == "force" and _md_val is not None and _md_val > 0:
+    if track_duration_mode == "force":
+        # Blank or out-of-range used to fall through silently: the run then
+        # used the filing's own MIN_DURATION while the UI still said "forced",
+        # and the provenance recorded an override that never happened.
+        from src.operating_params import MIN_DURATION_MAX_S, MIN_DURATION_MIN_S
+        if _md_val is None:
+            st.error(
+                "Selection method is **Force MIN_DURATION** but no value was "
+                "entered. Type a MIN_DURATION in seconds or switch back to "
+                "Automatic."
+            )
+            st.stop()
+        if not (MIN_DURATION_MIN_S <= _md_val <= MIN_DURATION_MAX_S):
+            st.error(
+                f"MIN_DURATION = {_md_val:g} s is outside the §B5.2 range "
+                f"[{MIN_DURATION_MIN_S}, {MIN_DURATION_MAX_S}] s."
+            )
+            st.stop()
         params["min_duration_s"] = _md_val
     # Orbital dynamics. artificial_precession: only sent when forced (auto →
     # leave unset so the engine auto-detects from the SRS).

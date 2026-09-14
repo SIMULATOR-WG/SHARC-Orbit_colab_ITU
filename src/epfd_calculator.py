@@ -1128,6 +1128,19 @@ class EPFDSimulationResult:
     per_window_ccdf: list = field(default_factory=list)  # list[(bins_desc, pct_desc)]
     windows: "TrackDurationWindows | None" = None
     worst_window_index: int = -1
+    # Windowed runs only. ``n_timeline_steps`` is N_TotalSteps (§D5.1.3): the
+    # length of the single simulated timeline, which is NOT ``acc.n_steps`` —
+    # the headline ``acc`` is one window *set*, so its step count is
+    # N_Repeat × N_SW (the samples that set contributes to its own CCDF).
+    n_timeline_steps: int = 0
+    timeline_t_fine_s: float = 0.0
+    # §D5.1.4.2 Step 19/19bis tallies (see ``_finalize_windowed_result``).
+    window_diagnostics: dict = field(default_factory=dict)
+    # Inputs the windowed selection accepted for signature uniformity but does
+    # NOT apply (MIN_ANGLE_AT_ES, strict_max_co_freq_total, Res.76 per-system
+    # MAX_CO_FREQ), and which reading of Step 20's gain branch ran.
+    selection_inputs_ignored: list = field(default_factory=list)
+    or_rescues_capped: bool = False
 
     def build_cdf(self):
         """Builds the CCDF from the accumulator (or from the history if retained).
@@ -2357,6 +2370,7 @@ def _process_closed_window(
     stats_end_step: int,
     t_fine_s: float,
     win_stats: EPFDWindowStats,
+    or_rescues_capped: bool = False,
 ) -> None:
     """Aggregate one closed sliding window into ``win_stats`` (§D5.1.4.2 Steps 19–22).
 
@@ -2407,6 +2421,10 @@ def _process_closed_window(
         selected = set(ranked[:max_co_freq])
     else:
         selected = set(ranked)  # 0 ⇒ unlimited
+    win_stats.note_window(
+        len(eligible),
+        bool(max_co_freq and max_co_freq > 0 and len(eligible) > max_co_freq),
+    )
 
     # Steps 21–22: per-step aggregate over the fixed tracked set plus OR sats.
     # OR contributors are satellites NOT among the window-eligible/standard set
@@ -2414,6 +2432,10 @@ def _process_closed_window(
     # standard path). A window-eligible satellite dropped by the MAX_CO_FREQ cap
     # is genuinely dropped — it must not re-enter through the OR branch, else it
     # would defeat the cap. Selected sats count once (no double counting).
+    # ``or_rescues_capped`` switches to the other defensible reading of the
+    # printed Step 20 (the gain branch qualified only by "not in the tracked
+    # set"), which re-admits the capped satellites and is more conservative.
+    or_blocked = selected if or_rescues_capped else eligible
     for g, idx, epfd_lin, _std, orx in buffer:
         if g >= stats_end_step:
             # Window completes for eligibility, but this step is past the run
@@ -2422,7 +2444,7 @@ def _process_closed_window(
         agg = 0.0
         for j in range(idx.size):
             k = int(idx[j])
-            if k in selected or (orx[j] and k not in eligible):
+            if k in selected or (orx[j] and k not in or_blocked):
                 agg += float(epfd_lin[j])
         epfd_db = 10.0 * math.log10(agg) if agg > 0.0 else -999.0
         win_stats.add(time_s=g * t_fine_s, epfd_db=epfd_db, duration_s=t_fine_s)
@@ -2438,6 +2460,10 @@ def _window_aggregate_dense(
     O: np.ndarray,
     max_co_freq: int,
     row_order: list | None = None,
+    active: np.ndarray | None = None,
+    eligible: np.ndarray | None = None,
+    stats_out: dict | None = None,
+    or_rescues_capped: bool = False,
 ) -> np.ndarray:
     """Vectorized §D5.1.4.2 Steps 19, 19bis, 20 and 21 for one closed window.
 
@@ -2456,12 +2482,24 @@ def _window_aggregate_dense(
     window-eligible satellites, and the deterministic ``(−peak, index)``
     tie-break of Step 19bis.
     """
-    elig = S.all(axis=0)                                      # Step 19
-    n_elig = int(elig.sum())
+    if eligible is None:
+        elig = S.all(axis=0)                                  # Step 19
+        cand = np.flatnonzero(elig)
+    else:
+        # The ring maintains the Step-19 tally incrementally, so eligibility
+        # costs nothing here instead of scanning an N_SW × N_sat array that is
+        # ~99% zeros for a real constellation.
+        cand = np.asarray(eligible, dtype=np.int64)
+        elig = np.zeros(E.shape[1], dtype=bool)
+        elig[cand] = True
+    n_elig = int(cand.size)
+    capped = bool(max_co_freq and max_co_freq > 0 and n_elig > max_co_freq)
+    if stats_out is not None:
+        stats_out["n_elig"] = n_elig
+        stats_out["capped"] = capped
     sel_mask = np.zeros(E.shape[1], dtype=bool)
     if n_elig:
-        cand = np.flatnonzero(elig)
-        if max_co_freq and max_co_freq > 0 and n_elig > max_co_freq:
+        if capped:
             # Step 19bis: rank by window-peak epfd↓. An eligible satellite is
             # recorded at every step of the window, so a plain column max over
             # the dense view equals the max over its recorded steps.
@@ -2479,13 +2517,26 @@ def _window_aggregate_dense(
 
     # Steps 20–21: the fixed tracked set plus the gain-condition satellites that
     # are not window-eligible, each counted once.
-    not_elig = ~elig[None, :]
+    # Reduce only over satellites that appear somewhere in the window. For a
+    # real filing that is a few dozen columns out of thousands.
+    cols = (np.arange(E.shape[1]) if active is None
+            else np.asarray(active, dtype=np.int64))
+    if cols.size == 0:
+        n = E.shape[0] if row_order is None else sum(b - a for a, b in row_order)
+        return np.zeros(n, dtype=E.dtype)
+    sel_c = sel_mask[cols]
+    # Step 20 reading (see ``or_rescues_capped`` on the public entry point):
+    # with the default, the gain branch admits only satellites that are NOT
+    # window-eligible; with the flag on, it also re-admits eligible satellites
+    # that Step 19bis dropped under the MAX_CO_FREQ cap.
+    gate_c = (~sel_mask[cols]) if or_rescues_capped else ~elig[cols]
     if row_order is None:
         row_order = [(0, E.shape[0])]
     parts = []
     for a, b in row_order:
-        contrib = sel_mask[None, :] | (O[a:b] & not_elig)
-        parts.append((E[a:b] * contrib).sum(axis=1))
+        Ec = E[a:b][:, cols]
+        contrib = sel_c[None, :] | (O[a:b][:, cols] & gate_c[None, :])
+        parts.append((Ec * contrib).sum(axis=1))
     return parts[0] if len(parts) == 1 else np.concatenate(parts)
 
 
@@ -2499,7 +2550,7 @@ class _WindowRing:
     pass of §D5.1.3 possible.
     """
 
-    __slots__ = ("n_sw", "E", "S", "O", "head")
+    __slots__ = ("n_sw", "E", "S", "O", "head", "_idx", "n_seen", "n_std")
 
     def __init__(self, n_sw: int, n_sat: int):
         self.n_sw = int(n_sw)
@@ -2507,18 +2558,41 @@ class _WindowRing:
         self.S = np.zeros((self.n_sw, n_sat), dtype=bool)
         self.O = np.zeros((self.n_sw, n_sat), dtype=bool)
         self.head = 0
+        # Per-satellite tallies over the rows currently resident, maintained in
+        # O(#recorded) per push. They turn the two window reductions from
+        # O(N_SW · N_sat) over a ~99% empty array into O(N_SW · n_active):
+        # ``n_std == n_sw`` is Step 19 eligibility without scanning, and
+        # ``n_seen > 0`` is the small column set worth reducing at all.
+        self._idx: list[np.ndarray] = [np.empty(0, dtype=np.int64)] * self.n_sw
+        self.n_seen = np.zeros(n_sat, dtype=np.int32)
+        self.n_std = np.zeros(n_sat, dtype=np.int32)
 
     def push(self, idx: np.ndarray, epfd_lin: np.ndarray,
              std: np.ndarray, orx: np.ndarray) -> None:
         r = self.head % self.n_sw
-        self.E[r] = 0.0
-        self.S[r] = False
-        self.O[r] = False
+        old = self._idx[r]
+        if old.size:                      # evict the row this one overwrites
+            self.n_seen[old] -= 1
+            np.subtract.at(self.n_std, old[self.S[r, old]], 1)
+            self.E[r, old] = 0.0
+            self.S[r, old] = False
+            self.O[r, old] = False
         if idx.size:
             self.E[r, idx] = epfd_lin
             self.S[r, idx] = std
             self.O[r, idx] = orx
+            self.n_seen[idx] += 1
+            np.add.at(self.n_std, idx[std], 1)
+        self._idx[r] = idx
         self.head += 1
+
+    def active(self) -> np.ndarray:
+        """Satellites recorded at least once in the resident window."""
+        return np.flatnonzero(self.n_seen)
+
+    def eligible(self) -> np.ndarray:
+        """Step 19: standard at EVERY resident row, without scanning the ring."""
+        return np.flatnonzero(self.n_std == self.n_sw)
 
     def slices(self) -> list[tuple[int, int]]:
         """Ring-row ranges spanning the window that ends at the last push,
@@ -2596,7 +2670,7 @@ def _simulate_singlepass_chunk(args):
      alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
      raan_dot_artificial_rad_s, raan_dot_override_rad_s,
      max_co_freq_by_lat, strict_exclusion_zone,
-     wdelta_deg, t_run_s, gso_min_elevation_deg) = args
+     wdelta_deg, t_run_s, gso_min_elevation_deg, or_rescues_capped) = args
 
     t_fine = windows.t_fine_s
     n_sw = windows.n_sw
@@ -2697,8 +2771,11 @@ def _simulate_singlepass_chunk(args):
             if win_start >= stats_end:
                 continue  # whole window past this family's run duration
 
+            _wdiag: dict = {}
             agg = _window_aggregate_dense(
                 ring.E, ring.S, ring.O, max_co_freq, row_order=ring.slices(),
+                active=ring.active(), eligible=ring.eligible(),
+                stats_out=_wdiag, or_rescues_capped=or_rescues_capped,
             )
 
             n_keep = min(n_sw, stats_end - win_start)
@@ -2715,6 +2792,8 @@ def _simulate_singlepass_chunk(args):
                 epfd_db, duration_s=t_fine,
                 first_time_s=win_start * t_fine, time_step_s=t_fine,
             )
+            ws.note_window(int(_wdiag.get("n_elig", 0)),
+                           bool(_wdiag.get("capped", False)))
 
     return {"single_pass": True, "sets": out}
 
@@ -2740,7 +2819,7 @@ def _simulate_window_block(args):
      raan_dot_artificial_rad_s, raan_dot_override_rad_s,
      max_co_freq_by_lat, strict_max_co_freq_total, strict_exclusion_zone,
      min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
-     system_id_per_sat, max_co_freq_by_system) = args
+     system_id_per_sat, max_co_freq_by_system, or_rescues_capped) = args
 
     t_fine = windows.t_fine_s
     n_sw = windows.n_sw
@@ -2835,6 +2914,7 @@ def _simulate_window_block(args):
                 stats_end_step=stats_end,
                 t_fine_s=t_fine,
                 win_stats=win_stats,
+                or_rescues_capped=or_rescues_capped,
             )
             buffer = []
 
@@ -2885,7 +2965,14 @@ def _finalize_windowed_result(result, windows, win_by_index):
     result.window_stats = window_stats
     result.per_window_ccdf = [w.build_ccdf() for w in window_stats]
 
-    # Headline CCDF = worst-per-level envelope (correct go/no-go across sets).
+    # Headline CCDF = worst-per-level envelope. §D5.1.4.2 runs the examination
+    # once per window set and the network complies only if EVERY set complies,
+    # so the per-level maximum of the N_TW exceedance curves is pass-equivalent
+    # to testing each set: at the Article 22 level of a given row the envelope
+    # carries the largest percentage any set recorded, and §D7.1.3 Step 4-5
+    # (``check_article22_compliance``) compares exactly that percentage against
+    # the row threshold. One set failing therefore fails the envelope, and the
+    # envelope passing means no set exceeded the threshold anywhere.
     totals = [w.total_duration_s for w in window_stats]
     bins_desc, pct_desc = _build_worst_envelope(window_stats, totals)
     result.cdf_epfd_dBW = bins_desc
@@ -2910,11 +2997,54 @@ def _finalize_windowed_result(result, windows, win_by_index):
         headline.epfd_max_db = worst.epfd_max_db
         headline.epfd_min_valid_db = worst.epfd_min_valid_db  # real min, not the peak
         headline.peak_time_s = worst.peak_time_s
+        # The windowed engine walks ONE timeline, [0, N_TotalSteps) at T_fine,
+        # so the extent of the run is the timeline — not the extent of the
+        # samples this particular set happened to keep. Consumers that size the
+        # animation / report from ``acc`` (export_visualization) would otherwise
+        # see ``None`` and fall back to a hard-coded duration.
+        headline.first_time_s = 0.0
+        headline.last_time_s = max(0, int(windows.n_total_steps) - 1) * float(windows.t_fine_s)
         result.acc = headline
 
+    result.n_timeline_steps = int(windows.n_total_steps)
+    result.timeline_t_fine_s = float(windows.t_fine_s)
+
+    # §D5.1.4.2 Step 19 diagnostics. An empty tracked set means no satellite
+    # stayed within α₀/ε₀ for a WHOLE window, so the aggregate falls back to
+    # the Step-20 gain branch alone and the statistic is anti-conservative.
+    # That is exactly what MIN_DURATION longer than any achievable track looks
+    # like, and it reads as a clean PASS unless it is reported.
+    n_win = sum(w.n_windows for w in window_stats)
+    n_empty = sum(w.n_windows_no_eligible for w in window_stats)
+    n_capped = sum(w.n_windows_capped for w in window_stats)
+    result.window_diagnostics = {
+        "n_windows_closed": int(n_win),
+        "n_windows_no_eligible": int(n_empty),
+        "n_windows_capped": int(n_capped),
+        "empty_window_fraction": (n_empty / n_win) if n_win else 0.0,
+        "mean_eligible_per_window": (
+            sum(w.sum_eligible for w in window_stats) / n_win) if n_win else 0.0,
+        "per_set_empty_fraction": [w.empty_window_fraction for w in window_stats],
+    }
+    if n_win and n_empty:
+        frac = 100.0 * n_empty / n_win
+        msg = (
+            "  §D5.1.4.2 Step 19: %d of %d closed windows (%.1f%%) had NO "
+            "eligible satellite — no satellite held the α₀/ε₀ condition for a "
+            "whole MIN_DURATION window, so those steps aggregate only the "
+            "Step-20 gain branch. Results are NOT conservative where this "
+            "happens; it usually means MIN_DURATION exceeds the achievable "
+            "track duration for this constellation and ES latitude."
+        )
+        if frac >= 50.0:
+            logger.warning(msg, n_empty, n_win, frac)
+        else:
+            logger.info(msg, n_empty, n_win, frac)
     logger.info(
-        "Windowed simulation complete: %d/%d sets, envelope points=%d",
-        len(window_stats), windows.n_tw, bins_desc.size,
+        "Windowed simulation complete: %d/%d sets, envelope points=%d, "
+        "%d windows closed (%d capped by MAX_CO_FREQ, %.2f eligible/window avg)",
+        len(window_stats), windows.n_tw, bins_desc.size, n_win, n_capped,
+        result.window_diagnostics["mean_eligible_per_window"],
     )
     return result
 
@@ -2941,6 +3071,7 @@ def run_epfd_simulation_windowed(
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
     single_pass: bool = True,
+    or_rescues_capped: bool = False,
 ) -> EPFDSimulationResult:
     """EPFD↓ with the track-duration sliding-window variant (S.1503-4 §D5.1.4.2).
 
@@ -2967,8 +3098,13 @@ def run_epfd_simulation_windowed(
       re-propagates the same global grid ``N_TW`` times. Kept for A/B
       verification; on a real filing it costs ~10³ times the conformant path.
 
-    Both paths must produce identical statistics; that equivalence is the
-    subject of ``test_single_pass_matches_legacy``.
+    Both paths must produce the same statistics; that equivalence is the
+    subject of ``test_single_pass_matches_legacy``. "Same" here means identical
+    up to summation rounding, not bit-identical: the single pass reduces a
+    zero-padded ``N_sat`` row pairwise while the legacy path adds only the
+    recorded contributors in ascending index order, which can differ in the last
+    ulp (~1e-15 dB against a 0.1 dB bin). A selection difference, by contrast,
+    moves the value by whole dB.
 
     **Selection scope (§D5.1.4.2 Step 20).** Per-window selection is: full-window
     α₀/ε₀ eligibility (Step 19) → rank eligible by window-peak epfd↓ (Step 19bis)
@@ -2978,6 +3114,15 @@ def run_epfd_simulation_windowed(
     per-system MAX_CO_FREQ partitioning — so those inputs are accepted (for a
     uniform call signature with the standard path) but **not applied here**, and
     a warning is emitted when any is active.
+
+    ``or_rescues_capped`` selects between the two defensible readings of the
+    printed Step 20. The text qualifies the gain ("OR") branch without saying
+    whether a window-eligible satellite that Step 19bis dropped under
+    MAX_CO_FREQ may re-enter through it. Default ``False`` keeps the project's
+    reading — a capped satellite is genuinely dropped, so the cap cannot be
+    defeated through the gain branch. ``True`` takes the other reading, where
+    the gain branch is qualified only by "not in the tracked set", which
+    re-admits those satellites and is the more conservative of the two.
     """
     result = EPFDSimulationResult(wcg=wcg)
     result.windows = windows
@@ -2997,6 +3142,12 @@ def run_epfd_simulation_windowed(
         _ignored.append("strict_max_co_freq_total")
     if system_id_per_sat is not None and max_co_freq_by_lat_per_system is not None:
         _ignored.append("per-system MAX_CO_FREQ (Res.76)")
+    # F-P02/F-P03: a log line is not provenance. Carry the list on the result so
+    # the run artifact and the §D7.3 report can state which inputs the windowed
+    # selection did not apply — otherwise a run with MIN_ANGLE_AT_ES declared
+    # looks identical to one without it.
+    result.selection_inputs_ignored = list(_ignored)
+    result.or_rescues_capped = bool(or_rescues_capped)
     if _ignored:
         logger.warning(
             "  §D5.1.4.2 windowed selection follows Step 20 (window-peak "
@@ -3004,6 +3155,20 @@ def run_epfd_simulation_windowed(
             "on the standard §D5.1.4.1 path.",
             ", ".join(_ignored),
         )
+
+    if wdelta_deg > 0.0:
+        # §D6.3.4 ramps the station-keeping offset linearly over the run. The
+        # windowed variant does not simulate ``nsteps × tstep`` — it walks
+        # N_TotalSteps fine steps — so a ``t_run_s`` sized for the standard path
+        # would compress or stretch the ramp over the wrong span.
+        t_timeline = float(windows.t_total_duration_s)
+        if t_run_s <= 0.0 or abs(t_run_s - t_timeline) > 1e-6 * max(1.0, t_timeline):
+            logger.info(
+                "  §D6.3.4 W_delta ramp retimed to the windowed timeline: "
+                "t_run %.1f s → %.1f s (N_TotalSteps=%d × T_fine=%.4f s).",
+                t_run_s, t_timeline, int(windows.n_total_steps), windows.t_fine_s,
+            )
+            t_run_s = t_timeline
 
     max_co_freq_by_system: dict[int, int] | None = None
     if system_id_per_sat is not None and max_co_freq_by_lat_per_system is not None:
@@ -3034,6 +3199,15 @@ def run_epfd_simulation_windowed(
             len(constellation), windows.t_fine_s, len(chunks), n_jobs,
             halo_overhead, 100.0 * halo_overhead / max(1, n_total), ring_mb,
         )
+        if len(chunks) == 1 and n_jobs > 1:
+            logger.warning(
+                "  Single-pass dispatch collapsed to ONE chunk on %d jobs: "
+                "N_TotalSteps=%d is too short to split without the N_SW−1=%d "
+                "halo dominating (each chunk must carry ≥%dx its halo). The run "
+                "is effectively sequential; this is a dimensioning consequence "
+                "of §D5.1.3, not an error.",
+                n_jobs, n_total, n_sw - 1, _HALO_WORK_RATIO,
+            )
         if ring_mb > 2000.0:
             logger.warning(
                 "  Ring buffer ≈%.0f MB per worker (N_SW=%d × %d sats). "
@@ -3046,7 +3220,7 @@ def run_epfd_simulation_windowed(
             alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
             raan_dot_artificial_rad_s, raan_dot_override_rad_s,
             max_co_freq_by_lat or [], strict_exclusion_zone,
-            wdelta_deg, t_run_s, gso_min_elevation_deg,
+            wdelta_deg, t_run_s, gso_min_elevation_deg, or_rescues_capped,
         ) for a, b in chunks]
 
         win_by_index_sp: list = [None] * windows.n_tw
@@ -3098,7 +3272,7 @@ def run_epfd_simulation_windowed(
                 raan_dot_artificial_rad_s, raan_dot_override_rad_s,
                 max_co_freq_by_lat or [], strict_max_co_freq_total, strict_exclusion_zone,
                 min_angle_at_es_deg, wdelta_deg, t_run_s, gso_min_elevation_deg,
-                system_id_per_sat, max_co_freq_by_system,
+                system_id_per_sat, max_co_freq_by_system, or_rescues_capped,
             ))
             b += cnt
 
@@ -3390,18 +3564,26 @@ def _pct_exceeding_level(sim_result: EPFDSimulationResult, level_dBW: float) -> 
 
 
 def _epfd_at_exceedance_pct(sim_result: EPFDSimulationResult, pct_threshold: float) -> float:
-    """Returns the CCDF EPFD at the requested exceedance percentage."""
-    if len(sim_result.cdf_epfd_dBW) == 0:
-        return -999.0
-    if pct_threshold <= 0:
-        return float(sim_result.cdf_epfd_dBW[0])
-    if pct_threshold >= 100:
-        return float(sim_result.cdf_epfd_dBW[-1])
+    """EPFD level the CCDF reaches at ``pct_threshold`` % of time.
 
-    idx = np.searchsorted(sim_result.cdf_percentage, pct_threshold)
-    if idx >= len(sim_result.cdf_epfd_dBW):
-        return float(sim_result.cdf_epfd_dBW[-1])
-    return float(sim_result.cdf_epfd_dBW[idx])
+    Used for the **reported margin only**; the Pass/Fail decision is made on
+    ``P_t`` by :func:`check_article22_compliance`, per §D7.1.3 Step 4-5.
+
+    When the curve never accumulates ``pct_threshold`` % of time the level is
+    undefined, and this returns ``-inf``. It previously returned the lowest
+    occupied bin, which made the verdict depend on the run's quietest step: two
+    runs of the same filing differing by one fine time step could disagree.
+    """
+    bins = np.asarray(sim_result.cdf_epfd_dBW, dtype=float)
+    pct = np.asarray(sim_result.cdf_percentage, dtype=float)
+    if bins.size == 0:
+        return float("-inf")
+    if pct_threshold <= 0:
+        return float(bins[0])                       # J_max: the highest occupied level
+    idx = int(np.searchsorted(pct, pct_threshold))
+    if idx >= bins.size:
+        return float("-inf")                        # curve never reaches this %
+    return float(bins[idx])
 
 
 def _round_down_to_bin_db(value_dB: float, bin_size_dB: float = 0.1) -> float:
@@ -3451,20 +3633,59 @@ def check_article22_compliance(
 
         margins.append((limit_dBW, pct_threshold, margin))
 
-        # Table 17 row (§D7.3.2): Py = simulated probability of exceeding Ji,
-        # read from the probability table; pass ⇔ Py ≤ Pi (equivalent to the
-        # margin criterion above at the same specification point).
+        # §D7.1.3 decides on the PROBABILITY, not on a level:
+        #   "Step 4: From the CDF find Pt, the probability that pfd value Ji was
+        #    exceeded as obtained by the software."
+        #   "Step 5: If Pi < Pt then record Pass ... Else record Fail."  ← as
+        # printed (p. 135). Taken here as an editorial inversion: P_i is the
+        # percentage of time Article 22 ALLOWS the limit J_i to be exceeded and
+        # P_t is the percentage the simulation produced, so compliance is
+        # P_t ≤ P_i. The printed inequality would declare a system compliant
+        # exactly when it exceeds the limit more often than allowed, which
+        # contradicts §D7.1.4 and RR Article 22 itself. This is a documented
+        # reading of the text, not a transcription of it.
+        #
+        # P_t is `_pct_exceeding_level`, which is well defined for every J_i
+        # whether or not the curve ever accumulates P_i % of time. Deciding on
+        # the level instead made the verdict depend on the lowest occupied bin.
+        #
+        # Two rows are edge cases under this convention, and the repository
+        # treats them as follows:
+        #   * P_i = 0   — the hard cap: no exceedance is allowed at all, so the
+        #                 row passes only if J_max is strictly below J_i (see
+        #                 the branch below; equality fails).
+        #   * P_i = 100 — vacuous: P_t can never exceed 100%, so the row always
+        #                 passes. It carries no constraint and is kept only so
+        #                 the Table 17 row count matches the Article 22 table.
+        # The margin in dB is reported alongside but is NOT the criterion: at
+        # these two rows a positive margin and a Fail (or the reverse) can and
+        # do coexist, so the verdict always comes from the probability test.
         py = _pct_exceeding_level(sim_result, limit_bin_dBW)
+        if pct_threshold <= 0.0:
+            # The P=0 row is the final-stage hard cap: the RR's "shall not be
+            # exceeded for any percentage of time". J_max lands on the same
+            # 0.1 dB grid as the limit, so equality is routine and must Fail.
+            j_max = float(sim_result.cdf_epfd_dBW[0]) if len(sim_result.cdf_epfd_dBW) else float("-inf")
+            row_pass = bool(j_max < limit_bin_dBW)
+        else:
+            row_pass = bool(py <= pct_threshold)
+
         table17.append({
             "Ji_dBW": float(limit_dBW),
             "Pi_pct": float(pct_threshold),
             "Py_pct": float(py),
-            "pass": bool(margin >= 0.0),
+            "pass": row_pass,
         })
 
-        if margin < 0.0:
+        if not row_pass:
             compliant = False
-        if margin < worst_margin:
+            # Only a failing point can set the worst margin; a point the curve
+            # never reaches has no finite margin and must not win the ranking.
+            if math.isfinite(margin) and margin < worst_margin:
+                worst_margin = margin
+                worst_limit = limit_bin_dBW
+                worst_pct = float(pct_threshold)
+        elif math.isfinite(margin) and margin < worst_margin and compliant:
             worst_margin = margin
             worst_limit = limit_bin_dBW
             worst_pct = float(pct_threshold)

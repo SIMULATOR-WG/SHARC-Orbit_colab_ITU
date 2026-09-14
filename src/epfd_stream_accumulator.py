@@ -260,6 +260,12 @@ class EPFDStreamAccumulator:
         if other.epfd_max_db > self.epfd_max_db:
             self.epfd_max_db = other.epfd_max_db
             self.peak_time_s = other.peak_time_s
+        elif (other.epfd_max_db == self.epfd_max_db
+              and other.peak_time_s is not None
+              and (self.peak_time_s is None or other.peak_time_s < self.peak_time_s)):
+            # Commutative on an exact tie: the earliest instant wins, so merge
+            # order (pool vs injected executor) cannot change the reported peak.
+            self.peak_time_s = other.peak_time_s
         if other.epfd_min_valid_db < self.epfd_min_valid_db:
             self.epfd_min_valid_db = other.epfd_min_valid_db
         if other.min_alpha_global_deg < self.min_alpha_global_deg:
@@ -396,6 +402,29 @@ class EPFDWindowStats:
     epfd_min_valid_db: float = np.inf
     peak_time_s: float | None = None
 
+    # §D5.1.4.2 Step 19/19bis diagnostics, per closed window of this set.
+    # An empty tracked set (no satellite met the §D5.1.4 condition through the
+    # WHOLE window) is not an error, but it collapses the aggregate onto the
+    # Step-20 gain branch alone and is strongly anti-conservative: it is what a
+    # MIN_DURATION longer than any achievable track looks like. Counting it is
+    # the only way the result can be read for what it is.
+    n_windows: int = 0
+    n_windows_no_eligible: int = 0   # Step 19 produced no eligible satellite
+    n_windows_capped: int = 0        # Step 19bis had to drop satellites (MAX_CO_FREQ bit)
+    sum_eligible: int = 0            # Σ eligible satellites over closed windows
+
+    def note_window(self, n_elig: int, capped: bool) -> None:
+        self.n_windows += 1
+        self.sum_eligible += int(n_elig)
+        if n_elig == 0:
+            self.n_windows_no_eligible += 1
+        if capped:
+            self.n_windows_capped += 1
+
+    @property
+    def empty_window_fraction(self) -> float:
+        return (self.n_windows_no_eligible / self.n_windows) if self.n_windows else 0.0
+
     def add(self, time_s: float, epfd_db: float, duration_s: float) -> None:
         if duration_s <= 0.0 or not np.isfinite(duration_s):
             return
@@ -448,7 +477,13 @@ class EPFDWindowStats:
         vals = arr[valid]
         self.n_steps_valid += n_valid
 
-        idx = np.floor((vals - _BIN_MIN_DB) / _BIN_SIZE_DB + 1e-12).astype(np.int64)
+        # Clip before the cast: a finite-but-huge epfd (a degenerate mask, a bad
+        # bandwidth correction) passes the > −900 filter and would make the
+        # int64 cast emit a RuntimeWarning on every closed window. Both paths
+        # drop the entry either way; clipping keeps the log readable.
+        scaled = np.clip((vals - _BIN_MIN_DB) / _BIN_SIZE_DB + 1e-12,
+                         -1.0, float(_NBINS) + 1.0)
+        idx = np.floor(scaled).astype(np.int64)
         keep = (idx >= 0) & (idx < _NBINS)
         if keep.any():
             counts = np.bincount(idx[keep], minlength=_NBINS)
@@ -462,21 +497,38 @@ class EPFDWindowStats:
                 # strict ``>`` comparison.
                 j = int(np.flatnonzero(valid)[int(np.argmax(vals))])
                 self.peak_time_s = float(first_time_s + j * time_step_s)
-            else:
-                self.peak_time_s = None
+            # Without a time step the instant is unknown; leave whatever was
+            # already recorded rather than erasing it.
         vmin = float(vals.min())
         if vmin < self.epfd_min_valid_db:
             self.epfd_min_valid_db = vmin
 
     def merge(self, other: "EPFDWindowStats") -> None:
-        if other is None or other.n_steps == 0:
+        """Combine two partial accumulators.
+
+        Commutative and associative in every field, ``peak_time_s`` included:
+        on an exact tie in ``epfd_max_db`` the **earliest** instant wins, which
+        matches the scalar path's first-occurrence rule and makes the result
+        independent of the order chunks happen to arrive in. Exact ties are not
+        exotic — the pfd mask clamps at its edge and the antenna gain pattern
+        saturates, so identical window peaks are common.
+        """
+        if other is None or (other.n_steps == 0 and other.n_windows == 0):
             return
         self.duration_per_bin += other.duration_per_bin
         self.n_steps += other.n_steps
         self.n_steps_valid += other.n_steps_valid
         self.total_duration_s += other.total_duration_s
+        self.n_windows += other.n_windows
+        self.n_windows_no_eligible += other.n_windows_no_eligible
+        self.n_windows_capped += other.n_windows_capped
+        self.sum_eligible += other.sum_eligible
         if other.epfd_max_db > self.epfd_max_db:
             self.epfd_max_db = other.epfd_max_db
+            self.peak_time_s = other.peak_time_s
+        elif (other.epfd_max_db == self.epfd_max_db
+              and other.peak_time_s is not None
+              and (self.peak_time_s is None or other.peak_time_s < self.peak_time_s)):
             self.peak_time_s = other.peak_time_s
         if other.epfd_min_valid_db < self.epfd_min_valid_db:
             self.epfd_min_valid_db = other.epfd_min_valid_db

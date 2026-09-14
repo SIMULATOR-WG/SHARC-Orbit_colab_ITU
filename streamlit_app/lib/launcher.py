@@ -60,6 +60,10 @@ def _system_to_filing(system_id: str) -> dict[str, Any] | None:
         "mask_id": s.get("mask_id"),
         "ntc_id": s.get("ntc_id"),
         "system_id": s["id"],
+        # §B3.3 operating-parameter XMLs uploaded with the filing. The worker
+        # hands them to load_from_srs, which prefers them over the mask mdb
+        # (Attachment to Part B: the XML supersedes the SRS table).
+        "op_param_paths": storage.op_param_paths_of(s),
     }
 
 
@@ -80,6 +84,7 @@ def launch_s1503(*, system_id: str, params: dict[str, Any]) -> str:
                    else sys_row.get("mask_id"),
         "ntc_id": sys_row.get("ntc_id"),
         "system_id": system_id,
+        "op_param_paths": sys_row.get("op_param_paths") or [],
     })
     run_id = storage.create_run(kind="single", method=None, params=full)
     pp = _params_path(run_id)
@@ -121,6 +126,7 @@ def launch_country_wcg(*, system_id: str, params: dict[str, Any]) -> str:
         "system_id": system_id,
         "country_codes": codes,
         "study_mode": "country_constrained",
+        "op_param_paths": sys_row.get("op_param_paths") or [],
     })
     run_id = storage.create_run(
         kind="single", method="country_constrained", params=full,

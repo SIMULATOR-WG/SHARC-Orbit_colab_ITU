@@ -301,12 +301,36 @@ def get_system(system_id: str) -> dict[str, Any] | None:
     init_db()
     with _conn() as cx:
         row = cx.execute(
-            "SELECT s.*, u.label AS upload_label, u.srs_path, u.mask_path "
+            "SELECT s.*, u.label AS upload_label, u.srs_path, u.mask_path, "
+            "       u.metadata_json AS upload_metadata_json "
             "FROM systems s JOIN uploads u ON u.id = s.upload_id "
             "WHERE s.id=?",
             (system_id,),
         ).fetchone()
-    return dict(row) if row else None
+    if not row:
+        return None
+    d = dict(row)
+    d["op_param_paths"] = op_param_paths_of(d)
+    return d
+
+
+def op_param_paths_of(row: dict[str, Any] | None) -> list[str]:
+    """§B3.3 operating-parameter XMLs registered with a system's upload.
+
+    Stored in ``uploads.metadata_json`` (the table predates the feature, so no
+    column was added). Returns only paths that still exist on disk — an upload
+    directory can be pruned independently of the database row.
+    """
+    if not row:
+        return []
+    raw = row.get("op_param_paths")
+    if raw is None:
+        blob = row.get("upload_metadata_json") or "{}"
+        try:
+            raw = (json.loads(blob) or {}).get("op_param_paths") or []
+        except (ValueError, TypeError):
+            raw = []
+    return [str(p) for p in (raw or []) if p and Path(str(p)).exists()]
 
 
 def delete_system(system_id: str) -> None:

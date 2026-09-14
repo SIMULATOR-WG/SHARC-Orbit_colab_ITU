@@ -117,28 +117,93 @@ def _xml(body: str, *, lo=19700, hi=20200, pid=7) -> str:
     )
 
 
-def test_min_duration_below_one_second_is_rejected():
-    """§B5.2: "MIN_DURATION[Latitude] >= 1 second"; zero is never written."""
+def test_min_duration_below_one_second_is_recorded_as_an_error():
+    """§B5.2: "MIN_DURATION[Latitude] >= 1 second".
+
+    A violation is scoped to the offending SET, not to the document: aborting
+    the parse would drop the other sets of the same notice — including the one
+    being examined — and silently revert the run to §D5.1.4.1.
+    """
+    s = parse_operating_params_xml(_xml('<min_duration a="0">0.5</min_duration>'))[0]
+    assert s.has_errors
+    assert any("MIN_DURATION" in str(i) for i in s.errors)
     with pytest.raises(OperatingParamsError, match="MIN_DURATION"):
-        parse_operating_params_xml(_xml('<min_duration a="0">0</min_duration>'))
-    with pytest.raises(OperatingParamsError, match="MIN_DURATION"):
-        parse_operating_params_xml(_xml('<min_duration a="0">0.5</min_duration>'))
-    # Absent — not zero — is the legal way to select the classic algorithm.
-    s = parse_operating_params_xml(_xml(""))[0]
+        s.raise_on_errors()
+
+    # A declared 0 is "no tracking duration at this latitude", not a violation.
+    z = parse_operating_params_xml(_xml('<min_duration a="0">0</min_duration>'))[0]
+    assert not z.has_errors
+    assert z.uses_track_duration is False
+
+    # Absent is the other legal way to select the classic algorithm.
+    a = parse_operating_params_xml(_xml(""))[0]
+    assert a.min_duration is None
+    assert a.uses_track_duration is False
+    assert a.min_duration_at(0.0) == 0.0
+
+
+def test_one_invalid_set_does_not_sink_the_others():
+    """A §B5.2 error in a band nobody is examining must not lose the rest."""
+    good = parse_operating_params_xml(
+        _xml('<min_duration a="0">2400</min_duration>', lo=19700, hi=20200, pid=7))
+    bad = parse_operating_params_xml(
+        _xml('<min_elev a="0"><elev_angle b="0">91</elev_angle></min_elev>',
+             lo=27500, hi=30000, pid=9))
+    reg = OperatingParameterRegistry(good + bad)
+    assert len(reg) == 2 and len(reg.invalid_sets) == 1
+    # The examined downlink band still resolves and still works.
+    s = reg.for_band(19700, 20200)
+    assert s.param_id == 7 and s.min_duration_at(0.0) == 2400.0
+    # Resolving the invalid one raises, naming it.
+    with pytest.raises(OperatingParamsError, match="set 9"):
+        reg.for_band(27500, 30000)
+
+
+@pytest.mark.parametrize("body,rule", [
+    ('<min_exclude c="0"><exclusion_zone_angle a="0">-1</exclusion_zone_angle></min_exclude>',
+     "MIN_EXCLUDE"),
+    ('<max_co_freq a="0">-2</max_co_freq>', "MAX_CO_FREQ"),
+    ('<min_elev a="0"><elev_angle b="0">91</elev_angle></min_elev>', "MIN_ELEV"),
+])
+def test_out_of_range_values_are_recorded_as_errors(body, rule):
+    s = parse_operating_params_xml(_xml(body))[0]
+    assert s.has_errors, f"{rule} violation not recorded"
+    assert any(rule in str(i) for i in s.errors)
+    with pytest.raises(OperatingParamsError):
+        s.raise_on_errors()
+
+
+def test_unusable_array_entries_are_reported_not_dropped():
+    """A silently dropped entry is how a declared MIN_DURATION becomes None."""
+    # Missing latitude attribute.
+    s = parse_operating_params_xml(_xml('<min_duration>400</min_duration>'))[0]
     assert s.min_duration is None
-    assert s.uses_track_duration is False
-    assert s.min_duration_at(0.0) == 0.0
+    assert any("min_duration" in str(i) and i.severity == "error" for i in s.issues)
+    # Non-numeric value.
+    s2 = parse_operating_params_xml(_xml('<min_duration a="0">quatro</min_duration>'))[0]
+    assert any("not a number" in str(i) for i in s2.issues)
+    # Unparsable header attribute must not fall through to a permissive default.
+    s3 = parse_operating_params_xml(
+        _xml("").replace('es_lat_min="-90"', 'es_lat_min="-9O"'))[0]
+    assert any("es_lat_min" in str(i) and i.severity == "error" for i in s3.issues)
 
 
-def test_negative_and_out_of_range_values_are_rejected():
-    with pytest.raises(OperatingParamsError, match="MIN_EXCLUDE"):
-        parse_operating_params_xml(_xml(
-            '<min_exclude c="0"><exclusion_zone_angle a="0">-1</exclusion_zone_angle></min_exclude>'))
-    with pytest.raises(OperatingParamsError, match="MAX_CO_FREQ"):
-        parse_operating_params_xml(_xml('<max_co_freq a="0">-2</max_co_freq>'))
-    with pytest.raises(OperatingParamsError, match="MIN_ELEV"):
-        parse_operating_params_xml(_xml(
-            '<min_elev a="0"><elev_angle b="0">91</elev_angle></min_elev>'))
+def test_min_exclude_requires_an_explicit_orbit_plane():
+    """§B3.3: "If the orb_id field equals 0 then the data ... applies to all
+    orbit planes" — so 0 must be written, never inferred from a typo.
+
+    The Recommendation's own example (printed p. 14) writes ``oc="2"``.
+    """
+    s = parse_operating_params_xml(_xml(
+        '<min_exclude oc="2"><exclusion_zone_angle a="0">5</exclusion_zone_angle></min_exclude>'))[0]
+    assert s.min_exclude == {}
+    assert any("min_exclude" in str(i) and i.severity == "error" for i in s.issues)
+    # Written properly it lands on the declared plane, not the wildcard.
+    ok = parse_operating_params_xml(_xml(
+        '<min_exclude c="2"><exclusion_zone_angle a="0">5</exclusion_zone_angle></min_exclude>'))[0]
+    assert set(ok.min_exclude) == {2}
+    assert ok.alpha0_deg(0.0, orb_id=2) == 5.0
+    assert ok.alpha0_deg(0.0, orb_id=3) is None   # no wildcard declared
 
 
 def test_frequency_range_must_be_present_and_ordered():
@@ -147,6 +212,25 @@ def test_frequency_range_must_be_present_and_ordered():
         parse_operating_params_xml(bad)
     with pytest.raises(OperatingParamsError, match="high_freq_mhz"):
         parse_operating_params_xml(_xml("", lo=20200, hi=19700))
+
+
+def test_adjacent_sets_may_share_a_band_edge():
+    """Real filings butt bands at a shared edge; half-open ranges keep that legal."""
+    a = parse_operating_params_xml(_xml("", lo=17800, hi=18600, pid=8))
+    b = parse_operating_params_xml(_xml("", lo=18600, hi=19300, pid=9))
+    reg = OperatingParameterRegistry(a + b)
+    assert not [i for i in reg.issues if i.severity == "error"]
+    assert reg.for_frequency(18600.0).param_id == 9      # edge belongs to the upper set
+    assert reg.for_frequency(18599.9).param_id == 8
+    assert reg.for_frequency(19300.0).param_id == 9      # top edge still resolves
+
+
+def test_band_narrower_than_half_the_examined_band_is_still_detected():
+    """F-D11: a three-point straddle probe misses a set narrower than the band."""
+    only = parse_operating_params_xml(_xml("", lo=10400, hi=10600, pid=1))
+    reg = OperatingParameterRegistry(only)
+    with pytest.raises(OperatingParamsError, match="not contained"):
+        reg.for_band(10000, 12000)
 
 
 def test_one_set_per_frequency_band_is_enforced():
@@ -287,3 +371,94 @@ def test_next101_loader_selects_the_variant_without_any_override():
     down_classic = load_from_srs(_SRS_MDB, pfd_mask_mdb=_MASKS_MDB, ntc_id="127520101",
                                  simulation_frequency_ghz=18.2)
     assert down_classic["non_gso"]["min_duration_by_lat"] == []
+
+
+# ── §B5.3: MIN_EXCLUDE completeness across orbit planes ──────────────────────
+
+_PER_PLANE_XML = """<?xml version="1.0"?>
+<non_gso_operating_parameters param_id="7" low_freq_mhz="10700" high_freq_mhz="12750">
+ <es_lat_min>-90</es_lat_min><es_lat_max>90</es_lat_max>
+ <es_density>0.1</es_density><es_distance>10</es_distance>
+ <min_exclude c="1"><exclusion_zone_angle a="0">5</exclusion_zone_angle></min_exclude>
+ <min_exclude c="2"><exclusion_zone_angle a="0">6</exclusion_zone_angle></min_exclude>
+ <min_duration><duration a="0">2400</duration></min_duration>
+</non_gso_operating_parameters>"""
+
+
+def _b53(issues):
+    return [i for i in issues if i.rule.startswith("B5.3/")]
+
+
+def test_b53_min_exclude_must_cover_every_orbit_plane():
+    """§B5.3 (printed p. 17), third bullet: "if the MIN_EXCLUDE varies by orbit
+    plane, that a value is defined for each orbit plane"."""
+    from src.operating_params import (  # type: ignore[import]
+        parse_operating_params_xml, validate_set,
+    )
+
+    s = parse_operating_params_xml(_PER_PLANE_XML, source="test")[0]
+    assert sorted(s.min_exclude) == [1, 2]
+
+    missing = _b53(validate_set(s, orbit_plane_ids=[1, 2, 3]))
+    assert len(missing) == 1 and missing[0].severity == "error"
+    assert "[3]" in missing[0].message
+
+    assert _b53(validate_set(s, orbit_plane_ids=[1, 2])) == []
+
+    extra = _b53(validate_set(s, orbit_plane_ids=[1]))
+    assert len(extra) == 1 and extra[0].severity == "warning"
+
+    # Without the filing's plane list the rule is not checkable, and must be
+    # reported as unchecked rather than silently passed.
+    unchecked = _b53(validate_set(s))
+    assert len(unchecked) == 1 and unchecked[0].severity == "info"
+
+
+def test_b53_wildcard_only_set_does_not_vary_by_plane():
+    """orb_id 0 is the all-planes wildcard: nothing to complete."""
+    from src.operating_params import (  # type: ignore[import]
+        parse_operating_params_xml, validate_set,
+    )
+
+    xml = _PER_PLANE_XML.replace('c="1"', 'c="0"').replace(
+        '<min_exclude c="2"><exclusion_zone_angle a="0">6</exclusion_zone_angle></min_exclude>',
+        "")
+    s = parse_operating_params_xml(xml, source="test")[0]
+    assert sorted(s.min_exclude) == [0]
+    assert _b53(validate_set(s, orbit_plane_ids=[1, 2, 3])) == []
+
+
+def test_b53_wildcard_mixed_with_per_plane_tables_is_flagged():
+    """A wildcard beside per-plane tables silently fills the gaps — say so."""
+    from src.operating_params import (  # type: ignore[import]
+        parse_operating_params_xml, validate_set,
+    )
+
+    xml = _PER_PLANE_XML.replace('c="1"', 'c="0"')
+    s = parse_operating_params_xml(xml, source="test")[0]
+    assert sorted(s.min_exclude) == [0, 2]
+    mixed = _b53(validate_set(s))
+    assert len(mixed) == 1 and mixed[0].severity == "warning"
+
+
+@pytest.mark.skipif(not (_have_mdb and _have_xml), reason="NEXT101 fixtures not available")
+def test_uploaded_xmls_reach_the_engine_like_the_mask_mdb():
+    """E06: operating-parameter XMLs uploaded with a filing must be applied.
+
+    Before this they were parsed only to *preview* which algorithm would run;
+    the engine never saw them, so the UI promised §D5.1.4.2 and §D5.1.4.1 ran.
+    Loading the same sets from the XML files must give the same engine config
+    as loading them from the masks database.
+    """
+    from src.main import load_from_srs  # type: ignore[import]
+
+    from_mdb = load_from_srs(_SRS_MDB, pfd_mask_mdb=_MASKS_MDB, ntc_id="127520101",
+                             simulation_frequency_ghz=19.95)
+    from_xml = load_from_srs(_SRS_MDB, pfd_mask_mdb=_MASKS_MDB, ntc_id="127520101",
+                             simulation_frequency_ghz=19.95,
+                             operating_params_paths=_XMLS)
+    for key in ("min_duration_by_lat", "max_co_freq_by_lat", "alpha0_deg",
+                "min_elevation_deg", "min_angle_at_es_deg"):
+        assert from_xml["non_gso"][key] == from_mdb["non_gso"][key], key
+    assert from_xml["non_gso"]["min_duration_by_lat"] == [(-90.0, 90.0, 2400.0)]
+    assert from_xml["non_gso"]["_operating_params_error"] is None

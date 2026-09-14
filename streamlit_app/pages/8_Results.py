@@ -491,6 +491,44 @@ def _render_time_step(data: dict[str, Any]) -> None:
 
 def _render_track_duration(data: dict[str, Any]) -> None:
     """S.1503-4 §D5.1.4.2 track-duration variant: window parameters + verdict note."""
+    # The override banner must show even when no window ran ("Force classic"
+    # produces an ordinary §D5.1.4.1 result that is still not an examination).
+    ov = data.get("track_duration_override")
+    if ov:
+        st.warning(
+            "**§D5.1.4 selection overridden** (mode `"
+            f"{ov.get('mode', '?')}`). {ov.get('note', '')} "
+            "S.1503-4 picks the algorithm from the filing's own MIN_DURATION, "
+            "so this run is a study, not an examination.",
+            icon=":material/science:",
+        )
+    for deg in (data.get("track_duration_degenerate") or []):
+        if deg.get("reason") == "min_duration_zero_at_es_latitude":
+            msg = (
+                "§D5.1.4 selects the track-duration algorithm for this notice "
+                "(MIN_DURATION is non-zero at some latitude), but MIN_DURATION "
+                f"is 0 at the examined ES latitude "
+                f"({deg.get('es_lat_deg', 0):.2f}°). The sliding window has no "
+                "length there, so §D5.1.4.2 degenerates to the per-step "
+                "selection of §D5.1.4.1, which is what ran."
+            )
+        else:
+            msg = (
+                f"MIN_DURATION {deg.get('min_duration_s', 0):.0f} s at ES "
+                f"latitude {deg.get('es_lat_deg', 0):.2f}° is below one fine "
+                f"step ({deg.get('t_fine_s', 0):.3f} s), so N_SW = "
+                f"{int(deg.get('n_sw', 0))} and the §D5.1.4.2 window carries no "
+                "track information. The classic §D5.1.4.1 algorithm ran instead."
+            )
+        st.info(msg, icon=":material/info:")
+    nso = data.get("num_time_steps_user_override")
+    if nso:
+        st.info(
+            f"Run length overridden: {int(nso):,} time steps instead of the "
+            "§D4.6 figure. Percentages are over the shortened run.",
+            icon=":material/timer:",
+        )
+
     td = data.get("track_duration")
     if not td:
         return
@@ -505,6 +543,39 @@ def _render_track_duration(data: dict[str, Any]) -> None:
                  "(offset by MIN_SLIDING_TIME = N_MSL fine steps).",
         )
         c4.metric("MIN_SLIDING_TIME", f"{td.get('min_sliding_time_s', 0):.2f} s")
+        dg = td.get("diagnostics") or {}
+        if dg.get("n_windows_closed"):
+            d1, d2, d3 = st.columns(3)
+            d1.metric("Windows closed", f"{int(dg['n_windows_closed']):,}")
+            d2.metric(
+                "Empty tracked set",
+                f"{100.0 * float(dg.get('empty_window_fraction', 0.0)):.1f}%",
+                help="Windows where no satellite met the Step-19 condition for "
+                     "the whole window. Those steps aggregate only the Step-20 "
+                     "gain branch, so the result is not conservative there.",
+            )
+            d3.metric("Eligible / window (avg)",
+                      f"{float(dg.get('mean_eligible_per_window', 0.0)):.2f}")
+            if float(dg.get("empty_window_fraction", 0.0)) >= 0.5:
+                st.warning(
+                    "Most windows had no eligible satellite: MIN_DURATION "
+                    "likely exceeds the achievable track duration for this "
+                    "constellation and ES latitude. The EPFD statistic is "
+                    "**not** conservative under this condition.",
+                    icon=":material/warning:",
+                )
+        ign = td.get("inputs_ignored") or []
+        if ign:
+            st.caption(
+                "Declared inputs not applied by §D5.1.4.2 Step 20: "
+                + ", ".join(str(x) for x in ign)
+                + " (honoured only on the classic §D5.1.4.1 path)."
+            )
+        if td.get("or_rescues_capped"):
+            st.caption(
+                "Step 20 gain branch read as 'not in the tracked set': "
+                "satellites capped by MAX_CO_FREQ re-enter through it."
+            )
         pw = data.get("per_window") or []
         worst = data.get("worst_window_index", -1)
         st.caption(

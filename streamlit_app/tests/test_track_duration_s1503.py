@@ -553,3 +553,213 @@ def test_singlepass_chunking_collapses_when_halo_would_dominate():
         for a, b in ch:
             if a:  # the first chunk has no halo
                 assert (b - a) >= (960 - 1), "chunk smaller than its own halo"
+
+
+# ── §D5.1.4.2 Step 20: the two readings of the gain branch ───────────────────
+
+def _or_branch_window():
+    """One window where a capped-but-eligible satellite is also in the gain cone.
+
+    Sat 1 and sat 2 are α₀/ε₀-standard through the whole window (Step-19
+    eligible); Step 19bis ranks by window peak, so with MAX_CO_FREQ = 1 sat 1
+    (peak 3.0) is kept and sat 2 (peak 1.5) is dropped. Sat 2 also carries the
+    Step-18 gain flag, so the two readings of Step 20 disagree about it by a
+    known amount. Sat 3 is gain-only and enters under both readings.
+    """
+    N_SAT, N_SW = 4, 3
+    E = np.zeros((N_SW, N_SAT)); S = np.zeros((N_SW, N_SAT), bool)
+    O = np.zeros((N_SW, N_SAT), bool)
+    for g in range(N_SW):
+        E[g, 1], S[g, 1] = 3.0, True            # highest peak → kept by the cap
+        E[g, 2], S[g, 2], O[g, 2] = 1.5, True, True   # eligible, capped, in gain cone
+        E[g, 3], O[g, 3] = 0.5, True            # gain-only
+    buffer = []
+    for g in range(N_SW):
+        idx = np.array([1, 2, 3], dtype=np.int64)
+        buffer.append((g, idx, E[g, idx].copy(), S[g, idx].copy(), O[g, idx].copy()))
+    return E, S, O, buffer
+
+
+def test_step20_or_branch_readings_differ_by_the_capped_satellite():
+    """B07: both readings are implemented and differ by exactly the capped sat.
+
+    The printed Step 20 does not say whether a window-eligible satellite that
+    Step 19bis dropped under MAX_CO_FREQ may re-enter through the gain ("OR")
+    branch. Default (``or_rescues_capped=False``) keeps it out, so the cap is
+    binding; ``True`` lets it back in and is the more conservative reading. The
+    gap here is exact and known: 3.5 → 5.0 linear = 1.549 dB.
+    """
+    from src.epfd_calculator import _window_aggregate_dense  # type: ignore[import]
+
+    E, S, O, _buf = _or_branch_window()
+    strict = _window_aggregate_dense(E, S, O, 1, or_rescues_capped=False)
+    loose = _window_aggregate_dense(E, S, O, 1, or_rescues_capped=True)
+    assert np.allclose(strict, 3.0 + 0.5), strict          # sat 1 + gain-only sat 3
+    assert np.allclose(loose, 3.0 + 1.5 + 0.5), loose      # + the capped sat 2
+    gap_db = 10.0 * np.log10(loose[0] / strict[0])
+    assert abs(gap_db - 10.0 * math.log10(5.0 / 3.5)) < 1e-12, gap_db
+    assert abs(gap_db - 1.5490196) < 1e-6, gap_db
+
+
+def test_step20_or_branch_readings_agree_between_dense_and_scalar():
+    """Both readings must be the same in the vectorized and the scalar path."""
+    from src.epfd_calculator import (  # type: ignore[import]
+        _process_closed_window, _window_aggregate_dense,
+    )
+
+    E, S, O, buffer = _or_branch_window()
+    for flag in (False, True):
+        rec = EPFDWindowStats()
+        _process_closed_window(buffer=buffer, max_co_freq=1, stats_end_step=10**9,
+                               t_fine_s=1.0, win_stats=rec, or_rescues_capped=flag)
+        dense = _window_aggregate_dense(E, S, O, 1, or_rescues_capped=flag)
+        expected_db = 10.0 * math.log10(float(dense[0]))
+        assert abs(rec.epfd_max_db - expected_db) < 1e-12, flag
+
+
+# ── §D5.1.4.2 Step 19 diagnostics (empty tracked set) ────────────────────────
+
+def test_empty_tracked_set_is_counted_not_silent():
+    """B09: a window with no eligible satellite must be tallied.
+
+    With no satellite α₀/ε₀-standard through the whole window, Step 19 yields
+    nothing and the aggregate falls back to the gain branch alone — strongly
+    anti-conservative, and indistinguishable from a clean low-EPFD result
+    unless it is counted.
+    """
+    from src.epfd_calculator import _process_closed_window  # type: ignore[import]
+
+    N_SW = 4
+    buffer = []
+    for g in range(N_SW):
+        idx = np.array([1, 2], dtype=np.int64)
+        ep = np.array([1.0, 2.0])
+        std = np.array([g != 1, g != 2])    # each sat breaks at a different step
+        orx = np.array([False, False])
+        buffer.append((g, idx, ep, std, orx))
+
+    rec = EPFDWindowStats()
+    _process_closed_window(buffer=buffer, max_co_freq=0, stats_end_step=10**9,
+                           t_fine_s=1.0, win_stats=rec)
+    assert rec.n_windows == 1
+    assert rec.n_windows_no_eligible == 1
+    assert rec.empty_window_fraction == 1.0
+    assert rec.epfd_max_db == -999.0 or rec.n_steps_valid == 0
+
+
+def test_window_diagnostics_are_reported_by_the_engine():
+    """The tallies must survive the merge and reach the result object."""
+    common = _sp_common(seed=3, cap=[(-90.0, 90.0, 2)])
+    windows = compute_track_duration_windows(
+        min_duration_s=6.0, t_fine_s=1.0, nsteps=60,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    res = run_epfd_simulation_windowed(windows=windows, n_jobs=1, **common)
+    d = res.window_diagnostics
+    assert d["n_windows_closed"] > 0
+    assert 0.0 <= d["empty_window_fraction"] <= 1.0
+    assert len(d["per_set_empty_fraction"]) == len(res.window_stats)
+    # Every closed window is accounted for in exactly one bucket or the other.
+    assert d["n_windows_no_eligible"] <= d["n_windows_closed"]
+    assert d["n_windows_capped"] <= d["n_windows_closed"]
+    assert sum(w.n_windows for w in res.window_stats) == d["n_windows_closed"]
+
+
+def test_window_diagnostics_survive_parallel_dispatch():
+    """A-12: N_MSL > 1 (so N_TW > 1) over several chunks, tallies included."""
+    common = _sp_common(seed=11, cap=[(-90.0, 90.0, 3)])
+    # MIN_SLIDING_TIME = T_orb / (100 · n_sat) (§D5.1.3), so a long dimensioning
+    # period is what makes N_MSL > 1: 90 000 / (100 · 300) = 3 s = 3 fine steps.
+    windows = compute_track_duration_windows(
+        min_duration_s=9.0, t_fine_s=1.0, nsteps=90,
+        min_orbital_period_s=90_000.0, n_satellites=len(common["constellation"]),
+    )
+    assert (windows.n_msl, windows.n_tw) == (3, 3), (windows.n_msl, windows.n_tw)
+    seq = run_epfd_simulation_windowed(windows=windows, n_jobs=1, **common)
+    par = run_epfd_simulation_windowed(windows=windows, n_jobs=4, **common)
+    _assert_same_windowed(seq, par, "diagnostics")
+    assert par.window_diagnostics["n_windows_closed"] == \
+        seq.window_diagnostics["n_windows_closed"]
+    for x, y in zip(seq.window_stats, par.window_stats):
+        assert x.n_windows == y.n_windows
+        assert x.n_windows_no_eligible == y.n_windows_no_eligible
+        assert x.n_windows_capped == y.n_windows_capped
+
+
+# ── headline accumulator honesty (timeline vs window-set samples) ────────────
+
+def test_headline_acc_reports_the_timeline_not_the_window_set():
+    """C10: ``acc`` is one window set; the run extent is N_TotalSteps × T_fine."""
+    common = _sp_common(seed=2)
+    windows = compute_track_duration_windows(
+        min_duration_s=8.0, t_fine_s=1.0, nsteps=80,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    res = run_epfd_simulation_windowed(windows=windows, n_jobs=1, **common)
+    assert res.n_timeline_steps == windows.n_total_steps
+    assert res.timeline_t_fine_s == windows.t_fine_s
+    assert res.acc.first_time_s == 0.0
+    assert res.acc.last_time_s == (windows.n_total_steps - 1) * windows.t_fine_s
+    # The set's own sample count is N_Repeat × N_SW and is NOT the timeline.
+    assert res.acc.n_steps == windows.n_steps_stats
+
+
+def test_wdelta_ramp_spans_the_windowed_timeline():
+    """A-07: §D6.3.4 ramps W_delta over the run the engine actually walks."""
+    common = _sp_common(seed=4)
+    windows = compute_track_duration_windows(
+        min_duration_s=5.0, t_fine_s=1.0, nsteps=50,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    # t_run_s sized for the standard path (50 s) vs the windowed timeline.
+    short = run_epfd_simulation_windowed(
+        windows=windows, n_jobs=1, wdelta_deg=1.0, t_run_s=50.0, **common)
+    exact = run_epfd_simulation_windowed(
+        windows=windows, n_jobs=1, wdelta_deg=1.0,
+        t_run_s=windows.t_total_duration_s, **common)
+    # The engine retimes the ramp, so the mismatched t_run_s must not change it.
+    assert np.array_equal(short.cdf_epfd_dBW, exact.cdf_epfd_dBW)
+    assert np.allclose(short.cdf_percentage, exact.cdf_percentage, rtol=1e-12)
+
+
+# ── §D5.1.4.2 Step 18 ② / Step 20: the gain (OR) branch must be live ─────────
+
+def test_or_branch_actually_contributes_in_the_windowed_engine():
+    """G-01: an engine configuration where the gain branch fires.
+
+    The shared fixture (1.2 m dish, α₀ = 2°) never produces a satellite that is
+    inside the exclusion zone with relative gain above min(−30 dB, G(α₀)), so
+    every recorded satellite had ``orx = False`` and deleting the whole OR term
+    from the reducer still passed every equivalence test. A wide beam (0.55 m,
+    D/λ = 22) with α₀ = 20° puts satellites inside the zone whose gain keeps
+    them in, so the OR term carries real EPFD.
+
+    ``strict_exclusion_zone=True`` is exactly "no rescue by gain" (S.1503-2
+    §5.1.4), so it is the reference: the two runs must differ, and the run with
+    the OR branch must be the higher one. Deleting ``O & ~eligible`` from the
+    reducer collapses the first run onto the second and fails this test.
+    """
+    common = dict(
+        constellation=_constellation(n=300, seed=1), wcg=_wcg(),
+        pfd_mask=_alpha_mask(), es_antenna=ITURS1428Antenna(0.55, 12.0, 0.65),
+        alpha0_deg=20.0, min_elevation_deg=5.0, pfd_bw_correction_db=0.0,
+        max_co_freq_by_lat=[(-90.0, 90.0, 2)],
+    )
+    windows = compute_track_duration_windows(
+        min_duration_s=6.0, t_fine_s=1.0, nsteps=60,
+        min_orbital_period_s=6000.0, n_satellites=300,
+    )
+    with_or = run_epfd_simulation_windowed(
+        windows=windows, n_jobs=1, strict_exclusion_zone=False, **common)
+    no_or = run_epfd_simulation_windowed(
+        windows=windows, n_jobs=1, strict_exclusion_zone=True, **common)
+
+    assert with_or.acc.n_steps_valid > 0 and no_or.acc.n_steps_valid > 0
+    assert with_or.acc.epfd_max_db > no_or.acc.epfd_max_db + 1.0, (
+        "the gain branch must add EPFD: "
+        f"{with_or.acc.epfd_max_db} vs {no_or.acc.epfd_max_db}"
+    )
+    assert not (
+        np.array_equal(with_or.cdf_epfd_dBW, no_or.cdf_epfd_dBW)
+        and np.allclose(with_or.cdf_percentage, no_or.cdf_percentage)
+    ), "OR branch made no difference — the fixture no longer exercises it"

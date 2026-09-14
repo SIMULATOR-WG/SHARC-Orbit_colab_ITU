@@ -272,7 +272,12 @@ if confirm:
         mask_path=Path(pending["mask_path"]) if pending.get("mask_path") else None,
         network_name=preview.get("network_name"),
         metadata={"preview": preview, "uploaded_filename": pending["uploaded_name"],
-                   "n_notices_detected": len(notices)},
+                   "n_notices_detected": len(notices),
+                   # §B3.3 operating-parameter masks uploaded alongside the SRS.
+                   # Persisted here (not only in session state) so the run that
+                   # happens days later still resolves MIN_DURATION/MIN_ELEV from
+                   # the filing's own XML instead of falling back to the mdb.
+                   "op_param_paths": list(pending.get("op_param_paths") or [])},
     )
     # If no notices (XML or empty), register a single system with ntc_id=None
     if not picked_ntcs:
