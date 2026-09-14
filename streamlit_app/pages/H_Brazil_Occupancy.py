@@ -45,6 +45,9 @@ prev = use_persisted_state("br_occupancy.form", {
     "orbit": "all",
     "direction": "downlink",
     "rf_bands": [],
+    "letter_bands": [],
+    "freq_low_ghz": "",
+    "freq_high_ghz": "",
     "system_ids": [],
     "query": "",
 })
@@ -263,9 +266,109 @@ if "anatel" in sources:
 if "sns" in sources:
     pool.extend(sns)
 
+# Letter band and explicit range work off the frequencies themselves, so they
+# apply to ITU SNS notices too. The Anatel label exists only on licensed
+# stations, so its control is hidden when no Anatel row is in the pool —
+# otherwise it renders as an empty, unusable select.
+_pool_ivs = {s.id: s.intervals(direction) for s in pool}
+band_all = [
+    b for b in br.LETTER_BAND_NAMES
+    if any(b in br.letter_bands_for(_pool_ivs[s.id]) for s in pool)
+]
+band_default = [b for b in (prev.get("letter_bands") or []) if b in band_all]
+
+# The From/To boxes take any range, but typing band edges from memory is how
+# a wrong examination band gets in. The picker fills them from the Article 22
+# tables the engine itself uses, plus the letter bands.
+_PRESETS = br.frequency_presets()
+_PRESET_NONE = "Custom range"
+st.session_state.setdefault("br_occ_freq_low", str(prev.get("freq_low_ghz") or ""))
+st.session_state.setdefault("br_occ_freq_high", str(prev.get("freq_high_ghz") or ""))
+st.session_state.setdefault("br_occ_freq_preset", _PRESET_NONE)
+
+
+def _apply_freq_preset() -> None:
+    """Fill the two boxes from the picked band.
+
+    Runs as an ``on_change`` callback, which is the only point where a widget's
+    own session-state key may be written: Streamlit reruns afterwards and the
+    text inputs are created with the new values. Writing them after the widgets
+    exist would raise instead.
+    """
+    rng = _PRESETS.get(st.session_state.get("br_occ_freq_preset", ""))
+    if rng is None:                      # "Custom range" clears nothing
+        return
+    st.session_state["br_occ_freq_low"] = f"{rng[0]:g}"
+    st.session_state["br_occ_freq_high"] = f"{rng[1]:g}"
+
+
+g1, g2, g3, g4 = st.columns([2, 2, 1, 1])
+with g1:
+    letter_bands = st.multiselect(
+        "Frequency band",
+        options=band_all,
+        default=band_default,
+        help="Derived from each system's own frequencies, so it covers Anatel "
+             "stations and ITU SNS notices alike. Uses the direction selected "
+             "above. Edges follow satellite practice: C from 3.4 GHz, Ku/Ka "
+             "split at 17.7 GHz.",
+    )
+with g2:
+    st.selectbox(
+        "Fill range from band",
+        options=[_PRESET_NONE, *_PRESETS],
+        key="br_occ_freq_preset",
+        on_change=_apply_freq_preset,
+        help="Writes the two boxes on the right. The named bands come first "
+             "(C, Ku, Ka …) and use the same edges as the Frequency band "
+             "filter; after them come the Article 22 bands the engine runs "
+             "examinations at. Edit either box afterwards to depart from the "
+             "preset.",
+    )
+with g3:
+    f_low = st.text_input(
+        "From (GHz)", key="br_occ_freq_low",
+        placeholder="e.g. 19.7",
+        help="Optional. Keeps systems with any assignment above this frequency.",
+    )
+with g4:
+    f_high = st.text_input(
+        "To (GHz)", key="br_occ_freq_high",
+        placeholder="e.g. 20.2",
+        help="Optional. Keeps systems with any assignment below this frequency.",
+    )
+
+
+def _ghz(text: str) -> float | None:
+    text = (text or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        v = float(text)
+    except ValueError:
+        st.warning(f"Ignoring frequency `{text}`: not a number.", icon=":material/warning:")
+        return None
+    if v <= 0:
+        st.warning("Ignoring a frequency that is not positive.", icon=":material/warning:")
+        return None
+    return v
+
+
+low_ghz, high_ghz = _ghz(f_low), _ghz(f_high)
+if low_ghz is not None and high_ghz is not None and low_ghz > high_ghz:
+    low_ghz, high_ghz = high_ghz, low_ghz
+    st.caption("Frequency bounds were swapped so the range reads low to high.")
+
 rf_all = sorted({b for s in pool for b in s.rf_bands if b})
 rf_default = [b for b in (prev.get("rf_bands") or []) if b in rf_all]
-rf_bands = st.multiselect("RF band (Anatel label)", options=rf_all, default=rf_default)
+rf_bands = (
+    st.multiselect(
+        "RF band (Anatel label)", options=rf_all, default=rf_default,
+        help="The label Anatel publishes for a licensed station. ITU SNS "
+             "notices do not carry it — use **Frequency band** for those.",
+    )
+    if rf_all else []
+)
 query = st.text_input("Name / operator / ntc_id contains", value=prev.get("query") or "")
 
 filtered = []
@@ -274,6 +377,14 @@ for s in pool:
     if orbit != "all" and orbit not in (s.orbit or "").upper():
         continue
     if rf_bands and not (set(rf_bands) & set(s.rf_bands)):
+        continue
+    if letter_bands and not (
+        set(letter_bands) & set(br.letter_bands_for(_pool_ivs[s.id]))
+    ):
+        continue
+    if (low_ghz is not None or high_ghz is not None) and not br.intervals_touch_range(
+        _pool_ivs[s.id], low_ghz, high_ghz
+    ):
         continue
     if q:
         blob = " ".join(
@@ -318,6 +429,9 @@ set_persisted_state("br_occupancy.form", {
     "orbit": orbit,
     "direction": direction,
     "rf_bands": rf_bands,
+    "letter_bands": letter_bands,
+    "freq_low_ghz": f_low.strip(),
+    "freq_high_ghz": f_high.strip(),
     "system_ids": sel_ids,
     "query": query,
 })

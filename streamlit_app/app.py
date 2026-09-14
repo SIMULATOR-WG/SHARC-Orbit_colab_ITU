@@ -153,30 +153,48 @@ Use the **left sidebar** to navigate between pages.
 
 
 # ─── Register pages with Material Symbols (clean line icons) ────────────────
-PAGES = [
-    st.Page(home,                       title="SHARC-Orbit",  icon=":material/home:",         default=True),
-    st.Page("pages/1_Upload.py",        title="Upload",       icon=":material/upload:"),
-    st.Page("pages/2_Uploads.py",       title="Uploads",      icon=":material/folder_open:"),
-    st.Page("pages/B_Mask_Viewer.py",   title="Mask viewer",  icon=":material/blur_on:",
-              url_path="mask_viewer"),
-    st.Page("pages/C_Constellation.py", title="Constellation", icon=":material/public:",
-              url_path="constellation"),
-    st.Page("pages/E_Manual_System.py", title="Manual system", icon=":material/edit_note:",
-              url_path="manual_system"),
-    st.Page("pages/F_Mask_Generator.py", title="Mask generator", icon=":material/auto_fix_high:",
-              url_path="mask_generator"),
-    st.Page("pages/3_Single_entry.py",  title="Single-entry", icon=":material/looks_one:"),
-    st.Page("pages/H_Brazil_Occupancy.py", title="Brazil occupancy",
-              icon=":material/cell_tower:", url_path="brazil_occupancy"),
-    st.Page("pages/4_Aggregate.py",     title="Aggregate",    icon=":material/grid_view:"),
-    st.Page("pages/5_Launcher.py",      title="Launcher",     icon=":material/play_circle:"),
-    st.Page("pages/6_Runs.py",          title="Runs",         icon=":material/list:"),
-    st.Page("pages/7_Status.py",        title="Status",       icon=":material/pending:"),
-    st.Page("pages/8_Results.py",       title="Results",      icon=":material/insights:"),
-    st.Page("pages/9_Campaign.py",      title="Campaign",     icon=":material/dashboard:"),
-    st.Page("pages/0_Cluster.py",       title="Cluster",      icon=":material/hub:"),
-    st.Page("pages/A_Help.py",          title="Help",         icon=":material/help_outline:"),
-]
+# Grouped, because a flat list of seventeen entries reads as a wall. Passing a
+# mapping to ``st.navigation`` renders one labelled block per key; the empty key
+# is the "no heading" group and keeps the home page at the top, above the
+# headings. Note that sidebar sections are labels, not disclosure widgets: the
+# Streamlit 1.58 API makes a group collapsible only with ``position="top"``.
+PAGES = {
+    "": [
+        st.Page(home,                       title="SHARC-Orbit",   icon=":material/home:",
+                default=True),
+    ],
+    "Input": [
+        st.Page("pages/1_Upload.py",        title="Upload",        icon=":material/upload:"),
+        st.Page("pages/2_Uploads.py",       title="Uploads",       icon=":material/folder_open:"),
+        st.Page("pages/E_Manual_System.py", title="Manual system", icon=":material/edit_note:",
+                url_path="manual_system"),
+        st.Page("pages/F_Mask_Generator.py", title="Mask generator", icon=":material/auto_fix_high:",
+                url_path="mask_generator"),
+    ],
+    "Inspect": [
+        st.Page("pages/B_Mask_Viewer.py",   title="Mask viewer",   icon=":material/blur_on:",
+                url_path="mask_viewer"),
+        st.Page("pages/C_Constellation.py", title="Constellation", icon=":material/public:",
+                url_path="constellation"),
+    ],
+    "Examine": [
+        st.Page("pages/3_Single_entry.py",  title="Single-entry",  icon=":material/looks_one:"),
+        st.Page("pages/H_Brazil_Occupancy.py", title="Brazil occupancy",
+                icon=":material/cell_tower:", url_path="brazil_occupancy"),
+        st.Page("pages/4_Aggregate.py",     title="Aggregate",     icon=":material/grid_view:"),
+    ],
+    "Runs & results": [
+        st.Page("pages/5_Launcher.py",      title="Launcher",      icon=":material/play_circle:"),
+        st.Page("pages/9_Campaign.py",      title="Campaign",      icon=":material/dashboard:"),
+        st.Page("pages/6_Runs.py",          title="Runs",          icon=":material/list:"),
+        st.Page("pages/7_Status.py",        title="Status",        icon=":material/pending:"),
+        st.Page("pages/8_Results.py",       title="Results",       icon=":material/insights:"),
+    ],
+    "System": [
+        st.Page("pages/0_Cluster.py",       title="Cluster",       icon=":material/hub:"),
+        st.Page("pages/A_Help.py",          title="Help",          icon=":material/help_outline:"),
+    ],
+}
 
 nav = st.navigation(PAGES)
 nav.run()
