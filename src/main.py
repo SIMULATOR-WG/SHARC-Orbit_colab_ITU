@@ -197,6 +197,57 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
     # MIN_DURATION bands (§D5.1.4.2 track-duration variant); empty ⇒ standard path.
     constellation_cfg["min_duration_by_lat"] = read_sat_oper_min_duration(mdb_path, system.ntc_id)
 
+    # ── §B3.3 operating-parameter masks (f_mask='R') ────────────────────────
+    # The Recommendation carries MIN_EXCLUDE, MIN_ELEV, MAX_CO_FREQ and
+    # MIN_DURATION in an XML set per frequency range, not in the SRS tables, and
+    # the Attachment to Part B is explicit that when they are supplied "values
+    # should be taken from that XML file rather than the relevant SRS table".
+    # One set applies per examined band (§B3.3: "only one set of operating
+    # parameters for any frequency band"), so resolution is by frequency
+    # containment. Track duration is downlink-only (§D5.2, printed p. 104).
+    constellation_cfg["_operating_params"] = None
+    if pfd_mask_mdb:
+        try:
+            from .operating_params import load_from_mask_mdb, to_engine_config
+            _op_reg = load_from_mask_mdb(pfd_mask_mdb, ntc_id=system.ntc_id)
+            if len(_op_reg):
+                _op_set = None
+                if simulation_frequency_ghz:
+                    _op_set = _op_reg.for_frequency(float(simulation_frequency_ghz) * 1000.0)
+                if _op_set is None:
+                    logger.warning(
+                        "  Operating-parameter masks present (%d set(s)) but none "
+                        "covers the simulation frequency; falling back to the "
+                        "legacy SRS columns. §B3.3 requires one set per examined "
+                        "band.", len(_op_reg),
+                    )
+                else:
+                    _frag = to_engine_config(_op_set, direction="down")
+                    constellation_cfg["min_duration_by_lat"] = _frag["min_duration_by_lat"]
+                    if _frag.get("max_co_freq_by_lat"):
+                        constellation_cfg["max_co_freq_by_lat"] = _frag["max_co_freq_by_lat"]
+                    constellation_cfg["min_angle_at_es_deg"] = _frag["min_angle_at_es_deg"]
+                    constellation_cfg["_operating_params"] = _frag["_operating_params"]
+                    logger.info(
+                        "  Operating regime from set %d (%s): %s; MAX_CO_FREQ=%s, "
+                        "MIN_ANGLE_AT_ES=%.2f°%s",
+                        _op_set.param_id, _op_set.band_label(),
+                        (f"MIN_DURATION {_op_set.min_duration_at(0.0):.0f}s → "
+                         "§D5.1.4.2 track-duration algorithm"
+                         if _frag["min_duration_by_lat"] else
+                         "no MIN_DURATION → classic §D5.1.4.1 algorithm"),
+                        _op_set.max_co_freq_at(0.0), _frag["min_angle_at_es_deg"],
+                        (" (MIN_ANGLE_AT_ES suppressed: §B3.3 makes it "
+                         "inapplicable when MIN_DURATION is non-zero)"
+                         if _frag["_operating_params"]["min_angle_at_es_suppressed"] else ""),
+                    )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "  Could not read operating-parameter masks (f_mask='R') from "
+                "%s: %s. Falling back to the legacy SRS columns.",
+                pfd_mask_mdb, exc,
+            )
+
     # Read mask information to obtain the run frequency.
     # S.1503 D2: FrequencyRun = fmin + RefBW/2.
     masks = read_mask_info(mdb_path, ntc_id=system.ntc_id)

@@ -287,12 +287,25 @@ def detect_orbit_config(mdb_path: str, system: "SRSNonGeoSystem") -> dict:
 
 @dataclass
 class SRSMaskInfo:
-    """SRS mask information."""
+    """SRS mask information.
+
+    ``freq_*_ghz`` are always **GHz**, whatever unit the database stores. The
+    SNS v10 ``mask_info`` table holds GHz; the S.1503-4 examination structure
+    (EPS V41 §6.5.1.1) holds MHz and warns "In SNS v10 it is currently GHz, care
+    should be taken to introduce this change in new SNS structure". Both are
+    normalised on read — see :func:`_mask_freq_to_ghz` — so the 170-odd
+    consumers of these fields keep one meaning. ``freq_*_mhz`` carry the same
+    band in MHz for code that prefers it, and ``unit_in_db`` records what the
+    file actually held.
+    """
     mask_id: int
-    freq_min_ghz: float         # Minimum frequency (GHz)
-    freq_max_ghz: float         # Maximum frequency (GHz)
-    f_mask: str                 # "P" = PFD, "E" = EIRP, "S" = other
+    freq_min_ghz: float         # Minimum frequency (GHz, normalised)
+    freq_max_ghz: float         # Maximum frequency (GHz, normalised)
+    f_mask: str                 # "P" = PFD, "E" = EIRP, "S" = other, "R" = operating params
     f_mask_type: str            # "A" = alpha, "O" = other
+    freq_min_mhz: float = 0.0
+    freq_max_mhz: float = 0.0
+    unit_in_db: str = "GHz"     # "GHz" | "MHz" — what the table stored
 
 
 @dataclass
@@ -503,7 +516,34 @@ def read_pfd_mask_xml_from_mdb(
 ) -> str:
     """Read the PFD mask XML directly from the MASK MDB (table ``masks``).
 
-    The ``mask`` field usually stores a ZIP (OLE/BINARY blob) containing the XML.
+    Thin wrapper over :func:`read_mask_xml_from_mdb`; signature, return value and
+    error strings are unchanged.
+    """
+    return read_mask_xml_from_mdb(
+        mask_mdb_path, mask_id, ntc_id=ntc_id,
+        required_root="<pfd_mask", f_mask="P", what="PFD mask",
+    )
+
+
+def read_mask_xml_from_mdb(
+    mask_mdb_path: str,
+    mask_id: int,
+    ntc_id: str | None = None,
+    *,
+    required_root: str | None = None,
+    f_mask: str | None = None,
+    what: str = "mask",
+) -> str:
+    """Read any mask XML from the MASK MDB (table ``masks``).
+
+    The ``mask`` field stores a ZIP (OLE/BINARY blob) containing the XML. The
+    same blob layout carries pfd (``P``), e.i.r.p. (``E``/``S``) and — new in
+    S.1503-4 — operating-parameter masks (``R``), so the extraction is shared and
+    only the accepted document root differs.
+
+    ``f_mask`` narrows the candidate rows when the table carries the column;
+    rows with a blank/missing ``f_mask`` are accepted either way, which keeps
+    older mask databases working.
     """
     if not os.path.exists(mask_mdb_path):
         raise FileNotFoundError(f"MASK MDB file not found: {mask_mdb_path}")
@@ -524,6 +564,10 @@ def read_pfd_mask_xml_from_mdb(
             continue
         if ntc_id_s is not None and row_ntc != ntc_id_s:
             continue
+        if f_mask is not None:
+            row_fm = row.get("f_mask", "").strip().strip('"')
+            if row_fm and row_fm.upper() != f_mask.upper():
+                continue
         candidates.append(row)
 
     if not candidates:
@@ -577,13 +621,14 @@ def read_pfd_mask_xml_from_mdb(
     except UnicodeDecodeError:
         xml_text = xml_bytes.decode("latin1", errors="replace")
 
-    if "<pfd_mask" not in xml_text:
+    if required_root and required_root not in xml_text:
         raise ValueError(
-            f"Content extracted from MASK MDB does not contain <pfd_mask> (mask_id={mask_id})."
+            f"Content extracted from MASK MDB does not contain {required_root}> "
+            f"(mask_id={mask_id})."
         )
 
     logger.info(
-        f"PFD mask loaded from MASK MDB: mask_id={mask_id}, "
+        f"{what} loaded from MASK MDB: mask_id={mask_id}, "
         f"ntc_id={row.get('ntc_id', '').strip().strip('\"') or 'n/a'}"
     )
     return xml_text
@@ -617,7 +662,20 @@ def load_pfd_masks_for_ids(
 
 
 def list_pfd_masks_from_mask_mdb(mask_mdb_path: str, ntc_id: str | None = None) -> list[dict]:
-    """List entries of the ``masks`` table from a separate MASK MDB."""
+    """List the PFD masks of a separate MASK MDB (wrapper, unchanged behaviour)."""
+    return list_masks_from_mask_mdb(mask_mdb_path, ntc_id=ntc_id, f_mask="P")
+
+
+def list_masks_from_mask_mdb(
+    mask_mdb_path: str,
+    ntc_id: str | None = None,
+    *,
+    f_mask: str = "P",
+) -> list[dict]:
+    """List entries of the ``masks`` table, filtered by mask type.
+
+    ``f_mask='R'`` enumerates the operating-parameter sets (S.1503-4 §B3.3).
+    """
     if not os.path.exists(mask_mdb_path):
         raise FileNotFoundError(f"MASK MDB file not found: {mask_mdb_path}")
 
@@ -632,7 +690,7 @@ def list_pfd_masks_from_mask_mdb(mask_mdb_path: str, ntc_id: str | None = None) 
         row_ntc = row.get("ntc_id", "").strip().strip('"')
         if ntc_id_s is not None and row_ntc != ntc_id_s:
             continue
-        if row.get("f_mask", "").strip().strip('"') != "P":
+        if row.get("f_mask", "").strip().strip('"') != f_mask:
             continue
         mask_id = _parse_int(row.get("mask_id", "0"))
         key = (row_ntc, mask_id)
@@ -645,7 +703,8 @@ def list_pfd_masks_from_mask_mdb(mask_mdb_path: str, ntc_id: str | None = None) 
             "mask_id": mask_id,
             "sat_name": sat_name,
             "mask_type": row.get("f_mask_type", "").strip().strip('"'),
-            "label": f"mask_id {mask_id} · {row_ntc or 'n/a'} · {sat_name or 'PFD'}",
+            "f_mask": f_mask,
+            "label": f"mask_id {mask_id} · {row_ntc or 'n/a'} · {sat_name or f_mask}",
         })
     items.sort(key=lambda x: (x["ntc_id"], x["mask_id"]))
     return items
@@ -995,6 +1054,50 @@ def _read_sat_oper_bands(
     return result, min_dur_bands
 
 
+
+# Article 22 epfd limits apply only in bands at or above 10.7 GHz, so a band
+# expressed in GHz can never reach 1000 while one expressed in MHz can never
+# fall below 10 000. The gap is a factor of ~200, which makes the magnitude test
+# unambiguous; anything in between is reported rather than silently guessed.
+_MASK_FREQ_GHZ_MAX = 1000.0
+
+
+def _mask_freq_to_ghz(
+    raw_min: float,
+    raw_max: float,
+    *,
+    mask_id: int | None = None,
+    source: str = "",
+) -> tuple[float, float, str]:
+    """Normalise a ``mask_info`` band to GHz, detecting the stored unit.
+
+    SNS v10 stores GHz; the S.1503-4 examination structure stores MHz (EPS V41
+    §6.5.1.1, which flags the change explicitly). The same column carries both
+    and there is no unit field, so the unit is inferred from magnitude.
+
+    Returns ``(freq_min_ghz, freq_max_ghz, unit)``. Zero/absent values pass
+    through untouched — they mean "not declared", not "0 Hz".
+    """
+    vals = [v for v in (raw_min, raw_max) if v and v > 0.0]
+    if not vals:
+        return float(raw_min), float(raw_max), "GHz"
+    if max(vals) > _MASK_FREQ_GHZ_MAX:
+        if min(vals) <= _MASK_FREQ_GHZ_MAX:
+            # One endpoint each side of the cut: the row is internally
+            # inconsistent, so say so instead of halving the band.
+            logger.error(
+                "mask_info%s%s: band %.6g-%.6g straddles the MHz/GHz "
+                "discrimination threshold (%.0f); leaving it unconverted. The "
+                "run may select the wrong Article 22 table.",
+                f" mask_id={mask_id}" if mask_id is not None else "",
+                f" in {source}" if source else "",
+                raw_min, raw_max, _MASK_FREQ_GHZ_MAX,
+            )
+            return float(raw_min), float(raw_max), "GHz"
+        return float(raw_min) / 1000.0, float(raw_max) / 1000.0, "MHz"
+    return float(raw_min), float(raw_max), "GHz"
+
+
 def read_mask_info(mdb_path: str, ntc_id: str | None = None) -> list[SRSMaskInfo]:
     """Read mask information from the SRS MDB.
 
@@ -1009,13 +1112,27 @@ def read_mask_info(mdb_path: str, ntc_id: str | None = None) -> list[SRSMaskInfo
             row_ntc = row.get("ntc_id", "").strip().strip('"')
             if row_ntc and row_ntc != ntc_f:
                 continue
+        mid = _parse_int(row.get("mask_id", "0"))
+        raw_lo = _parse_float(row.get("freq_min", "0"))
+        raw_hi = _parse_float(row.get("freq_max", "0"))
+        lo_ghz, hi_ghz, unit = _mask_freq_to_ghz(raw_lo, raw_hi, mask_id=mid,
+                                                 source=mdb_path)
         masks.append(SRSMaskInfo(
-            mask_id=_parse_int(row.get("mask_id", "0")),
-            freq_min_ghz=_parse_float(row.get("freq_min", "0")),
-            freq_max_ghz=_parse_float(row.get("freq_max", "0")),
+            mask_id=mid,
+            freq_min_ghz=lo_ghz,
+            freq_max_ghz=hi_ghz,
             f_mask=row.get("f_mask", "").strip().strip('"'),
             f_mask_type=row.get("f_mask_type", "").strip().strip('"'),
+            freq_min_mhz=lo_ghz * 1000.0,
+            freq_max_mhz=hi_ghz * 1000.0,
+            unit_in_db=unit,
         ))
+    if any(m.unit_in_db == "MHz" for m in masks):
+        logger.info(
+            "  mask_info frequencies read as MHz and normalised to GHz "
+            "(%d of %d rows) — S.1503-4 examination structure, EPS §6.5.1.1.",
+            sum(1 for m in masks if m.unit_in_db == "MHz"), len(masks),
+        )
     return masks
 
 

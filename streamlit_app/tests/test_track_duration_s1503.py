@@ -259,3 +259,297 @@ def test_windowed_run_is_deterministic():
     r2 = run_epfd_simulation_windowed(windows=windows, n_jobs=1, **common)
     assert np.array_equal(r1.cdf_epfd_dBW, r2.cdf_epfd_dBW)
     assert np.allclose(r1.cdf_percentage, r2.cdf_percentage, atol=1e-12)
+
+
+# ── conformant single pass ≡ legacy per-set dispatch ─────────────────────────
+
+def _sp_common(n=300, seed=1, cap=None):
+    common = dict(
+        constellation=_constellation(n=n, seed=seed), wcg=_wcg(), pfd_mask=_alpha_mask(),
+        es_antenna=_ant(), alpha0_deg=2.0, min_elevation_deg=5.0, pfd_bw_correction_db=0.0,
+    )
+    if cap is not None:
+        common["max_co_freq_by_lat"] = cap
+    return common
+
+
+def _assert_same_windowed(a, b, ctx=""):
+    """Per-set CCDFs, envelope and step accounting must agree.
+
+    Bin levels are compared exactly. Percentages use a tight relative tolerance
+    because the single-pass path accumulates a bin's weight as
+    ``count * T_fine`` (``EPFDWindowStats.add_batch``) while the legacy path adds
+    ``T_fine`` once per step, which can differ in the last ulp.
+    """
+    assert len(a.window_stats) == len(b.window_stats), f"n sets {ctx}"
+    for i, (x, y) in enumerate(zip(a.window_stats, b.window_stats)):
+        assert x.n_steps == y.n_steps, f"n_steps set {i} {ctx}"
+        assert x.n_steps_valid == y.n_steps_valid, f"n_steps_valid set {i} {ctx}"
+        assert abs(x.total_duration_s - y.total_duration_s) <= 1e-9 * max(1.0, y.total_duration_s)
+        assert np.allclose(x.duration_per_bin, y.duration_per_bin, rtol=1e-12, atol=0.0), \
+            f"hist set {i} {ctx}"
+    for i, ((b0, p0), (b1, p1)) in enumerate(zip(a.per_window_ccdf, b.per_window_ccdf)):
+        assert np.array_equal(b0, b1), f"ccdf bins set {i} {ctx}"
+        assert np.allclose(p0, p1, rtol=1e-12, atol=0.0), f"ccdf pct set {i} {ctx}"
+    assert np.array_equal(a.cdf_epfd_dBW, b.cdf_epfd_dBW), f"envelope bins {ctx}"
+    assert np.allclose(a.cdf_percentage, b.cdf_percentage, rtol=1e-12, atol=0.0), \
+        f"envelope pct {ctx}"
+
+
+def test_single_pass_matches_legacy_no_cap():
+    """§D5.1.3: N_TotalSteps is one timeline, not N_TW of them.
+
+    The conformant single pass must reproduce the legacy per-set dispatch
+    exactly — same eligibility (Step 19), ranking (Step 19bis), cap (Step 20),
+    aggregate (Step 21) and run-duration truncation (Step 22).
+    """
+    common = _sp_common()
+    windows = compute_track_duration_windows(
+        min_duration_s=10.0, t_fine_s=1.0, nsteps=120,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    assert windows.n_tw > 1 and windows.n_sw > 1  # a meaningful multi-set case
+    sp = run_epfd_simulation_windowed(windows=windows, n_jobs=1, single_pass=True, **common)
+    lg = run_epfd_simulation_windowed(windows=windows, n_jobs=1, single_pass=False, **common)
+    assert any(w.n_steps_valid > 0 for w in sp.window_stats), "fixture produced no EPFD"
+    assert len(sp.cdf_epfd_dBW) > 5
+    _assert_same_windowed(sp, lg, "no cap")
+
+
+def test_single_pass_matches_legacy_with_cap_and_partial_window():
+    """Same, with MAX_CO_FREQ biting and Nstep not a multiple of N_SW.
+
+    ``nsteps=125`` with ``N_SW=7`` leaves the last window partly outside the run
+    duration, which is the Step-22 tail rule; the cap forces the Step-19bis
+    ranking (and therefore the tie-break) to matter.
+    """
+    common = _sp_common(seed=5, cap=[(-90.0, 90.0, 2)])
+    windows = compute_track_duration_windows(
+        min_duration_s=7.0, t_fine_s=1.0, nsteps=125,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    assert windows.n_sw == 7 and windows.n_repeat * windows.n_sw > 125
+    sp = run_epfd_simulation_windowed(windows=windows, n_jobs=1, single_pass=True, **common)
+    lg = run_epfd_simulation_windowed(windows=windows, n_jobs=1, single_pass=False, **common)
+    assert any(w.n_steps_valid > 0 for w in sp.window_stats)
+    for w in sp.window_stats:
+        assert w.n_steps == 125, "each set's statistics must span exactly Nstep steps"
+    _assert_same_windowed(sp, lg, "cap + partial window")
+
+
+def test_single_pass_chunking_is_transparent():
+    """The N_SW−1 halo must make chunk boundaries invisible."""
+    common = _sp_common(seed=9)
+    windows = compute_track_duration_windows(
+        min_duration_s=8.0, t_fine_s=1.0, nsteps=90,
+        min_orbital_period_s=6000.0, n_satellites=len(common["constellation"]),
+    )
+    seq = run_epfd_simulation_windowed(windows=windows, n_jobs=1, single_pass=True, **common)
+    par = run_epfd_simulation_windowed(windows=windows, n_jobs=4, single_pass=True, **common)
+    _assert_same_windowed(seq, par, "chunked")
+
+
+def test_step19bis_tie_break_is_label_stable():
+    """F06: the Step-19bis ranking must not depend on satellite labelling.
+
+    The Recommendation states no tie-break for Step 19bis (and not even a sort
+    direction), yet exact ties in window-peak epfd are common in practice —
+    pfd-mask edge clamping and the antenna gain floor produce identical peaks.
+    Ranking a ``set[int]`` by peak alone left the choice to hash-table slot
+    order, so the same physics with a reindexed constellation kept a different
+    satellite under the MAX_CO_FREQ cap. The total key ``(-peak, index)`` makes
+    the choice deterministic and label-stable.
+
+    Both satellites peak at 1.0 in step 0, so the cap must break a genuine tie;
+    they differ in step 1, so the aggregate reveals which one was kept. Values
+    follow the *label*, not the position, so re-ordering the arrays changes only
+    the labelling.
+    """
+    from src.epfd_calculator import _process_closed_window  # type: ignore[import]
+    from src.epfd_stream_accumulator import EPFDWindowStats  # type: ignore[import]
+
+    VAL = {"lo": (1.0, 0.25), "hi": (1.0, 0.5)}  # (step 0, step 1)
+
+    def aggregate(lo_label, hi_label, order):
+        """Window with two tied satellites; ``order`` sets the array layout."""
+        role = {lo_label: "lo", hi_label: "hi"}
+        buf = []
+        for step in (0, 1):
+            idx = np.array(order, dtype=np.int64)
+            ep = np.array([VAL[role[k]][step] for k in order], dtype=np.float64)
+            flag = np.array([True, True])
+            buf.append((step, idx, ep, flag, np.array([False, False])))
+        ws = EPFDWindowStats()
+        _process_closed_window(buffer=buf, max_co_freq=1, stats_end_step=10**9,
+                               t_fine_s=1.0, win_stats=ws)
+        return ws
+
+    # 35 and 122 land in an ascending-order-defying hash slot order for a
+    # Python set of small ints, which is exactly what used to decide the tie.
+    for a, b in ((35, 122), (3, 5), (157, 213), (8, 16)):
+        lo, hi = min(a, b), max(a, b)
+        for order in ((a, b), (b, a)):
+            ws = aggregate(lo, hi, order)
+            # The lower index wins the tie, so step 1 contributes 0.25 (-6.02 dB),
+            # never 0.5 (-3.01 dB).
+            kept = ws.duration_per_bin[_bin(10.0 * math.log10(0.25))]
+            dropped = ws.duration_per_bin[_bin(10.0 * math.log10(0.5))]
+            assert kept == 1.0, f"labels {(lo, hi)} order {order}: lower index not kept"
+            assert dropped == 0.0, f"labels {(lo, hi)} order {order}: higher index kept"
+
+
+def _bin(value_db):
+    from src.epfd_stream_accumulator import _bin_index  # type: ignore[import]
+    return _bin_index(value_db)
+
+
+def test_window_aggregate_dense_matches_scalar_exactly():
+    """The vectorized window reduction must equal the scalar one, value by value.
+
+    The engine-level A/B tests compare 0.1 dB-binned statistics, which absorb
+    differences below ~1e-5 dB and cannot see a selection change that never
+    crosses a bin edge. This locks the two implementations at full float
+    precision on a window built to exercise every branch:
+
+      * satellites tied on window peak exactly at the MAX_CO_FREQ boundary
+        (Step 19bis tie-break),
+      * an eligible satellite ranked below the cap (dropped, and under the
+        project's Step-20 reading it must not re-enter via the gain branch),
+      * a gain-only (OR) satellite that is never α₀/ε₀-standard,
+      * a satellite that drops out of the recorded set mid-window, so it fails
+        the Step-19 full-duration test.
+    """
+    from src.epfd_calculator import (  # type: ignore[import]
+        _process_closed_window, _window_aggregate_dense,
+    )
+    from src.epfd_stream_accumulator import EPFDWindowStats  # type: ignore[import]
+
+    N_SAT, N_SW = 12, 5
+    rng = np.random.RandomState(7)
+
+    # Sat 4 and sat 9: eligible, tied peak. Sat 2: eligible, lower peak.
+    # Sat 7: OR-only. Sat 11: standard except at step 2 (fails Step 19).
+    idx_by_step, ep_by_step, std_by_step, orx_by_step = [], [], [], []
+    for step in range(N_SW):
+        present = [2, 4, 7, 9] + ([11] if True else [])
+        present = sorted(present + [11])
+        ep, std, orx = [], [], []
+        for k in present:
+            if k == 4:
+                v = 1.0 if step == 0 else 0.1 + 0.01 * step
+                std.append(True); orx.append(False)
+            elif k == 9:
+                v = 1.0 if step == 0 else 0.2 + 0.01 * step   # tied peak with 4
+                std.append(True); orx.append(False)
+            elif k == 2:
+                v = 0.5 + 0.001 * step
+                std.append(True); orx.append(True)            # eligible AND in gain cone
+            elif k == 7:
+                v = 0.05 + 0.001 * step
+                std.append(False); orx.append(True)           # OR-only
+            else:  # k == 11
+                v = 0.3
+                std.append(step != 2); orx.append(False)      # breaks full-duration
+            ep.append(v)
+        idx_by_step.append(np.array(present, dtype=np.int64))
+        ep_by_step.append(np.array(ep, dtype=np.float64))
+        std_by_step.append(np.array(std, dtype=bool))
+        orx_by_step.append(np.array(orx, dtype=bool))
+
+    buffer = [
+        (g, idx_by_step[g], ep_by_step[g], std_by_step[g], orx_by_step[g])
+        for g in range(N_SW)
+    ]
+
+    E = np.zeros((N_SW, N_SAT)); S = np.zeros((N_SW, N_SAT), bool); O = np.zeros((N_SW, N_SAT), bool)
+    for g in range(N_SW):
+        E[g, idx_by_step[g]] = ep_by_step[g]
+        S[g, idx_by_step[g]] = std_by_step[g]
+        O[g, idx_by_step[g]] = orx_by_step[g]
+
+    class _Recorder(EPFDWindowStats):
+        def __init__(self):
+            super().__init__()
+            self.seen = []
+        def add(self, time_s, epfd_db, duration_s):  # noqa: D102
+            self.seen.append(epfd_db)
+            super().add(time_s=time_s, epfd_db=epfd_db, duration_s=duration_s)
+
+    for cap in (0, 1, 2, 3, 5):
+        rec = _Recorder()
+        _process_closed_window(buffer=buffer, max_co_freq=cap, stats_end_step=10**9,
+                               t_fine_s=1.0, win_stats=rec)
+        scalar = np.array(rec.seen, dtype=np.float64)
+
+        agg = _window_aggregate_dense(E, S, O, cap)
+        with np.errstate(divide="ignore"):
+            dense = np.where(agg > 0.0, 10.0 * np.log10(agg), -999.0)
+
+        assert dense.shape == scalar.shape, f"cap={cap}"
+        # Not bit-exact by construction: the scalar path adds the contributing
+        # satellites sequentially in ascending index order, while numpy sums the
+        # dense row pairwise. Measured worst case here is 10 ulp (1.6e-15
+        # relative), i.e. ~1e-15 dB against a 0.1 dB bin — fourteen orders of
+        # magnitude below anything the statistics can resolve. A selection
+        # difference, by contrast, moves the value by whole dB and is caught.
+        assert np.allclose(dense, scalar, rtol=1e-13, atol=0.0), (
+            f"cap={cap}: dense {dense} vs scalar {scalar}"
+        )
+
+    # Non-vacuity: the cap must actually bite, and the tie must actually occur.
+    elig = S.all(axis=0)
+    assert set(np.flatnonzero(elig)) == {2, 4, 9}, "expected exactly three eligible sats"
+    assert E[:, 4].max() == E[:, 9].max(), "fixture lost the peak tie"
+
+
+# ── single-pass chunk sizing (halo budget) ───────────────────────────────────
+
+def test_singlepass_chunks_cover_the_timeline_exactly():
+    from src.epfd_calculator import _singlepass_chunks  # type: ignore[import]
+
+    for n_total, n_sw, n_jobs in ((101_759, 960, 8), (1_842_499, 1250, 128),
+                                  (4_006_654, 6956, 8), (2000, 960, 8), (500, 10, 4)):
+        ch = _singlepass_chunks(n_total, n_sw, n_jobs)
+        assert ch[0][0] == 0 and ch[-1][1] == n_total
+        for (a, b), (c, _d) in zip(ch, ch[1:]):
+            assert b == c, "chunks must be contiguous"
+            assert b > a, "chunks must be non-empty"
+
+
+def test_singlepass_chunking_respects_the_halo_budget():
+    """Each chunk re-propagates N_SW − 1 steps, so chunk count is not free.
+
+    The work per fine step is uniform, so the wall time on ``n_jobs`` workers is
+    minimised at exactly ``n_jobs`` chunks; oversubscribing only multiplies the
+    halo. The previous rule targeted 4×n_jobs chunks with a 4·N_SW floor, which
+    on a real run (N_TotalSteps 101 759, N_SW 960, 8 jobs) produced 27 chunks and
+    wasted 24.5% of the propagation budget on halos.
+    """
+    from src.epfd_calculator import _singlepass_chunks  # type: ignore[import]
+
+    n_total, n_sw, n_jobs = 101_759, 960, 8
+    ch = _singlepass_chunks(n_total, n_sw, n_jobs)
+    halo = sum(min(a, n_sw - 1) for a, _ in ch)
+    assert len(ch) == n_jobs, "one chunk per worker is the optimum for uniform work"
+    assert halo / n_total < 0.10, f"halo overhead {halo / n_total:.1%} too high"
+
+    # A cluster-scale split pays more halo, but still bounded.
+    ch2 = _singlepass_chunks(1_842_499, 1250, 128)
+    halo2 = sum(min(a, 1249) for a, _ in ch2)
+    assert len(ch2) == 128
+    assert halo2 / 1_842_499 < 0.10
+
+
+def test_singlepass_chunking_collapses_when_halo_would_dominate():
+    """A run barely longer than one window must not be split at all."""
+    from src.epfd_calculator import _singlepass_chunks  # type: ignore[import]
+
+    assert _singlepass_chunks(2000, 960, 8) == [(0, 2000)]      # halo 959 per chunk
+    assert _singlepass_chunks(101_759, 960, 1) == [(0, 101_759)]
+    # Just above the ratio threshold it may split, but never so far that a chunk
+    # carries less real work than its own halo.
+    for n_total in (10_000, 50_000, 200_000):
+        ch = _singlepass_chunks(n_total, 960, 8)
+        for a, b in ch:
+            if a:  # the first chunk has no halo
+                assert (b - a) >= (960 - 1), "chunk smaller than its own halo"

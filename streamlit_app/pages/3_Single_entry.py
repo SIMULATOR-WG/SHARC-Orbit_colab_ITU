@@ -831,23 +831,137 @@ with st.form("s1503_form"):
     if not use_grid:
         with st.expander("8. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
             st.caption(
-                "Sliding-window variant. When the SRS `sat_oper` declares "
-                "MIN_DURATION ≠ 0 (minimum time the ES tracks a satellite), the "
-                "engine runs the §D5.1.4.2 algorithm automatically. Set a value "
-                "below to **force** or **override** MIN_DURATION for all latitudes "
-                "(useful for manual systems or what-if studies). 0 / empty = use "
-                "the filing's own value (or the standard §D5.1.4.1 path)."
+                "§D5.1.4 makes this **data-driven, not a user choice**: *\"In the "
+                "case that the non-GSO satellite selection method is defined by "
+                "track duration (e.g. for the MIN_DURATION [Latitude] to be "
+                "non-zero for at least one latitude) then the algorithm and "
+                "calculation procedures are as in § D5.1.4.2, otherwise they are "
+                "as in § D5.1.4.1.\"* MIN_DURATION is carried by the "
+                "operating-parameter mask (§B3.3, `f_mask='R'`), one set per "
+                "frequency range, so the variant is selected **per band "
+                "examined** and applies to the downlink only — §D5.2 states the "
+                "minimum track duration is not used for the epfd(up) case."
             )
-            min_duration_s = st.text_input(
-                "MIN_DURATION (s) — override",
-                value=str(prev.get("min_duration_s") or ""),
-                placeholder="auto (from SRS sat_oper; 0 = standard path)",
-                help="Engine key: `min_duration_s`. > 0 forces the sliding-window "
-                     "variant with N_SW = ⌊MIN_DURATION/T_fine⌋ fine steps per "
-                     "window. Cost scales with N_TW ≈ N_SW/N_MSL window sets — a "
-                     "large MIN_DURATION with a small T_fine is expensive.",
+
+            # What the filing itself declares for the frequency being examined.
+            _op_reg, _op_err, _op_set = None, None, None
+            try:
+                from src.operating_params import (
+                    load_from_mask_mdb, load_from_paths, OperatingParameterRegistry,
+                )
+                _row = storage.get_system(sel_sys) or {}
+                _sets = []
+                if _row.get("mask_path"):
+                    _sets += list(load_from_mask_mdb(
+                        _row["mask_path"], ntc_id=_row.get("ntc_id")))
+                _extra = _row.get("op_param_paths") or []
+                if _extra:
+                    _sets += list(load_from_paths(_extra))
+                _op_reg = OperatingParameterRegistry(_sets) if _sets else None
+            except Exception as exc:  # noqa: BLE001
+                _op_err = str(exc)
+
+            _freq_ghz = None
+            try:
+                _freq_ghz = float(sim_freq) if str(sim_freq).strip() else None
+            except (TypeError, ValueError):
+                _freq_ghz = None
+            if _freq_ghz is None and art22_leaf is not None:
+                _freq_ghz = art22_leaf.get("frequency_run_ghz")
+
+            if _op_err:
+                st.warning(f"Could not read operating-parameter masks: {_op_err}")
+            elif _op_reg is None:
+                st.info(
+                    "This filing carries no operating-parameter mask "
+                    "(`f_mask='R'`), so MIN_DURATION is undefined and the "
+                    "classic §D5.1.4.1 algorithm applies. Upload the §B3.3 XML "
+                    "on the Uploads page to supply one."
+                )
+            else:
+                st.dataframe(
+                    [{
+                        "set": d["param_id"],
+                        "band (MHz)": f"{d['band_mhz'][0]:.0f}–{d['band_mhz'][1]:.0f}",
+                        "MIN_DURATION (s)": d["min_duration_s"],
+                        "algorithm": "§D5.1.4.2" if d["track_duration"] else "§D5.1.4.1",
+                        "MAX_CO_FREQ": d["max_co_freq"],
+                        "MIN_EXCLUDE (°)": d["min_exclude_deg"],
+                        "MIN_ELEV (°)": d["min_elev_deg"],
+                    } for d in _op_reg.summary()],
+                    hide_index=True, use_container_width=True,
+                )
+                if _freq_ghz:
+                    try:
+                        _op_set = _op_reg.for_frequency(float(_freq_ghz) * 1000.0)
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(str(exc))
+                    if _op_set is None:
+                        st.warning(
+                            f"No operating-parameter set covers "
+                            f"{float(_freq_ghz) * 1000.0:.2f} MHz. §B3.3 requires "
+                            "one set for every examined band."
+                        )
+                    elif _op_set.uses_track_duration:
+                        st.success(
+                            f"At {float(_freq_ghz) * 1000.0:.2f} MHz → set "
+                            f"{_op_set.param_id}, MIN_DURATION "
+                            f"{_op_set.min_duration_at(0.0):.0f} s → the "
+                            "**§D5.1.4.2 sliding-window** algorithm runs."
+                        )
+                    else:
+                        st.info(
+                            f"At {float(_freq_ghz) * 1000.0:.2f} MHz → set "
+                            f"{_op_set.param_id}, no MIN_DURATION → the classic "
+                            "**§D5.1.4.1** algorithm runs."
+                        )
+                else:
+                    st.caption(
+                        "Set the simulation frequency in section 5 to see which "
+                        "set applies."
+                    )
+
+            td_mode = st.radio(
+                "Selection method",
+                ["Automatic (as the filing declares)",
+                 "Force MIN_DURATION (study)",
+                 "Force classic §D5.1.4.1 (study)"],
+                index={"force": 1, "off": 2}.get(prev.get("track_duration_mode"), 0),
+                help="Automatic is the only setting that yields a conformant "
+                     "examination. The two overrides are for what-if studies; "
+                     "both are recorded in the run provenance and flagged in the "
+                     "report so a result produced under an override can never be "
+                     "mistaken for an examination.",
+            )
+            min_duration_s = ""
+            if td_mode.startswith("Force MIN_DURATION"):
+                st.warning(
+                    "Override: the run will **not** follow §D5.1.4, which "
+                    "selects the algorithm from the filing's own MIN_DURATION. "
+                    "Use for studies only."
+                )
+                min_duration_s = st.text_input(
+                    "MIN_DURATION (s) — forced for all latitudes",
+                    value=str(prev.get("min_duration_s") or ""),
+                    placeholder="e.g. 2400",
+                    help="Engine key: `min_duration_s`. N_SW = ⌊MIN_DURATION/T_fine⌋ "
+                         "fine steps per window; the number of window families "
+                         "N_TW ≈ N_SW/N_MSL drives the cost. §B5.2 requires ≥ 1 s.",
+                )
+            elif td_mode.startswith("Force classic"):
+                st.warning(
+                    "Override: any MIN_DURATION the filing declares will be "
+                    "ignored and the classic §D5.1.4.1 algorithm forced. Use for "
+                    "studies only."
+                )
+            track_duration_mode = (
+                "force" if td_mode.startswith("Force MIN_DURATION")
+                else "off" if td_mode.startswith("Force classic")
+                else "auto"
             )
     else:
+        min_duration_s = ""
+        track_duration_mode = "auto"
         st.caption(
             "MIN_DURATION (§D5.1.4.2) is not supported on the ES×GSO grid "
             "(same as Aggregate)."
@@ -1022,9 +1136,13 @@ if submit:
     _set("fine_time_step_s", _f(fine_dt))
     params["dual_time_step_mode"] = dual_mode
     params["itu_software"] = itu_software
-    # Track-duration override (§D5.1.4.2). Only sent when > 0.
+    # Track-duration selection (§D5.1.4). "auto" is the conformant setting: the
+    # engine resolves MIN_DURATION from the filing's operating-parameter mask
+    # for the band examined. The two overrides are study-only and are recorded
+    # so a result produced under one is never mistaken for an examination.
+    params["track_duration_mode"] = track_duration_mode
     _md_val = _f(min_duration_s)
-    if _md_val is not None and _md_val > 0:
+    if track_duration_mode == "force" and _md_val is not None and _md_val > 0:
         params["min_duration_s"] = _md_val
     # Orbital dynamics. artificial_precession: only sent when forced (auto →
     # leave unset so the engine auto-detects from the SRS).
@@ -1043,6 +1161,7 @@ if submit:
         params["wcga_s1503"] = False
         params["wcg_manual"] = False
         params.pop("min_duration_s", None)
+        params["track_duration_mode"] = "auto"
         _gs = _f(grid_step)
         _gso = _f(gpts)
         _set("grid_step_deg", _gs)
@@ -1130,6 +1249,7 @@ if submit:
         "fine_time_step_s": fine_dt, "dual_time_step_mode": dual_mode,
         "itu_software": itu_software,
         "min_duration_s": min_duration_s,
+        "track_duration_mode": track_duration_mode,
         "artificial_prec_mode": artificial_prec_mode,
         "use_precession_mdb": bool(use_prec_mdb),
         "apply_station_keeping": bool(apply_sk),

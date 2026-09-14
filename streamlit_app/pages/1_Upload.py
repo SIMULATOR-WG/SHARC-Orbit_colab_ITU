@@ -85,6 +85,18 @@ if st.session_state["upload_stage"] == "files":
             help="Required — contains the PFD mask referenced by the SRS "
                  "notice. Both files are needed to run S.1503 / S.1588.",
         )
+        op_files = st.file_uploader(
+            "Operating-parameter masks (.xml) — optional",
+            type=["xml"],
+            accept_multiple_files=True,
+            help="S.1503-4 §B3.3 non-GSO system operating parameters: "
+                 "MIN_EXCLUDE, MIN_ELEV, MAX_CO_FREQ and MIN_DURATION, one set "
+                 "per frequency range. These normally travel inside the mask "
+                 "database as f_mask='R' blobs and are picked up automatically; "
+                 "upload them here only when your mask .mdb does not carry "
+                 "them. MIN_DURATION is what selects the §D5.1.4.2 "
+                 "track-duration algorithm, per band examined.",
+        )
         _pfx = (use_persisted_state("filing.prefix", {"value": ""})
                 .get("value", ""))
         label = st.text_input(
@@ -108,6 +120,27 @@ if st.session_state["upload_stage"] == "files":
         dst_dir = UPLOADS_DIR / upload_id
         srs_path = _save_file(srs_file, dst_dir)
         mask_path = _save_file(mask_file, dst_dir) if mask_file else None
+        op_param_paths = [str(_save_file(f, dst_dir)) for f in (op_files or [])]
+        if op_param_paths:
+            # Fail at upload time, not mid-run: §B5.2 ranges and the §B3.3
+            # "only one set of operating parameters for any frequency band"
+            # rule are cheap to check and expensive to discover later.
+            try:
+                from src.operating_params import load_from_paths
+                _reg = load_from_paths(op_param_paths)
+                _reg.raise_on_errors()
+                st.success(
+                    "Operating-parameter sets: "
+                    + ", ".join(
+                        f"{d['param_id']} ({d['band_mhz'][0]:.0f}–{d['band_mhz'][1]:.0f} MHz"
+                        + (f", MIN_DURATION {d['min_duration_s']:.0f} s" if d["track_duration"] else "")
+                        + ")"
+                        for d in _reg.summary()
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Operating-parameter XML rejected: {exc}")
+                st.stop()
         # Parse once now so Step 2 can suggest a label from the network name
         # (and the final register reuses it — no second parse).
         try:
@@ -119,6 +152,7 @@ if st.session_state["upload_stage"] == "files":
             "label": label.strip(),
             "srs_path": str(srs_path),
             "mask_path": str(mask_path) if mask_path else None,
+            "op_param_paths": op_param_paths,
             "uploaded_name": srs_file.name,
             "network_name": preview.get("network_name"),
             "preview": preview,

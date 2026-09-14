@@ -412,6 +412,62 @@ class EPFDWindowStats:
             if epfd_db < self.epfd_min_valid_db:
                 self.epfd_min_valid_db = float(epfd_db)
 
+    def add_batch(
+        self,
+        epfd_db: np.ndarray,
+        duration_s: float,
+        first_time_s: float = 0.0,
+        time_step_s: float = 0.0,
+    ) -> None:
+        """Vectorized :meth:`add` over a whole closed window.
+
+        Equivalent to calling :meth:`add` once per entry of ``epfd_db`` with a
+        constant ``duration_s``, but in a handful of numpy operations. The
+        single-pass §D5.1.4.2 engine closes one window per fine time step, so a
+        per-step Python call would dominate the run (it is ~35x the cost of the
+        whole vectorized window reduction).
+
+        ``first_time_s``/``time_step_s`` locate the entries in time, used only to
+        report ``peak_time_s``; pass ``time_step_s=0`` to skip that bookkeeping.
+
+        Binning is bit-identical to :func:`_bin_index`. The bin weights are
+        accumulated as ``count * duration_s`` rather than by repeated addition,
+        so a bin's weight can differ from the scalar path in the last ulp.
+        """
+        arr = np.asarray(epfd_db, dtype=np.float64)
+        n = int(arr.size)
+        if n == 0 or duration_s <= 0.0 or not np.isfinite(duration_s):
+            return
+        self.n_steps += n
+        self.total_duration_s += float(duration_s) * n
+
+        valid = np.isfinite(arr) & (arr > -900.0)
+        n_valid = int(valid.sum())
+        if n_valid == 0:
+            return
+        vals = arr[valid]
+        self.n_steps_valid += n_valid
+
+        idx = np.floor((vals - _BIN_MIN_DB) / _BIN_SIZE_DB + 1e-12).astype(np.int64)
+        keep = (idx >= 0) & (idx < _NBINS)
+        if keep.any():
+            counts = np.bincount(idx[keep], minlength=_NBINS)
+            self.duration_per_bin += counts.astype(np.float64) * float(duration_s)
+
+        vmax = float(vals.max())
+        if vmax > self.epfd_max_db:
+            self.epfd_max_db = vmax
+            if time_step_s:
+                # First occurrence of the max, matching the scalar path's
+                # strict ``>`` comparison.
+                j = int(np.flatnonzero(valid)[int(np.argmax(vals))])
+                self.peak_time_s = float(first_time_s + j * time_step_s)
+            else:
+                self.peak_time_s = None
+        vmin = float(vals.min())
+        if vmin < self.epfd_min_valid_db:
+            self.epfd_min_valid_db = vmin
+
     def merge(self, other: "EPFDWindowStats") -> None:
         if other is None or other.n_steps == 0:
             return

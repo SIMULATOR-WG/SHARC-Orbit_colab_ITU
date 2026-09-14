@@ -221,13 +221,28 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
     if params.get("emulate_s1503_2"):
         ngso["strict_exclusion_zone"] = True
 
-    # Track-duration override (S.1503-4 §D5.1.4.2). ``min_duration_s`` > 0 forces
-    # the sliding-window variant across all latitudes, overriding (or supplying,
-    # for manual systems) the SRS sat_oper MIN_DURATION. 0/absent keeps whatever
-    # the filing declares (empty for manual → standard §D5.1.4.1 path).
+    # Track-duration selection (S.1503-4 §D5.1.4). The algorithm is chosen by
+    # the data — "In the case that the non-GSO satellite selection method is
+    # defined by track duration ... then the algorithm and calculation
+    # procedures are as in § D5.1.4.2, otherwise they are as in § D5.1.4.1" —
+    # so ``auto`` is the only conformant mode. The two overrides exist for
+    # what-if studies and are recorded in the run provenance.
+    _td_mode = str(params.get("track_duration_mode") or "auto")
     _md = params.get("min_duration_s")
-    if _md is not None and float(_md) > 0.0:
+    if _td_mode == "force" and _md is not None and float(_md) > 0.0:
         ngso["min_duration_by_lat"] = [(-90.0, 90.0, float(_md))]
+        ngso["_track_duration_override"] = {
+            "mode": "force", "min_duration_s": float(_md),
+            "note": "MIN_DURATION forced for all latitudes; not a conformant "
+                    "§D5.1.4 selection.",
+        }
+    elif _td_mode == "off":
+        ngso["min_duration_by_lat"] = []
+        ngso["_track_duration_override"] = {
+            "mode": "off",
+            "note": "Classic §D5.1.4.1 forced; any MIN_DURATION the filing "
+                    "declares was ignored. Not a conformant §D5.1.4 selection.",
+        }
 
     # Manual WCG override
     if params.get("wcg_manual") and all(

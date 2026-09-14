@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<satellite_system sat_name="NEXT101" ntc_id="127520101">
+  <non_gso_operating_parameters es_lat_max="+90" es_lat_min="-90" es_distance="1883" es_density="0.00000028182" c_name="orb_id" b_name="azimuth" a_name="latitude" high_freq_mhz="20200" low_freq_mhz="19700" param_id="7">
+    <min_exclude c="0">
+      <exclusion_zone_angle a="0">5</exclusion_zone_angle>
+    </min_exclude>
+    <max_co_freq a="0">3</max_co_freq>
+    <min_duration a="0">2400</min_duration>
+    <min_elev a="0">
+      <elev_angle b="0">10</elev_angle>
+    </min_elev>
+  </non_gso_operating_parameters>
+</satellite_system>

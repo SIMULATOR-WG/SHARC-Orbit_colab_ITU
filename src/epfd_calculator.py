@@ -2392,7 +2392,17 @@ def _process_closed_window(
         eligible = set()
 
     # Step 19bis + 20: rank eligible by peak epfd↓, keep the top MAX_CO_FREQ.
-    ranked = sorted(eligible, key=lambda k: peak.get(k, 0.0), reverse=True)
+    # The Recommendation states no tie-break (§D5.1.4.2 Step 19bis reads only
+    # "sort this list of satellites by maximum epfd↓[nSat] per satellite", and
+    # does not even state the sort direction). Sorting a ``set[int]`` with a
+    # single key left ties to Python's hash-table iteration order, so the result
+    # depended on satellite *labelling*: the same physics with a reindexed
+    # constellation kept a different satellite under the MAX_CO_FREQ cap. Exact
+    # ties are common in practice — pfd-mask edge clamping and the antenna gain
+    # floor produce identical window peaks (57 of 126 windows in one fixture).
+    # The total key (−peak, index) makes the choice deterministic and
+    # label-stable; it is a documented project convention, not a Rec. rule.
+    ranked = sorted(eligible, key=lambda k: (-peak.get(k, 0.0), k))
     if max_co_freq and max_co_freq > 0:
         selected = set(ranked[:max_co_freq])
     else:
@@ -2416,6 +2426,297 @@ def _process_closed_window(
                 agg += float(epfd_lin[j])
         epfd_db = 10.0 * math.log10(agg) if agg > 0.0 else -999.0
         win_stats.add(time_s=g * t_fine_s, epfd_db=epfd_db, duration_s=t_fine_s)
+
+
+# A chunk must carry at least this many times its own halo of real work.
+_HALO_WORK_RATIO = 4
+
+
+def _window_aggregate_dense(
+    E: np.ndarray,
+    S: np.ndarray,
+    O: np.ndarray,
+    max_co_freq: int,
+    row_order: list | None = None,
+) -> np.ndarray:
+    """Vectorized §D5.1.4.2 Steps 19, 19bis, 20 and 21 for one closed window.
+
+    ``E``/``S``/``O`` are the dense ``[N_SW × N_sat]`` ring arrays holding the
+    whole window: linear epfd↓ᵢ, the Step-18 α₀/ε₀ flag and the Step-18 gain
+    (OR) flag, zero/False where a satellite did not contribute at that step.
+
+    Steps 19 and 19bis are reductions down the whole window and are order-free,
+    so they run over the ring arrays as stored. Step 21 is per step, so the
+    returned aggregate is assembled in chronological order following
+    ``row_order`` — a list of ``(start, stop)`` ring-row ranges, oldest first
+    (default: the array as given).
+
+    Semantics match :func:`_process_closed_window` exactly, including the
+    project's reading of Step 20 in which the gain-condition set excludes
+    window-eligible satellites, and the deterministic ``(−peak, index)``
+    tie-break of Step 19bis.
+    """
+    elig = S.all(axis=0)                                      # Step 19
+    n_elig = int(elig.sum())
+    sel_mask = np.zeros(E.shape[1], dtype=bool)
+    if n_elig:
+        cand = np.flatnonzero(elig)
+        if max_co_freq and max_co_freq > 0 and n_elig > max_co_freq:
+            # Step 19bis: rank by window-peak epfd↓. An eligible satellite is
+            # recorded at every step of the window, so a plain column max over
+            # the dense view equals the max over its recorded steps.
+            peak = E[:, cand].max(axis=0)
+            # (−peak, index): the same total key the scalar path uses. Here it
+            # is belt-and-braces — ``cand`` comes from ``flatnonzero`` in
+            # ascending order and a stable sort would already break ties the
+            # same way — but stating it explicitly keeps the two paths provably
+            # aligned if either sort ever changes.
+            order = np.lexsort((cand, -peak))                 # (−peak, index)
+            sel = cand[order[:max_co_freq]]
+        else:
+            sel = cand                                        # 0 ⇒ unlimited
+        sel_mask[sel] = True
+
+    # Steps 20–21: the fixed tracked set plus the gain-condition satellites that
+    # are not window-eligible, each counted once.
+    not_elig = ~elig[None, :]
+    if row_order is None:
+        row_order = [(0, E.shape[0])]
+    parts = []
+    for a, b in row_order:
+        contrib = sel_mask[None, :] | (O[a:b] & not_elig)
+        parts.append((E[a:b] * contrib).sum(axis=1))
+    return parts[0] if len(parts) == 1 else np.concatenate(parts)
+
+
+class _WindowRing:
+    """Dense ring buffer holding the last ``N_SW`` fine steps.
+
+    Every sliding window still open at step ``g`` started less than ``N_SW``
+    steps earlier — family ``w``'s current window starts at
+    ``w·N_MSL + N_SW·⌊(g − w·N_MSL)/N_SW⌋`` — so one buffer of depth ``N_SW``
+    serves all ``N_TW`` families at once. That is what makes the single global
+    pass of §D5.1.3 possible.
+    """
+
+    __slots__ = ("n_sw", "E", "S", "O", "head")
+
+    def __init__(self, n_sw: int, n_sat: int):
+        self.n_sw = int(n_sw)
+        self.E = np.zeros((self.n_sw, n_sat), dtype=np.float64)
+        self.S = np.zeros((self.n_sw, n_sat), dtype=bool)
+        self.O = np.zeros((self.n_sw, n_sat), dtype=bool)
+        self.head = 0
+
+    def push(self, idx: np.ndarray, epfd_lin: np.ndarray,
+             std: np.ndarray, orx: np.ndarray) -> None:
+        r = self.head % self.n_sw
+        self.E[r] = 0.0
+        self.S[r] = False
+        self.O[r] = False
+        if idx.size:
+            self.E[r, idx] = epfd_lin
+            self.S[r, idx] = std
+            self.O[r, idx] = orx
+        self.head += 1
+
+    def slices(self) -> list[tuple[int, int]]:
+        """Ring-row ranges spanning the window that ends at the last push,
+        ordered oldest-first as ``[(start, stop), ...]``."""
+        r = self.head % self.n_sw
+        if r == 0:
+            return [(0, self.n_sw)]
+        return [(r, self.n_sw), (0, r)]
+
+
+def _close_table(n_sw: int, n_msl: int, n_tw: int) -> list[list[int]]:
+    """For each residue ``(g+1) mod N_SW``, the families whose window closes.
+
+    Family ``w`` closes a window at step ``g`` when ``(g + 1 − w·N_MSL)`` is a
+    positive multiple of ``N_SW``. Precomputing the residue table keeps the
+    per-step cost at O(1) instead of scanning all ``N_TW`` families.
+    """
+    table: list[list[int]] = [[] for _ in range(n_sw)]
+    for w in range(n_tw):
+        table[(w * n_msl) % n_sw].append(w)
+    return table
+
+
+def _singlepass_chunks(
+    n_total: int, n_sw: int, n_jobs: int,
+) -> list[tuple[int, int]]:
+    """Split ``[0, N_TotalSteps)`` for the single-pass windowed engine.
+
+    Each chunk re-propagates an ``N_SW − 1`` halo to prime its ring buffer, so
+    the number of chunks is not free. Every fine step costs the same, so the
+    work is uniform and the wall time with ``c`` chunks on ``n_jobs`` workers is
+    about ``ceil(c / n_jobs) · (n_total / c + halo)``. For ``c <= n_jobs`` that
+    is minimised at ``c = n_jobs``: splitting further shrinks no worker's share
+    and adds one more halo each time. Oversubscribing — the usual load-balancing
+    trick — is counter-productive here for the same reason.
+
+    ``c`` is additionally capped so a chunk always carries several times its own
+    halo; otherwise a short run spends most of its time re-priming ring buffers
+    (a 2 000-step run with ``N_SW = 960`` would pay a 959-step halo per chunk).
+    """
+    n_total = int(n_total)
+    if n_jobs <= 1 or n_total <= 0:
+        return [(0, max(0, n_total))]
+    halo = max(0, int(n_sw) - 1)
+    n_chunks = int(n_jobs)
+    if halo:
+        n_chunks = min(n_chunks, max(1, n_total // (_HALO_WORK_RATIO * halo)))
+    n_chunks = max(1, n_chunks)
+    size = int(math.ceil(n_total / n_chunks))
+    out: list[tuple[int, int]] = []
+    c = 0
+    while c < n_total:
+        e = min(c + size, n_total)
+        out.append((c, e))
+        c = e
+    return out
+
+
+def _simulate_singlepass_chunk(args):
+    """Single global pass over a contiguous step range (picklable).
+
+    Implements §D5.1.3 as printed: ``N_TotalSteps = N_repeat·N_SW +
+    (N_TW − 1)·N_MSL`` is *"the run duration plus the time required to complete
+    all the time windows"* — one timeline, not ``N_TW`` of them. Each fine step
+    is propagated **once** and feeds every family whose window contains it.
+
+    The chunk owns the window closes in ``[own_start, own_end)`` and simulates
+    ``[own_start − (N_SW − 1), own_end)`` so the ring buffer is primed; the halo
+    steps are propagated but produce no statistics of their own.
+
+    Returns ``{w: EPFDWindowStats}`` for the families that closed here.
+    """
+    (own_start, own_end, windows,
+     constellation, wcg, pfd_mask, es_antenna,
+     alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+     raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+     max_co_freq_by_lat, strict_exclusion_zone,
+     wdelta_deg, t_run_s, gso_min_elevation_deg) = args
+
+    t_fine = windows.t_fine_s
+    n_sw = windows.n_sw
+    n_msl = windows.n_msl
+    n_tw = windows.n_tw
+    n_repeat = windows.n_repeat
+    n_steps_stats = windows.n_steps_stats
+
+    es_lat = wcg.es_lat_deg
+    es_lon = wcg.es_lon_deg
+    gso_lon = wcg.gso_lon_deg
+    es_ecef = _es_ecef_from_wcg(wcg)
+    es_x, es_y, es_z = float(es_ecef[0]), float(es_ecef[1]), float(es_ecef[2])
+
+    lat_r = math.radians(es_lat)
+    lon_r = math.radians(es_lon)
+    sl, cl = math.sin(lat_r), math.cos(lat_r)
+    so, co = math.sin(lon_r), math.cos(lon_r)
+    R_enu = np.array([
+        [-so,        co,       0.0],
+        [-sl * co,  -sl * so,  cl ],
+        [ cl * co,   cl * so,  sl ],
+    ])
+    max_co_freq = _resolve_max_co_freq(es_lat, max_co_freq_by_lat or [])
+
+    N = len(constellation)
+    _prop_cache = build_constellation_cache(
+        constellation, raan_dot_override_rad_s=raan_dot_override_rad_s,
+    )
+    min_h = _min_operating_height_km_batch(constellation, N)
+
+    ring = _WindowRing(n_sw, N)
+    table = _close_table(n_sw, n_msl, n_tw)
+    out: dict[int, EPFDWindowStats] = {}
+
+    sim_start = max(0, own_start - (n_sw - 1))
+    per_sat: dict = {}
+    for g in range(sim_start, own_end):
+        t_s = g * t_fine
+        gso_ecef = gso_position_ecef(gso_lon, t_s)
+        pos_ecef_all, vel_ecef_all = propagate_and_to_ecef_batch(
+            constellation, t_s,
+            raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
+            raan_dot_override_rad_s=raan_dot_override_rad_s,
+            _cache=_prop_cache,
+            wdelta_deg=wdelta_deg,
+            t_run_s=t_run_s,
+        )
+        diff_all = pos_ecef_all - es_ecef
+        enu_all = (R_enu @ diff_all.T).T
+        ranges = np.linalg.norm(diff_all, axis=1)
+        sin_el = np.where(ranges > 1e-6, enu_all[:, 2] / ranges, -1.0)
+
+        visible_idx = np.where(sin_el >= 0.0)[0]
+        if strict_exclusion_zone and _epfd_gso_min_elevation_active(gso_min_elevation_deg):
+            if compute_elevation(es_ecef, gso_ecef, es_lat, es_lon) < float(gso_min_elevation_deg):
+                visible_idx = np.array([], dtype=np.int64)
+
+        per_sat.clear()
+        _accumulate_epfd_visible_satellites(
+            visible_idx=visible_idx,
+            pos_ecef_all=pos_ecef_all,
+            vel_ecef_all=vel_ecef_all,
+            es_ecef=es_ecef,
+            es_x=es_x, es_y=es_y, es_z=es_z,
+            es_lat_deg=es_lat, es_lon_deg=es_lon,
+            gso_ecef=gso_ecef,
+            alpha0_deg=alpha0_deg,
+            pfd_mask=pfd_mask,
+            es_antenna=es_antenna,
+            pfd_bw_correction_db=pfd_bw_correction_db,
+            max_co_freq=max_co_freq,
+            strict_max_co_freq_total=False,
+            subsat_lat_all=None,
+            subsat_lon_all=None,
+            sat_local_frames=None,
+            min_operating_height_km_all=min_h,
+            dual_ts=None,
+            t_s=t_s,
+            strict_exclusion_zone=strict_exclusion_zone,
+            min_angle_at_es_deg=0.0,
+            min_elevation_deg=min_elevation_deg,
+            sin_el_full=sin_el,
+            per_sat_out=per_sat,
+        )
+        ring.push(per_sat["idx"], per_sat["epfd_lin"], per_sat["std"], per_sat["orx"])
+
+        if g < own_start:
+            continue  # halo: primes the ring, owns no window close
+
+        for w in table[(g + 1) % n_sw]:
+            set_start = w * n_msl
+            rel = g + 1 - set_start
+            if rel < n_sw or rel > n_repeat * n_sw:
+                continue
+            win_start = g + 1 - n_sw
+            stats_end = set_start + n_steps_stats
+            if win_start >= stats_end:
+                continue  # whole window past this family's run duration
+
+            agg = _window_aggregate_dense(
+                ring.E, ring.S, ring.O, max_co_freq, row_order=ring.slices(),
+            )
+
+            n_keep = min(n_sw, stats_end - win_start)
+            if n_keep < n_sw:
+                agg = agg[:n_keep]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                epfd_db = np.where(agg > 0.0, 10.0 * np.log10(agg), -999.0)
+
+            ws = out.get(w)
+            if ws is None:
+                ws = EPFDWindowStats()
+                out[w] = ws
+            ws.add_batch(
+                epfd_db, duration_s=t_fine,
+                first_time_s=win_start * t_fine, time_step_s=t_fine,
+            )
+
+    return {"single_pass": True, "sets": out}
 
 
 def _simulate_window_block(args):
@@ -2572,6 +2873,52 @@ def _build_worst_envelope(
     return levels[::-1], env[nz][::-1]
 
 
+def _finalize_windowed_result(result, windows, win_by_index):
+    """Assemble the §D5.1.4.2 result from the per-family statistics.
+
+    Shared by both dispatches (single pass and legacy per-set), so the two
+    can only differ in how the statistics were gathered, never in how they
+    are turned into per-set CCDFs (Step 23) and the go/no-go envelope
+    (Step 24).
+    """
+    window_stats = [w for w in win_by_index if w is not None]
+    result.window_stats = window_stats
+    result.per_window_ccdf = [w.build_ccdf() for w in window_stats]
+
+    # Headline CCDF = worst-per-level envelope (correct go/no-go across sets).
+    totals = [w.total_duration_s for w in window_stats]
+    bins_desc, pct_desc = _build_worst_envelope(window_stats, totals)
+    result.cdf_epfd_dBW = bins_desc
+    result.cdf_percentage = pct_desc
+
+    # Headline accumulator (for the histogram artifact / peak metrics) = the set
+    # with the highest recorded peak epfd↓. Sets with no valid step keep the
+    # ``-inf`` peak init; argmax still returns a valid index (0 if all are -inf),
+    # and the copied min/max stay at their (-inf / +inf) defaults — the CLI
+    # STATISTICS block is gated on ``n_steps_valid > 0``, so nothing prints for a
+    # fully-null run.
+    if window_stats:
+        wi = int(np.argmax([w.epfd_max_db for w in window_stats]))
+        result.worst_window_index = wi
+        worst = window_stats[wi]
+        headline = EPFDStreamAccumulator()
+        headline.duration_per_bin = worst.duration_per_bin.copy()
+        headline.total_duration_s = worst.total_duration_s
+        headline.n_steps = worst.n_steps
+        headline.n_steps_valid = worst.n_steps_valid
+        headline.n_fine_steps = worst.n_steps  # all-fine by construction
+        headline.epfd_max_db = worst.epfd_max_db
+        headline.epfd_min_valid_db = worst.epfd_min_valid_db  # real min, not the peak
+        headline.peak_time_s = worst.peak_time_s
+        result.acc = headline
+
+    logger.info(
+        "Windowed simulation complete: %d/%d sets, envelope points=%d",
+        len(window_stats), windows.n_tw, bins_desc.size,
+    )
+    return result
+
+
 def run_epfd_simulation_windowed(
     constellation: list[OrbitalElements],
     wcg: WCGResult,
@@ -2593,15 +2940,35 @@ def run_epfd_simulation_windowed(
     gso_min_elevation_deg: float = -90.0,
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
+    single_pass: bool = True,
 ) -> EPFDSimulationResult:
     """EPFD↓ with the track-duration sliding-window variant (S.1503-4 §D5.1.4.2).
 
-    Runs one independent simulation per slide-window set (``N_TW`` of them) and
-    combines their CDFs into a worst-per-level envelope. Fine step only (the
-    variant is defined in fine time steps; the dual time step of §D4.7.1 does
-    not apply). Parallelism is over **blocks of whole windows**, which are
-    self-contained — so the standalone loop, the built-in Pool and the injected
-    cluster executor all produce identical statistics (no cross-task state).
+    Combines the ``N_TW`` slide-window sets' CDFs into a worst-per-level
+    envelope. Fine step only: the window accounting of §D5.1.3 is defined
+    entirely in fine time steps, and §D5.1.4.2 Step 5's "otherwise Ncoarse = 1
+    all the time" branch is the one taken here. (Note the Recommendation does
+    provide for the dual time step inside this variant — Steps 5/6 are
+    word-for-word those of §D5.1.4.1 and Step 22 carries a rule for a coarse
+    step straddling a window close — so this is a project choice, not a gap in
+    the text.)
+
+    ``single_pass`` selects the dispatch:
+
+    * ``True`` (default, **conformant**) — one global pass over
+      ``[0, N_TotalSteps)``. §D5.1.3 defines ``N_TotalSteps = N_repeat·N_SW +
+      (N_TW − 1)·N_MSL`` as *"the run duration plus the time required to
+      complete all the time windows"*: a single timeline. Every fine step is
+      propagated once and feeds each family whose window contains it, because
+      all windows open at step ``g`` began less than ``N_SW`` steps earlier.
+      Parallel work is a contiguous step range plus an ``N_SW − 1`` halo that
+      primes the ring buffer.
+    * ``False`` (legacy) — one independent simulation per set, which
+      re-propagates the same global grid ``N_TW`` times. Kept for A/B
+      verification; on a real filing it costs ~10³ times the conformant path.
+
+    Both paths must produce identical statistics; that equivalence is the
+    subject of ``test_single_pass_matches_legacy``.
 
     **Selection scope (§D5.1.4.2 Step 20).** Per-window selection is: full-window
     α₀/ε₀ eligibility (Step 19) → rank eligible by window-peak epfd↓ (Step 19bis)
@@ -2649,10 +3016,70 @@ def run_epfd_simulation_windowed(
     if n_jobs < 1:
         n_jobs = multiprocessing.cpu_count()
 
-    # Parallel unit = a block of whole windows within a set. Windows are
-    # independent, so blocks fan out with no halo/shared state — and this yields
-    # parallelism even for a single window set (N_TW == 1, the common case for a
-    # small MIN_DURATION). Size the blocks so the fleet stays busy.
+    if single_pass:
+        # Conformant dispatch: one global pass over [0, N_TotalSteps). Parallel
+        # unit = a contiguous step range; each task re-propagates an N_SW − 1
+        # halo to prime its ring buffer, so chunks must stay well above N_SW.
+        n_total = int(windows.n_total_steps)
+        n_sw = int(windows.n_sw)
+        chunks = _singlepass_chunks(n_total, n_sw, n_jobs)
+        halo_overhead = sum(min(a, n_sw - 1) for a, _ in chunks)
+        ring_mb = n_sw * len(constellation) * 10 / 1e6
+        logger.info(
+            "Starting EPFD↓ windowed simulation (§D5.1.4.2, single pass): "
+            "N_TW=%d, N_SW=%d, N_MSL=%d, N_Repeat=%d, N_TotalSteps=%d, "
+            "%d sats, T_fine=%.4fs, %d chunk(s) over %d jobs, "
+            "halo overhead %d steps (%.1f%%), ring ≈%.1f MB/worker.",
+            windows.n_tw, n_sw, windows.n_msl, windows.n_repeat, n_total,
+            len(constellation), windows.t_fine_s, len(chunks), n_jobs,
+            halo_overhead, 100.0 * halo_overhead / max(1, n_total), ring_mb,
+        )
+        if ring_mb > 2000.0:
+            logger.warning(
+                "  Ring buffer ≈%.0f MB per worker (N_SW=%d × %d sats). "
+                "Reduce n_jobs or fall back to single_pass=False.",
+                ring_mb, n_sw, len(constellation),
+            )
+
+        tasks = [(
+            a, b, windows, constellation, wcg, pfd_mask, es_antenna,
+            alpha0_deg, min_elevation_deg, pfd_bw_correction_db,
+            raan_dot_artificial_rad_s, raan_dot_override_rad_s,
+            max_co_freq_by_lat or [], strict_exclusion_zone,
+            wdelta_deg, t_run_s, gso_min_elevation_deg,
+        ) for a, b in chunks]
+
+        win_by_index_sp: list = [None] * windows.n_tw
+
+        def _consume_sp(res):
+            for w, ws in res["sets"].items():
+                if win_by_index_sp[w] is None:
+                    win_by_index_sp[w] = ws
+                else:
+                    win_by_index_sp[w].merge(ws)
+
+        if n_jobs == 1 or len(tasks) == 1:
+            for task in tasks:
+                _consume_sp(_simulate_singlepass_chunk(task))
+        elif _EPFD_EXECUTOR is not None:
+            logger.info("  Single-pass dispatch via injected executor (%d chunks)", len(tasks))
+            for res in _EPFD_EXECUTOR(_simulate_singlepass_chunk, tasks, _epfd_executor_init()):
+                _consume_sp(res)
+        else:
+            numba_thr = _compute_epfd_numba_threads(n_jobs)
+            with multiprocessing.Pool(
+                processes=min(n_jobs, len(tasks)),
+                initializer=_epfd_pool_initializer,
+                initargs=(_epfd_global_snapshot(numba_thr),),
+            ) as pool:
+                for res in pool.imap(_simulate_singlepass_chunk, tasks):
+                    _consume_sp(res)
+
+        return _finalize_windowed_result(result, windows, win_by_index_sp)
+
+    # Legacy dispatch (A/B reference): parallel unit = a block of whole windows
+    # within a set. Windows are independent, so blocks fan out with no halo and
+    # no shared state — but each set re-propagates the whole global grid.
     total_windows = windows.n_tw * windows.n_repeat
     if n_jobs <= 1:
         win_per_block = windows.n_repeat  # one block per set (sequential)
@@ -2687,13 +3114,12 @@ def run_epfd_simulation_windowed(
         len(constellation), windows.t_fine_s, float(total_prop), windows.n_tw,
         len(tasks), win_per_block, n_jobs,
     )
-    if total_prop >= 5e8:
-        logger.warning(
-            "  Track-duration variant is heavy: ≈%.3g step-propagations "
-            "(no dual-step acceleration — this variant is defined in fine "
-            "steps). Prefer the cluster or a coarser MIN_DURATION/T_fine ratio.",
-            float(total_prop),
-        )
+    logger.warning(
+        "  Legacy per-set dispatch: ≈%.3g step-propagations, ~%dx the %d steps "
+        "§D5.1.3 asks to simulate (N_TotalSteps). Kept for A/B verification "
+        "only — use single_pass=True for production runs.",
+        float(total_prop), windows.n_tw, int(windows.n_total_steps),
+    )
 
     win_by_index: list = [None] * windows.n_tw
 
@@ -2723,42 +3149,7 @@ def run_epfd_simulation_windowed(
             for res in pool.imap(_simulate_window_block, tasks):
                 _consume(res)
 
-    window_stats = [w for w in win_by_index if w is not None]
-    result.window_stats = window_stats
-    result.per_window_ccdf = [w.build_ccdf() for w in window_stats]
-
-    # Headline CCDF = worst-per-level envelope (correct go/no-go across sets).
-    totals = [w.total_duration_s for w in window_stats]
-    bins_desc, pct_desc = _build_worst_envelope(window_stats, totals)
-    result.cdf_epfd_dBW = bins_desc
-    result.cdf_percentage = pct_desc
-
-    # Headline accumulator (for the histogram artifact / peak metrics) = the set
-    # with the highest recorded peak epfd↓. Sets with no valid step keep the
-    # ``-inf`` peak init; argmax still returns a valid index (0 if all are -inf),
-    # and the copied min/max stay at their (-inf / +inf) defaults — the CLI
-    # STATISTICS block is gated on ``n_steps_valid > 0``, so nothing prints for a
-    # fully-null run.
-    if window_stats:
-        wi = int(np.argmax([w.epfd_max_db for w in window_stats]))
-        result.worst_window_index = wi
-        worst = window_stats[wi]
-        headline = EPFDStreamAccumulator()
-        headline.duration_per_bin = worst.duration_per_bin.copy()
-        headline.total_duration_s = worst.total_duration_s
-        headline.n_steps = worst.n_steps
-        headline.n_steps_valid = worst.n_steps_valid
-        headline.n_fine_steps = worst.n_steps  # all-fine by construction
-        headline.epfd_max_db = worst.epfd_max_db
-        headline.epfd_min_valid_db = worst.epfd_min_valid_db  # real min, not the peak
-        headline.peak_time_s = worst.peak_time_s
-        result.acc = headline
-
-    logger.info(
-        "Windowed simulation complete: %d/%d sets, envelope points=%d",
-        len(window_stats), windows.n_tw, bins_desc.size,
-    )
-    return result
+    return _finalize_windowed_result(result, windows, win_by_index)
 
 
 def run_epfd_simulation_multi_es(

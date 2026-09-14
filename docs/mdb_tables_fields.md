@@ -84,7 +84,20 @@ Function: `read_sat_oper` (S.1503-4 Annex D, Step 19).
 | `lat_fr` | float | Band start latitude (°), default −90 |
 | `lat_to` | float | Band end latitude (°), default +90 |
 | `nbr_op_sat` | int | Max simultaneous co-frequency satellites |
-| `min_dur` / `min_duration` | float | MIN_DURATION; if ≠ 0 → `NotImplementedError` (§D.5.1.4.2 not implemented) |
+
+> **MIN_DURATION is not in `sat_oper`.** The Recommendation's Part C defines this
+> table as `ntc_id`, `lat_fr`, `lat_to`, `nbr_op_sat` only (`nbr_op_sat`
+> validation: `> 0`), and the BR confirmed it in writing on 2026-08-11: *"MIN_DURATION
+> is not in sat_oper — and never was."* The carrier is the operating-parameters
+> mask XML (`f_mask='R'` in `mask_info`, linked through `mask_lnk3`), per §B3.1
+> and the Attachment to Part B (*"values should be taken from that XML file
+> rather than the relevant SRS table"*). The `min_dur` column the reader still
+> probes does not exist in the SNS schema; it is retained only as a
+> forward-compatible lookup and always resolves to 0.
+>
+> The §D5.1.4.2 track-duration variant **is** implemented
+> (`run_epfd_simulation_windowed`); the earlier note here claiming it raises
+> `NotImplementedError` was stale.
 
 ### 1.5 `mask_info` — mask metadata
 
