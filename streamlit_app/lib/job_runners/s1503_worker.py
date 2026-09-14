@@ -582,6 +582,8 @@ def _run(params: dict[str, Any]) -> dict[str, Any]:
         sim_data["track_duration_override"] = dict(sim["_track_duration_override"])
     if sim.get("_track_duration_degenerate"):
         sim_data["track_duration_degenerate"] = list(sim["_track_duration_degenerate"])
+    if sim.get("_frequency_request_ignored"):
+        sim_data["frequency_request_ignored"] = dict(sim["_frequency_request_ignored"])
     if sim.get("_num_time_steps_user_override"):
         sim_data["num_time_steps_user_override"] = int(
             sim["_num_time_steps_user_override"])

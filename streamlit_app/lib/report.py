@@ -200,6 +200,17 @@ def summary_html(sim_data: dict[str, Any], *, ccdf_png: bytes | None = None) -> 
                 "track information and the classic §D5.1.4.1 algorithm ran "
                 "instead."
             )
+    fri = sim_data.get("frequency_request_ignored") or {}
+    if fri:
+        notes.append(
+            f"The examination was requested at {float(fri.get('requested_ghz', 0)):.6f} GHz "
+            f"but ran at {float(fri.get('used_ghz', 0)):.6f} GHz: the resolved PFD "
+            f"mask (id {fri.get('mask_id')}) covers "
+            f"{float((fri.get('band_ghz') or [0, 0])[0]):.3f}-"
+            f"{float((fri.get('band_ghz') or [0, 0])[1]):.3f} GHz, which does not "
+            "contain the requested frequency. The Article 22 table and the "
+            "reference earth-station antenna follow the frequency actually used."
+        )
     if sim_data.get("num_time_steps_user_override"):
         notes.append(
             f"Run length overridden to "

@@ -521,6 +521,17 @@ def _render_track_duration(data: dict[str, Any]) -> None:
                 "track information. The classic §D5.1.4.1 algorithm ran instead."
             )
         st.info(msg, icon=":material/info:")
+    fri = data.get("frequency_request_ignored") or {}
+    if fri:
+        _b = fri.get("band_ghz") or [0.0, 0.0]
+        st.error(
+            f"Requested **{float(fri.get('requested_ghz', 0)):.6f} GHz**, examined "
+            f"**{float(fri.get('used_ghz', 0)):.6f} GHz**. The resolved PFD mask "
+            f"(id {fri.get('mask_id')}) covers {float(_b[0]):.3f}–{float(_b[1]):.3f} "
+            "GHz and does not contain the requested frequency, so the Article 22 "
+            "table and the reference antenna are those of the band actually run.",
+            icon=":material/error:",
+        )
     nso = data.get("num_time_steps_user_override")
     if nso:
         st.info(

@@ -251,10 +251,84 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
                     mdb_path, ntc_id=system.ntc_id, f_mask_filter="P") or {}
         except Exception:  # noqa: BLE001
             _amap = {}
-        if _amap.get(-1):
-            mask_id = int(_amap[-1][0])
-        elif _amap:
-            mask_id = int(_amap[sorted(_amap)[0]][0])
+        # Candidates in mask_lnk1 precedence order: the wildcard orbit first,
+        # then the lowest orbit id.
+        _cands: list[int] = []
+        for _k in ([-1] if _amap.get(-1) else []) + [k for k in sorted(_amap) if k != -1]:
+            for _m in _amap.get(_k, []):
+                if int(_m) not in _cands:
+                    _cands.append(int(_m))
+
+        # The requested frequency decides. A mask_lnk1 wildcard row points at
+        # ONE mask for every orbit, so on a filing that declares several PFD
+        # masks (one per band) the precedence-first pick can land on a band the
+        # user did not ask for. Examining the wrong band silently is the worst
+        # possible outcome: the run then also picks the Article 22 table and the
+        # reference antenna of that other band.
+        if _cands and simulation_frequency_ghz is not None:
+            _f = float(simulation_frequency_ghz)
+            _by_id = {int(m.mask_id): m for m in pfd_masks}
+
+            def _band_of(m) -> "tuple[float, float] | None":
+                lo = getattr(m, "freq_min_ghz", None)
+                hi = getattr(m, "freq_max_ghz", None)
+                if lo is None or hi is None:
+                    return None            # band unknown: cannot claim coverage
+                return (float(lo), float(hi))
+
+            def _covers(mid: int) -> bool:
+                b = _band_of(_by_id.get(int(mid)))
+                return b is not None and b[0] - 1e-9 <= _f <= b[1] + 1e-9
+
+            _cov = [m for m in _cands if _covers(m)]
+            if _cov:
+                if _cov[0] != _cands[0]:
+                    logger.warning(
+                        "PFD mask %d has mask_lnk1 precedence but covers "
+                        "%.3f-%.3f GHz, which does not contain the requested "
+                        "%.6f GHz; using mask %d instead.",
+                        _cands[0],
+                        float(_by_id[_cands[0]].freq_min_ghz) if _cands[0] in _by_id else 0.0,
+                        float(_by_id[_cands[0]].freq_max_ghz) if _cands[0] in _by_id else 0.0,
+                        _f, _cov[0],
+                    )
+                _cands = _cov
+            else:
+                _any = [int(m.mask_id) for m in pfd_masks
+                        if (lambda b: b is not None and b[0] - 1e-9 <= _f <= b[1] + 1e-9)(_band_of(m))]
+                if _any:
+                    _b = _band_of(_by_id[_any[0]]) or (0.0, 0.0)
+                    logger.warning(
+                        "No mask_lnk1-linked PFD mask covers the requested "
+                        "%.6f GHz; using declared mask %d (%.3f-%.3f GHz), which "
+                        "does. mask_lnk1 is keyed by scenario, not by frequency, "
+                        "so the link table cannot discriminate bands here.",
+                        _f, _any[0], _b[0], _b[1],
+                    )
+                    _cands = _any
+                elif all(_band_of(m) is None for m in pfd_masks):
+                    logger.warning(
+                        "No PFD mask declares a frequency range, so the "
+                        "requested %.6f GHz cannot be matched; keeping the "
+                        "mask_lnk1 precedence pick (mask %d).", _f, _cands[0],
+                    )
+                else:
+                    raise ValueError(
+                        f"no PFD mask of notice {system.ntc_id} covers the "
+                        f"requested {_f:.6f} GHz. Declared PFD masks: "
+                        + ", ".join(
+                            f"{int(m.mask_id)} ("
+                            + (f"{_band_of(m)[0]:.3f}-{_band_of(m)[1]:.3f} GHz)"
+                               if _band_of(m) else "band not declared)")
+                            for m in pfd_masks)
+                        + ". Pick a frequency inside one of them, or pass the "
+                          "mask_id explicitly. Running the examination on "
+                          "another band would silently change the Article 22 "
+                          "table and the reference earth-station antenna."
+                    )
+
+        if _cands:
+            mask_id = int(_cands[0])
         elif pfd_masks:
             # No mask_lnk1 assignment: prefer a PFD mask whose own band
             # contains the requested frequency, else first declared.
@@ -325,6 +399,32 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         freq_ghz = float(effective_freq_min_ghz) + half_bw_ghz
         # Ensure the frequency stays within the mask range.
         freq_ghz = min(max(freq_ghz, float(effective_freq_min_ghz)), float(effective_freq_max_ghz))
+        # §D2 FrequencyRun is what the examination was asked to run at. The band
+        # edge + RefBW/2 above is only the default for "no frequency requested":
+        # overwriting an explicit request with it moved the whole examination —
+        # §B3.3 set resolution, Table 8 εGSO defaults, the antenna wavelength and
+        # the Article 22 table — to a frequency nobody asked for.
+        if simulation_frequency_ghz is not None:
+            _f_req = float(simulation_frequency_ghz)
+            if (float(effective_freq_min_ghz) - 1e-9 <= _f_req
+                    <= float(effective_freq_max_ghz) + 1e-9):
+                freq_ghz = _f_req
+            else:
+                logger.error(
+                    "Requested %.6f GHz is outside the resolved band "
+                    "%.3f-%.3f GHz (mask_id=%s); the examination will run at "
+                    "%.6f GHz instead. Pass a mask_id that covers the requested "
+                    "frequency.",
+                    _f_req, float(effective_freq_min_ghz),
+                    float(effective_freq_max_ghz), mask_id, freq_ghz,
+                )
+                constellation_cfg["_frequency_request_ignored"] = {
+                    "requested_ghz": _f_req,
+                    "used_ghz": float(freq_ghz),
+                    "mask_id": (int(mask_id) if mask_id is not None else None),
+                    "band_ghz": [float(effective_freq_min_ghz),
+                                 float(effective_freq_max_ghz)],
+                }
 
     constellation_cfg["frequency_ghz"] = freq_ghz
     if selected_group is not None and selected_group.elev_min_deg is not None:
@@ -543,6 +643,10 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
             "_min_elev_table": constellation_cfg.get("_min_elev_table"),
             "_operating_params": constellation_cfg.get("_operating_params"),
             "_operating_params_error": constellation_cfg.get("_operating_params_error"),
+            # Set only when the requested §D2 FrequencyRun could not be honoured
+            # (no resolved mask covers it). Carried so the run artifact and the
+            # report state which frequency was actually examined.
+            "_frequency_request_ignored": constellation_cfg.get("_frequency_request_ignored"),
             "frequency_ghz": freq_ghz,
             "gso_min_elevation_deg": gso_min_elev_default_deg,
             "apply_gso_min_elevation": True,
@@ -666,6 +770,17 @@ def load_from_srs(mdb_path: str, xml_path: str | None = None,
         )
 
     apply_article22_limits_to_config(config)
+
+    # Article 22 clamps FrequencyRun into the band of the table it selected, so
+    # the frequency actually examined is only final here. Keep the provenance
+    # record pointing at the value the run really used.
+    _ign = config["non_gso"].get("_frequency_request_ignored")
+    if _ign:
+        _ign["used_ghz"] = float(config["non_gso"].get("frequency_ghz", _ign["used_ghz"]))
+        logger.error(
+            "  Examination will run at %.6f GHz, not the requested %.6f GHz.",
+            _ign["used_ghz"], _ign["requested_ghz"],
+        )
 
     return config
 
@@ -2937,6 +3052,10 @@ def run_wcg_downlink(config: dict) -> tuple[
             f"  Station keeping (Wdelta ±{wdelta_deg_requested:.2f}° in the SRS) not applied "
             f"(apply_station_keeping_wdelta=False)."
         )
+    _freq_ignored = ngso_cfg.get("_frequency_request_ignored")
+    if _freq_ignored:
+        sim_meta["_frequency_request_ignored"] = dict(_freq_ignored)
+
     sim_meta["_wdelta_deg"] = wdelta_deg
     sim_meta["_wdelta_deg_requested"] = wdelta_deg_requested
 
@@ -3400,12 +3519,20 @@ def run_wcg_downlink(config: dict) -> tuple[
     )
 
     logger.info("")
-    logger.info("  Margins per limit:")
-    for limit, pct, margin in compliance.margins_dB:
-        status = "OK" if margin >= 0 else "FAIL"
+    # The verdict of a row is the §D7.1.3 Step 4-5 probability test, NOT the sign
+    # of the dB margin: at P_i = 0 (hard cap) and P_i = 100 (vacuous) the two
+    # disagree, and printing the margin's sign as the status contradicted the
+    # Table 17 the same run writes. Margin stays, as information.
+    logger.info("  Per limit (verdict = §D7.1.3 Step 4-5 on the probability):")
+    _rows17 = list(getattr(compliance, "table17", []) or [])
+    for i, (limit, pct, margin) in enumerate(compliance.margins_dB):
+        _row = _rows17[i] if i < len(_rows17) else None
+        status = ("OK" if _row["pass"] else "FAIL") if _row else (
+            "OK" if margin >= 0 else "FAIL")
+        _py = f", Py = {_row['Py_pct']:.4g}%" if _row else ""
         logger.info(
             f"    [{status:4s}] {limit:.1f} dBW @ {_format_percentage_value(pct)} "
-            f"→ margin = {margin:+.2f} dB"
+            f"→ margin = {margin:+.2f} dB{_py}"
         )
 
     # ================================================================
