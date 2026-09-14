@@ -3189,15 +3189,19 @@ def run_wcg_downlink(config: dict) -> tuple[
     if _td_degenerate:
         sim_meta["_track_duration_degenerate"] = _td_degenerate
 
-    # §D5.1.4.2 Step 20: which reading of the gain ("OR") branch to apply. The
-    # printed text does not say whether a window-eligible satellite dropped by
-    # MAX_CO_FREQ may re-enter through it; default keeps the cap binding.
-    _or_rescues_capped = bool(ngso_cfg.get("step20_or_rescues_capped", False))
-    if _or_rescues_capped and (windows_main is not None or windows_static is not None):
-        logger.info(
-            "  §D5.1.4.2 Step 20: gain-branch reading set to 'not in the "
-            "tracked set' — satellites capped by MAX_CO_FREQ re-enter through "
-            "the OR branch (more conservative than the default reading)."
+    # §D5.1.4.2 Step 20 + Note (printed p. 100): the gain branch is unqualified
+    # and the Note removes from it only the satellites already on the
+    # MAX_CO_FREQ list. So the conformant gate is "not in the tracked set", and
+    # a window-eligible satellite dropped by the cap still contributes through
+    # the gain branch. The opposite reading is a study switch.
+    _or_rescues_capped = bool(ngso_cfg.get("step20_or_rescues_capped", True))
+    if not _or_rescues_capped and (windows_main is not None or windows_static is not None):
+        logger.warning(
+            "  §D5.1.4.2 Step 20 gain branch restricted to satellites that are "
+            "not window-eligible (step20_or_rescues_capped=False). The printed "
+            "Note removes from the gain branch only the satellites already on "
+            "the MAX_CO_FREQ list, so this reading is NOT the Recommendation's "
+            "and it lowers epfd↓."
         )
     sim_meta["_step20_or_rescues_capped"] = _or_rescues_capped
     if windows_static is not None and windows_main is None:

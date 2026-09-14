@@ -72,6 +72,11 @@ from .epfd_stream_accumulator import EPFDStreamAccumulator, EPFDWindowStats
 
 logger = logging.getLogger(__name__)
 
+# Tolerance of the AP4 minimum-operating-height gate, in km (1 m). A circular
+# filing declares H_min equal to its own altitude, so the gate lands on the
+# equality case and must not turn on float noise.
+_H_MIN_TOL_KM = 1e-3
+
 
 def _epfd_gso_min_elevation_active(gso_min_elevation_deg: float) -> bool:
     """True if the S.1503 check ``elGSO >= εGSO`` (Table 8) is active.
@@ -245,8 +250,12 @@ def _select_standard_epfd_s1503_steps_20_21(
     min_angle_at_es_deg: float,
     es_ecef: np.ndarray,
     pos_ecef_all: np.ndarray,
-) -> list[float]:
+) -> list[tuple[float, int]]:
     """S.1503-4 §D.5.1.4.1 Steps 19–21 among *standard* contributors (|α| ≥ α₀).
+
+    Returns the selected ``(epfd_linear, satellite index)`` pairs. The indices
+    are what the Step-20 Note needs: a satellite already on this list must not
+    be counted a second time through the gain branch.
 
     Step 20: pick the standard satellite with the highest ``epfd↓``; Step 23 (sum)
     is applied by the caller over the returned list. Step 21: remove
@@ -266,13 +275,12 @@ def _select_standard_epfd_s1503_steps_20_21(
         return []
     if min_angle_at_es_deg <= 0.0:
         if max_co_freq <= 0:
-            return [float(epfd) for epfd, _k in items]
+            return [(float(epfd), int(k)) for epfd, k in items]
         pool = [(float(epfd), int(k)) for epfd, k in items]
-        out: list[float] = []
+        out: list[tuple[float, int]] = []
         while len(out) < max_co_freq and pool:
             j = max(range(len(pool)), key=lambda i: pool[i][0])
-            epfd, _k = pool.pop(j)
-            out.append(float(epfd))
+            out.append(pool.pop(j))
         return out
     pool: list[tuple[float, int]] = [(float(epfd), int(k)) for epfd, k in items]
     selected: list[tuple[float, int]] = []
@@ -288,7 +296,23 @@ def _select_standard_epfd_s1503_steps_20_21(
             if sep + 1e-12 >= min_ang:
                 new_pool.append((epfd, k))
         pool = new_pool
-    return [float(e) for e, _k in selected]
+    return selected
+
+
+def _or_from_capped(
+    std_or_items: list[tuple[float, int]] | None,
+    chosen_idx: set[int],
+) -> list[float]:
+    """Step-22 contributions of α₀/ε₀ satellites that Step 20 did not keep.
+
+    ``std_or_items`` are the ``(epfd_linear, index)`` pairs of satellites that
+    passed the α₀/ε₀ test AND satisfy the gain condition. Those the cap kept are
+    dropped here, because the Note counts them once, as part of the
+    MAX_CO_FREQ list.
+    """
+    if not std_or_items:
+        return []
+    return [float(v) for v, k in std_or_items if int(k) not in chosen_idx]
 
 
 def _finalize_epfd_after_max_co_freq(
@@ -304,6 +328,7 @@ def _finalize_epfd_after_max_co_freq(
     max_co_freq_by_system: dict[int, int] | None = None,
     override_items: list[tuple[float, int]] | None = None,
     per_system_out: dict[int, list] | None = None,
+    std_or_items: list[tuple[float, int]] | None = None,
 ) -> tuple[list[float], list[float]]:
     """Steps 19–22 §D5.1.4.1: standard selection (20–21), then OR branch (22).
 
@@ -356,11 +381,14 @@ def _finalize_epfd_after_max_co_freq(
             sid = int(system_id_all[k])
             by_sys.setdefault(sid, []).append((float(epfd), int(k)))
         standard_epfd = []
+        chosen_idx: set[int] = set()
         for sid, group in by_sys.items():
             n_sys = int(max_co_freq_by_system.get(sid, max_co_freq))
-            selected = _select_standard_epfd_s1503_steps_20_21(
+            sel_pairs = _select_standard_epfd_s1503_steps_20_21(
                 group, n_sys, min_angle_at_es_deg, es_ecef, pos_ecef_all,
             )
+            selected = [v for v, _k in sel_pairs]
+            chosen_idx.update(int(k) for _v, k in sel_pairs)
             standard_epfd.extend(selected)
             if per_system_out is not None:
                 # The group IS one system, so every selected value belongs to
@@ -369,16 +397,24 @@ def _finalize_epfd_after_max_co_freq(
                 slot[0] += float(sum(selected))
                 slot[1] += len(selected)
         # OR (Step 22) is kept intact (normative). strict_total ignored.
-        return standard_epfd, list(override_epfd)
+        ov = list(override_epfd) + _or_from_capped(std_or_items, chosen_idx)
+        return standard_epfd, ov
 
-    standard_epfd = _select_standard_epfd_s1503_steps_20_21(
+    sel_pairs = _select_standard_epfd_s1503_steps_20_21(
         standard_items,
         max_co_freq,
         min_angle_at_es_deg,
         es_ecef,
         pos_ecef_all,
     )
-    ov = list(override_epfd)
+    standard_epfd = [v for v, _k in sel_pairs]
+    # Step 22 + Note (printed p. 99 / p. 100): the gain branch takes every
+    # satellite meeting GRX(φ) > min[Gmax − 30 dB, GRX(α₀)], and the Note
+    # removes from it only those already on the MAX_CO_FREQ list. A satellite
+    # that met α₀/ε₀ but lost the Step-20 ranking is NOT on that list, so it
+    # contributes here.
+    ov = list(override_epfd) + _or_from_capped(
+        std_or_items, {int(k) for _v, k in sel_pairs})
     if max_co_freq <= 0:
         return standard_epfd, ov
     if strict_max_co_freq_total:
@@ -480,7 +516,15 @@ def _accumulate_epfd_visible_satellites(
         h_min_vis = np.asarray(min_operating_height_km_all[visible_idx], dtype=np.float64)
         if np.any(h_min_vis > 0.0):
             alt_vis = np.linalg.norm(pos_ecef_all[visible_idx], axis=1) - RE_KM
-            visible_idx = visible_idx[alt_vis >= (h_min_vis - 1e-9)]
+            # The AP4 minimum operating height is a declared altitude, and a
+            # circular filing declares H_min EQUAL to its own altitude. The
+            # comparison then lands on the equality case, where the difference
+            # is pure float noise from the propagator and the Earth radius
+            # constant: with a 1e-9 km (1 µm) tolerance the whole constellation
+            # can drop out and the run reports a clean PASS over an empty CCDF.
+            # One metre is below any physical meaning of a declared height and
+            # far above that noise.
+            visible_idx = visible_idx[alt_vis >= (h_min_vis - _H_MIN_TOL_KM)]
             if visible_idx.size == 0:
                 return [], [], 180.0, False
 
@@ -551,11 +595,12 @@ def _accumulate_epfd_visible_satellites(
         # is evaluated at the **same** planar θ as the point (BO.1443 / 2D).
         # Collect mode (§D5.1.4.2) needs the OR flag for standard sats too.
         if not strict_exclusion_zone:
-            cand = (
-                np.arange(n_vis, dtype=np.int64)
-                if per_sat_out is not None
-                else np.nonzero(~is_standard_arr)[0]
-            )
+            # Evaluate the gain condition for EVERY visible satellite, not only
+            # the non-standard ones: printed Step 22 / Step 20 apply it without
+            # qualification, and the Note then removes only those already on the
+            # MAX_CO_FREQ list. A satellite that met α₀/ε₀ but lost the Step-20
+            # ranking is not on that list and must be able to enter here.
+            cand = np.arange(n_vis, dtype=np.int64)
             if cand.size > 0:
                 theta_cand = None if theta_arr is None else theta_arr[cand]
                 g_rel_at_a0 = _relative_gain_batch(
@@ -641,6 +686,19 @@ def _accumulate_epfd_visible_satellites(
             if std_mask[j]
         ]
         override_epfd = epfd_lin[~std_mask].tolist()
+        # α₀/ε₀ satellites that ALSO satisfy the gain condition. Those the cap
+        # keeps are counted once, inside the MAX_CO_FREQ list; the rest belong
+        # to Step 22 (printed Note, p. 99).
+        _or_mask = override[elig_j]
+        _std_or = std_mask & _or_mask
+        std_or_items = (
+            [
+                (float(epfd_lin[j]), int(idx_k[j]))
+                for j in range(elig_j.size)
+                if _std_or[j]
+            ]
+            if bool(_std_or.any()) else None
+        )
         # Same values as `override_epfd`, paired with their satellite index —
         # built only when the per-system split is requested (method_3).
         override_items = (
@@ -664,6 +722,7 @@ def _accumulate_epfd_visible_satellites(
             max_co_freq_by_system=max_co_freq_by_system,
             override_items=override_items,
             per_system_out=per_system_out,
+            std_or_items=std_or_items,
         )
 
         return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -675,6 +734,8 @@ def _accumulate_epfd_visible_satellites(
     # Step 22 (OR) values with their satellite index — only collected when the
     # per-system split is requested (method_3); mirrors `override_epfd`.
     _override_items_scalar: list[tuple[float, int]] = []
+    # α₀/ε₀ satellites that also satisfy the gain condition (Step 22 + Note).
+    _std_or_items_scalar: list[tuple[float, int]] = []
     _ps_idx: list[int] = []
     _ps_epfd: list[float] = []
     _ps_std: list[bool] = []
@@ -714,10 +775,16 @@ def _accumulate_epfd_visible_satellites(
             )
             is_override = (not is_standard) and is_or_flag
         else:
-            is_or_flag = is_override = (not is_standard) and s1503_or_condition_include(
+            # Same reading as the vectorised branch: the gain condition is
+            # evaluated for EVERY satellite (printed Step 22 has no qualifier);
+            # ``is_override`` stays the non-standard part, and the standard
+            # satellites that also satisfy it are carried separately so the
+            # Note can drop the ones the cap keeps.
+            is_or_flag = s1503_or_condition_include(
                 es_antenna, offaxis, _alpha0_k, theta_planar,
                 disable_or_condition=strict_exclusion_zone,
             )
+            is_override = (not is_standard) and is_or_flag
         if not is_standard and not is_override:
             continue
 
@@ -755,6 +822,8 @@ def _accumulate_epfd_visible_satellites(
             continue
         if is_standard:
             standard_items.append((epfd_i, int(k)))
+            if is_or_flag:
+                _std_or_items_scalar.append((float(epfd_i), int(k)))
         else:
             override_epfd.append(epfd_i)
             if per_system_out is not None:
@@ -779,6 +848,7 @@ def _accumulate_epfd_visible_satellites(
         max_co_freq_by_system=max_co_freq_by_system,
         override_items=(_override_items_scalar if per_system_out is not None else None),
         per_system_out=per_system_out,
+        std_or_items=(_std_or_items_scalar or None),
     )
 
     return standard_epfd, override_epfd, min_alpha, any_critical_gain
@@ -2370,7 +2440,7 @@ def _process_closed_window(
     stats_end_step: int,
     t_fine_s: float,
     win_stats: EPFDWindowStats,
-    or_rescues_capped: bool = False,
+    or_rescues_capped: bool = True,
 ) -> None:
     """Aggregate one closed sliding window into ``win_stats`` (§D5.1.4.2 Steps 19–22).
 
@@ -2432,9 +2502,11 @@ def _process_closed_window(
     # standard path). A window-eligible satellite dropped by the MAX_CO_FREQ cap
     # is genuinely dropped — it must not re-enter through the OR branch, else it
     # would defeat the cap. Selected sats count once (no double counting).
-    # ``or_rescues_capped`` switches to the other defensible reading of the
-    # printed Step 20 (the gain branch qualified only by "not in the tracked
-    # set"), which re-admits the capped satellites and is more conservative.
+    # Printed Step 20 + Note (p. 100): the gain branch carries no qualifier and
+    # the Note removes from it only satellites already on the MAX_CO_FREQ list,
+    # so the block set is the TRACKED set. ``or_rescues_capped=False`` selects
+    # the other reading (block every window-eligible satellite), which the text
+    # does not support and which lowers epfd; study switch only.
     or_blocked = selected if or_rescues_capped else eligible
     for g, idx, epfd_lin, _std, orx in buffer:
         if g >= stats_end_step:
@@ -2463,7 +2535,7 @@ def _window_aggregate_dense(
     active: np.ndarray | None = None,
     eligible: np.ndarray | None = None,
     stats_out: dict | None = None,
-    or_rescues_capped: bool = False,
+    or_rescues_capped: bool = True,
 ) -> np.ndarray:
     """Vectorized §D5.1.4.2 Steps 19, 19bis, 20 and 21 for one closed window.
 
@@ -2525,10 +2597,17 @@ def _window_aggregate_dense(
         n = E.shape[0] if row_order is None else sum(b - a for a, b in row_order)
         return np.zeros(n, dtype=E.dtype)
     sel_c = sel_mask[cols]
-    # Step 20 reading (see ``or_rescues_capped`` on the public entry point):
-    # with the default, the gain branch admits only satellites that are NOT
-    # window-eligible; with the flag on, it also re-admits eligible satellites
-    # that Step 19bis dropped under the MAX_CO_FREQ cap.
+    # Step 20 + Note, printed p. 100. The gain branch is written WITHOUT any
+    # qualification — "plus those satellites for which GRX(φ) > min[Gmax − 30 dB,
+    # GRX(α₀[Latitude])]" — and the Note removes from it only the satellites
+    # that are already counted: "if a satellite is on the list of the highest
+    # MAX_CO_FREQ[lat] satellites and also for which GRX(φ) > min[…] it should
+    # be included only once as part of the MAX_CO_FREQ[lat] satellites".
+    # So the gate is "not in the tracked set" (``or_rescues_capped=True``, the
+    # conformant default). The alternative gate, "not window-eligible", also
+    # bars eligible satellites that Step 19bis dropped under the cap, which the
+    # printed text does not say and which lowers epfd; it is kept only as a
+    # study switch.
     gate_c = (~sel_mask[cols]) if or_rescues_capped else ~elig[cols]
     if row_order is None:
         row_order = [(0, E.shape[0])]
@@ -2938,7 +3017,10 @@ def _build_worst_envelope(
         if total <= 0.0:
             continue
         rev = np.cumsum(win.duration_per_bin[::-1])[::-1]  # time with epfd ≥ level_i
-        env = np.maximum(env, rev / total * 100.0)
+        # Clamped for the same reason as in ``build_ccdf``: a cumulative share
+        # of the run cannot exceed 100 %, and a few-ulp overshoot would fail the
+        # §D7.1.3 test on the 100 %-time row.
+        env = np.maximum(env, np.minimum(rev / total * 100.0, 100.0))
         occupied |= win.duration_per_bin > 0.0
     # Report ONLY the levels that some set actually occupies (union of bins with
     # mass) — exactly like EPFDStreamAccumulator.build_ccdf. Using ``env > 0``
@@ -3071,7 +3153,7 @@ def run_epfd_simulation_windowed(
     system_id_per_sat: np.ndarray | None = None,
     max_co_freq_by_lat_per_system: list | None = None,
     single_pass: bool = True,
-    or_rescues_capped: bool = False,
+    or_rescues_capped: bool = True,
 ) -> EPFDSimulationResult:
     """EPFD↓ with the track-duration sliding-window variant (S.1503-4 §D5.1.4.2).
 
@@ -3115,14 +3197,15 @@ def run_epfd_simulation_windowed(
     uniform call signature with the standard path) but **not applied here**, and
     a warning is emitted when any is active.
 
-    ``or_rescues_capped`` selects between the two defensible readings of the
-    printed Step 20. The text qualifies the gain ("OR") branch without saying
-    whether a window-eligible satellite that Step 19bis dropped under
-    MAX_CO_FREQ may re-enter through it. Default ``False`` keeps the project's
-    reading — a capped satellite is genuinely dropped, so the cap cannot be
-    defeated through the gain branch. ``True`` takes the other reading, where
-    the gain branch is qualified only by "not in the tracked set", which
-    re-admits those satellites and is the more conservative of the two.
+    ``or_rescues_capped`` selects the reading of the printed Step 20. The
+    default ``True`` follows the text: Step 20 adds "those satellites for which
+    GRX(φ) > min[Gmax − 30 dB, GRX(α₀[Latitude])]" with no further qualifier,
+    and the Note removes from that set only the satellites already on the list
+    of the highest MAX_CO_FREQ[lat] — so a window-eligible satellite that Step
+    19bis dropped under the cap DOES contribute through the gain branch.
+    ``False`` bars every window-eligible satellite from the gain branch, which
+    the printed text does not say and which lowers epfd; it is retained only to
+    reproduce earlier runs and to quantify the difference.
     """
     result = EPFDSimulationResult(wcg=wcg)
     result.windows = windows
@@ -3560,7 +3643,9 @@ def _pct_exceeding_level(sim_result: EPFDSimulationResult, level_dBW: float) -> 
     n_ge = int(np.searchsorted(-bins, -float(level_dBW), side="right"))
     if n_ge <= 0:
         return 0.0
-    return float(pct[min(n_ge, pct.size) - 1])
+    # Defensive clamp: Py is a share of the run and the comparison against P_i
+    # is exact, so a stray ulp above 100 must not decide a row.
+    return float(min(pct[min(n_ge, pct.size) - 1], 100.0))
 
 
 def _epfd_at_exceedance_pct(sim_result: EPFDSimulationResult, pct_threshold: float) -> float:
@@ -3662,9 +3747,30 @@ def check_article22_compliance(
         # do coexist, so the verdict always comes from the probability test.
         py = _pct_exceeding_level(sim_result, limit_bin_dBW)
         if pct_threshold <= 0.0:
-            # The P=0 row is the final-stage hard cap: the RR's "shall not be
-            # exceeded for any percentage of time". J_max lands on the same
-            # 0.1 dB grid as the limit, so equality is routine and must Fail.
+            # THE P = 0 ROW IS THE RECOMMENDATION'S 100 %-TIME ROW. The two
+            # percentage columns are complements and it is easy to read one for
+            # the other, so, once and explicitly:
+            #
+            #   RR Article 22 tables  — "percentage of time during which epfd
+            #                            may NOT be exceeded"
+            #   this repository       — percentage of time during which epfd IS
+            #                            exceeded (a CCDF ordinate)
+            #
+            # The two add to 100. RR Vol. I Art. 22 states the single-entry
+            # limit "100 % of the time" as −160 dB(W/(m²·40 kHz)) for Table
+            # 22-1A, and that value is exactly the point stored here with
+            # pct = 0 (see src/data/article22_limits.json, 22-1A/60 cm:
+            # [[-160.0, 0.0], …]). So J_100 of §D7.1.3's final stage is the row
+            # whose stored percentage is ZERO, and the row stored with 100 % is
+            # the Recommendation's P_i = 0 end, which carries no constraint.
+            #
+            # Printed §D7.1.3, final stage (p. 135): "From the CDF, find the
+            # maximum pfd value recorded during the software run, J_max.
+            # Compare it with the pfd limit specified for 100 % time, J_100. If
+            # J_max < J_100 then record Pass … If J_max ≥ J_100 then record
+            # Fail." Strict "<" to pass, and equality fails — which is not an
+            # edge case here, because J_max is snapped to the same 0.1 dB grid
+            # as the limit.
             j_max = float(sim_result.cdf_epfd_dBW[0]) if len(sim_result.cdf_epfd_dBW) else float("-inf")
             row_pass = bool(j_max < limit_bin_dBW)
         else:

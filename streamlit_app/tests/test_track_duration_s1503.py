@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+import pytest
 
 from src.epfd_stream_accumulator import EPFDWindowStats  # type: ignore[import]
 from src.orbit_propagator import OrbitalElements  # type: ignore[import]
@@ -763,3 +764,52 @@ def test_or_branch_actually_contributes_in_the_windowed_engine():
         np.array_equal(with_or.cdf_epfd_dBW, no_or.cdf_epfd_dBW)
         and np.allclose(with_or.cdf_percentage, no_or.cdf_percentage)
     ), "OR branch made no difference — the fixture no longer exercises it"
+
+
+# ── §D7.1.3 percentage columns and the 100 %-time row ────────────────────────
+
+def test_cumulative_percentage_never_exceeds_100():
+    """A share of the run cannot exceed 100 %, and a stray ulp decided a row.
+
+    The last CCDF point is a cumulative sum divided by the same total, so it can
+    land on 100.00000000000017. That value fails ``Py <= Pi`` on the 100 %-time
+    row of §D7.1.3 and turned the row that carries no constraint into a Fail.
+    """
+    from src.epfd_stream_accumulator import (  # type: ignore[import]
+        EPFDStreamAccumulator, EPFDWindowStats,
+    )
+
+    def _feed(acc, full):
+        rng = np.random.RandomState(3)
+        for i in range(400):
+            db = -150.0 - rng.rand() * 40.0
+            dur = float(rng.rand() + 0.1)
+            if full:
+                acc.add(time_s=float(i), epfd_db=db, duration_s=dur,
+                        num_horizon_sats=1, num_visible_sats=1,
+                        num_contributing_sats=1, min_alpha_deg=10.0)
+            else:
+                acc.add(time_s=float(i), epfd_db=db, duration_s=dur)
+
+    for acc, full in ((EPFDStreamAccumulator(), True), (EPFDWindowStats(), False)):
+        # Many unequal weights so the running sum cannot match the total exactly.
+        _feed(acc, full)
+        _bins, pct = acc.build_ccdf()
+        assert pct.size > 0
+        assert pct.max() <= 100.0, pct.max()
+        assert pct[-1] == pytest.approx(100.0, abs=1e-9)
+
+
+def test_hundred_percent_row_is_not_failed_by_rounding():
+    """The vacuous row must pass whenever the curve simply covers the run."""
+    from src.epfd_calculator import (  # type: ignore[import]
+        EPFDSimulationResult, check_article22_compliance,
+    )
+
+    res = EPFDSimulationResult(wcg=_wcg())
+    res.cdf_epfd_dBW = np.array([-164.0, -170.0, -187.4, -188.4])
+    # Deliberately overshoot, as a real cumulative sum can.
+    res.cdf_percentage = np.array([0.01, 5.0, 99.9, 100.00000000000017])
+    comp = check_article22_compliance(
+        sim_result=res, limits=[(-187.4, 100.0)], reference_bandwidth_khz=40.0)
+    assert comp.table17[0]["pass"] is True, comp.table17

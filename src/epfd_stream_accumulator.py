@@ -333,7 +333,10 @@ class EPFDStreamAccumulator:
         weights_asc = self.duration_per_bin[nz]
         bins_desc = bin_centers[::-1]
         weights_desc = weights_asc[::-1]
-        percentages = np.cumsum(weights_desc) / total * 100.0
+        # Clamped for the same reason as in EPFDWindowStats.build_ccdf: a
+        # cumulative share of the run cannot exceed 100 %, and a few-ulp
+        # overshoot would fail §D7.1.3 on the 100 %-time row.
+        percentages = np.minimum(np.cumsum(weights_desc) / total * 100.0, 100.0)
         return bins_desc, percentages
 
     def decimated_series(self) -> dict[str, list]:
@@ -543,7 +546,12 @@ class EPFDWindowStats:
             return np.array([]), np.array([])
         bin_centers = _BIN_MIN_DB + nz.astype(np.float64) * _BIN_SIZE_DB
         weights_desc = self.duration_per_bin[nz][::-1]
-        percentages = np.cumsum(weights_desc) / total * 100.0
+        # A cumulative fraction of the total time cannot exceed 1, but the
+        # running sum can overshoot the total by a few ulp, and a Py of
+        # 100.00000000000017 fails the "Py <= Pi" test of §D7.1.3 on the
+        # 100 %-time row for no physical reason. Clamp at the source so the
+        # exported CDF never shows more than 100 % either.
+        percentages = np.minimum(np.cumsum(weights_desc) / total * 100.0, 100.0)
         return bin_centers[::-1], percentages
 
 

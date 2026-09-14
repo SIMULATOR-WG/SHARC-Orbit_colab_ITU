@@ -777,6 +777,22 @@ def _parse_bool(val: str) -> bool:
     return v in ("Y", "YES", "TRUE", "1")
 
 
+def _orbit_length_km(row: dict, base: str, km_field: str) -> float:
+    """One length (km) from the ``orbit`` table, in either schema spelling.
+
+    ``<base>_km`` (S.1503-4 examination structure, plain km) wins when present
+    and non-zero; otherwise ``<base>`` × 10^``<base>_exp`` (SNS v10). Returns
+    0.0 when the row declares neither, which callers must treat as "absent",
+    never as "zero km".
+    """
+    km = _parse_float(row.get(km_field, "0"))
+    if km:
+        return float(km)
+    val = _parse_float(row.get(base, "0"))
+    exp = _parse_int(row.get(f"{base}_exp", "0"))
+    return float(val * (10.0 ** exp) if exp != 0 else val)
+
+
 def _period_to_seconds(ddd: str, hh: str, mm: str, ss: str = "0") -> float:
     """Convert a period (ddd, hh, mm, ss) to seconds."""
     d = _parse_float(ddd)
@@ -873,17 +889,20 @@ def read_srs_mdb(mdb_path: str, ntc_id: str | None = None) -> SRSNonGeoSystem:
             row.get("rpt_prd_ss", "0"),
         )
 
-        # Apogee and perigee — with exponent (field × 10^exp)
-        apog = _parse_float(row.get("apog", "0"))
-        apog_exp = _parse_int(row.get("apog_exp", "0"))
-        perig = _parse_float(row.get("perig", "0"))
-        perig_exp = _parse_int(row.get("perig_exp", "0"))
-        op_ht = _parse_float(row.get("op_ht", "0"))
-        op_ht_exp = _parse_int(row.get("op_ht_exp", "0"))
-
-        apogee_km = apog * (10.0 ** apog_exp) if apog_exp != 0 else apog
-        perigee_km = perig * (10.0 ** perig_exp) if perig_exp != 0 else perig
-        op_height_km = op_ht * (10.0 ** op_ht_exp) if op_ht_exp != 0 else op_ht
+        # Apogee, perigee and minimum operating height. Two schema variants are
+        # in the wild for the same three quantities:
+        #   SNS v10        — ``apog`` / ``apog_exp`` (value × 10^exp), likewise
+        #                    ``perig``/``perig_exp`` and ``op_ht``/``op_ht_exp``
+        #   S.1503-4 exam  — ``apog_km`` / ``perig_km`` / ``op_ht_km``, plain km
+        # Reading only the first spelling made all three silently zero on a
+        # database of the second kind, which is not a harmless default: the
+        # semi-major axis then falls back to the declared period instead of
+        # §D6.3.7's a = Re + (ha + hp)/2, the §D4 dimensioning inherits that
+        # fallback, and the AP4 minimum-operating-height transmit gate is
+        # disabled altogether.
+        apogee_km = _orbit_length_km(row, "apog", "apog_km")
+        perigee_km = _orbit_length_km(row, "perig", "perig_km")
+        op_height_km = _orbit_length_km(row, "op_ht", "op_ht_km")
 
         plane = SRSOrbitPlane(
             orb_id=_parse_int(row.get("orb_id", "0")),
@@ -929,7 +948,16 @@ def read_srs_mdb(mdb_path: str, ntc_id: str | None = None) -> SRSNonGeoSystem:
         logger.info(f"  Plane 1: a={p0.semi_major_axis_km:.2f} km, "
                     f"e={p0.eccentricity:.4f}, i={p0.inclin_deg:.1f}°")
         logger.info(f"  Period: {p0.period_s:.1f} s ({p0.period_s/60:.1f} min)")
-        logger.info(f"  Alt: apog={p0.apogee_km:.0f} km, perig={p0.perigee_km:.0f} km")
+        if p0.apogee_km or p0.perigee_km:
+            logger.info(f"  Alt: apog={p0.apogee_km:.0f} km, perig={p0.perigee_km:.0f} km"
+                        + (f", op_ht={p0.op_height_km:.0f} km" if p0.op_height_km else ""))
+        else:
+            logger.warning(
+                "  Apogee/perigee absent from the orbit table (neither "
+                "apog/apog_exp nor apog_km): the semi-major axis falls back to "
+                "the declared period instead of §D6.3.7 a = Re + (ha+hp)/2, and "
+                "the minimum-operating-height gate is disabled."
+            )
         logger.info(f"  Sats/plane (orbit.nbr_sat_pl): {p0.nbr_sat_pl}")
 
     # --- phase table (official initial phases per satellite) ---
