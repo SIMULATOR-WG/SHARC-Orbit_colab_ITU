@@ -270,6 +270,38 @@ button[data-testid^="baseButton"]:has(p:empty) [data-testid="stIconMaterial"] {
     justify-content: center !important;
 }
 
+/* Pills and segmented control — the MARKED state must look different.
+
+   Streamlit renders each option as a button, so the generic button rule above
+   matches them and, with !important, flattens selected and unselected into the
+   same accent-outline look: clicking appeared to do nothing. The active option
+   is a separate testid ("…Active"), so give it the inverse treatment — filled
+   accent with dark ink — which reads as marked at a glance. Declared after the
+   generic rule so it wins on source order at equal specificity. */
+button[data-testid="stBaseButton-pillsActive"],
+button[data-testid="stBaseButton-segmented_controlActive"] {
+    background: var(--so-accent) !important;
+    color: var(--so-bg) !important;
+    border-color: var(--so-accent) !important;
+    box-shadow: 0 0 0 2px rgba(79, 209, 197, 0.25) !important;
+}
+button[data-testid="stBaseButton-pillsActive"] *,
+button[data-testid="stBaseButton-segmented_controlActive"] * {
+    color: var(--so-bg) !important;
+    font-weight: 700 !important;
+}
+/* Unmarked options stay quiet so the marked ones stand out. */
+button[data-testid="stBaseButton-pills"],
+button[data-testid="stBaseButton-segmented_control"] {
+    background: transparent !important;
+    opacity: 0.85;
+}
+button[data-testid="stBaseButton-pills"]:hover,
+button[data-testid="stBaseButton-segmented_control"]:hover {
+    background: #11364e !important;
+    opacity: 1;
+}
+
 /* Force every child (text spans, icons) to inherit accent color */
 button[data-testid^="stBaseButton"] *,
 button[data-testid^="baseButton"] *,

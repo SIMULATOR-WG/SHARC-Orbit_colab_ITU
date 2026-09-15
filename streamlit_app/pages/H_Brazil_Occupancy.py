@@ -10,6 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
+from contextlib import nullcontext as _nullcontext
+
 import pandas as pd
 import streamlit as st
 
@@ -424,12 +426,97 @@ with b_clear:
         st.session_state["br_occ_systems"] = []
         st.rerun()
 
-sel_ids = st.multiselect(
-    "Pick systems to compare",
-    options=[s.id for s in filtered],
-    key="br_occ_systems",
-    format_func=lambda i: id_to_sys[i].label() if i in id_to_sys else i,
+# The picker and the marking block would otherwise list the same systems twice,
+# and at a couple of hundred picks the chip wall buries everything under it.
+# Collapse the picker once the selection is big: it stays reachable for adding
+# a system by name, while the marking block below becomes the working surface.
+_n_picked = len(st.session_state.get("br_occ_systems") or [])
+_picker_box = (
+    st.expander(f"Picked systems ({_n_picked}) — add or remove one by one",
+                expanded=False)
+    if _n_picked > 8 else _nullcontext()
 )
+with _picker_box:
+    sel_ids = st.multiselect(
+        "Pick systems to compare",
+        options=[s.id for s in filtered],
+        key="br_occ_systems",
+        format_func=lambda i: id_to_sys[i].label() if i in id_to_sys else i,
+    )
+    if len(sel_ids) > 1:
+        st.caption(
+            ":material/info: The chips are this picker's own — clicking one "
+            "does nothing, only the **×** removes it. To mark several systems "
+            "and then keep or drop them in one go, use **Mark systems** below."
+        )
+
+# Pruning a long selection one chip at a time is unworkable — the list above
+# runs to dozens of entries. Mark what matters here, then keep or drop it in
+# one action. Marking is independent of the chips: nothing changes until a
+# button is pressed.
+#
+# Pills rather than a table with row selection: in a Streamlit dataframe a row
+# is marked through the checkbox gutter, not by clicking the row, and there is
+# no ctrl-click binding to hook. A pill toggles on a plain click and renders
+# filled while marked, which is the emphasis this needs — and it costs one
+# click per system instead of hunting a checkbox column.
+if len(sel_ids) > 1:
+    with st.expander(
+        f":material/ads_click: Mark systems — click to mark, then keep or drop "
+        f"({len(sel_ids)} picked)",
+        expanded=True,
+    ):
+
+        def _prune_label(i: str) -> str:
+            sy = id_to_sys.get(i)
+            if sy is None:
+                return i
+            bands = "/".join(br.letter_bands_for(_pool_ivs.get(i) or []))
+            tail = f" · {bands}" if bands else ""
+            if sy.source == "sns" and sy.ntc_id:
+                tail = f" · ntc {sy.ntc_id}{tail}"
+            return f"{sy.name}{tail}"
+
+        _marked_ids = st.pills(
+            "Click a system to mark it — marked ones stay filled",
+            options=sel_ids,
+            selection_mode="multi",
+            format_func=_prune_label,
+            key="br_occ_prune_pills",
+        ) or []
+
+        def _set_selection(ids: "list[str]") -> None:
+            """Rewrite the picker's selection and forget the marks.
+
+            Must run as a button callback: the picker widget is created above
+            this block, and Streamlit refuses to let a script assign to a
+            widget's own session-state key after the widget exists. A callback
+            runs before the script body, so the assignment is legal there and
+            the rerun that follows shows the new chips.
+            """
+            st.session_state["br_occ_systems"] = list(ids)
+            st.session_state["br_occ_prune_pills"] = []
+
+        m1, m2, m3 = st.columns([2, 1, 1])
+        with m1:
+            st.caption(
+                f"**{len(_marked_ids)}** of {len(sel_ids)} marked."
+                if _marked_ids else
+                f"Nothing marked yet — click any of the {len(sel_ids)} systems above."
+            )
+        with m2:
+            st.button(
+                "Keep only marked", icon=":material/filter_alt:",
+                width="stretch", disabled=not _marked_ids,
+                on_click=_set_selection, args=(_marked_ids,),
+            )
+        with m3:
+            st.button(
+                "Remove marked", icon=":material/backspace:",
+                width="stretch", disabled=not _marked_ids,
+                on_click=_set_selection,
+                args=([i for i in sel_ids if i not in set(_marked_ids)],),
+            )
 
 set_persisted_state("br_occupancy.form", {
     "sources": sources,
