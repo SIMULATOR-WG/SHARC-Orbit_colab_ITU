@@ -48,6 +48,7 @@ prev = use_persisted_state("br_occupancy.form", {
     "letter_bands": [],
     "freq_low_ghz": "",
     "freq_high_ghz": "",
+    "chart_span": "filter",
     "system_ids": [],
     "query": "",
 })
@@ -285,6 +286,12 @@ _PRESET_NONE = "Custom range"
 st.session_state.setdefault("br_occ_freq_low", str(prev.get("freq_low_ghz") or ""))
 st.session_state.setdefault("br_occ_freq_high", str(prev.get("freq_high_ghz") or ""))
 st.session_state.setdefault("br_occ_freq_preset", _PRESET_NONE)
+# Read back before the chart draws, and written to disk by the block that
+# persists the form, which runs earlier in the script than the chart itself.
+if st.session_state.get("br_occ_chart_span") not in ("filter", "all"):
+    st.session_state["br_occ_chart_span"] = (
+        "filter" if (prev.get("chart_span") or "filter") == "filter" else "all"
+    )
 
 
 def _apply_freq_preset() -> None:
@@ -432,6 +439,7 @@ set_persisted_state("br_occupancy.form", {
     "letter_bands": letter_bands,
     "freq_low_ghz": f_low.strip(),
     "freq_high_ghz": f_high.strip(),
+    "chart_span": st.session_state.get("br_occ_chart_span", "filter"),
     "system_ids": sel_ids,
     "query": query,
 })
@@ -490,10 +498,47 @@ if len(selected) >= 2:
         "kind": "common",
         "sublabel": direction,
     })
+# The axis normally spans the data, so one C-band assignment squeezes a Ka
+# comparison into a sliver. Offer the filtered range as the axis instead.
+_filter_span = None
+if low_ghz is not None or high_ghz is not None:
+    _edges = [e for r in chart_rows for b in r["bands"] for e in b]
+    _lo = low_ghz if low_ghz is not None else (min(_edges) if _edges else 0.0)
+    _hi = high_ghz if high_ghz is not None else (max(_edges) if _edges else 0.0)
+    _filter_span = (float(_lo), float(_hi))
+    _span_name = f"{_filter_span[0]:g}–{_filter_span[1]:g} GHz"
+elif letter_bands:
+    _picked = [(lo, hi) for name, lo, hi in br.LETTER_BANDS if name in letter_bands]
+    _edges = [e for r in chart_rows for b in r["bands"] for e in b]
+    _lo = min(lo for lo, _hi in _picked)
+    _hi = max(hi for _lo2, hi in _picked)
+    if _hi == float("inf"):
+        _hi = max(_edges) if _edges else _lo + 1.0
+    _filter_span = (float(_lo), float(_hi))
+    _span_name = "/".join(n for n in br.LETTER_BAND_NAMES if n in letter_bands)
+
+if _filter_span is not None:
+    zoom = st.radio(
+        "Axis span",
+        options=["filter", "all"],
+        key="br_occ_chart_span",
+        horizontal=True,
+        format_func=lambda v: (
+            f"Selected band ({_span_name})" if v == "filter"
+            else "Everything the systems declare"
+        ),
+        help="The strips are drawn on one shared axis. Limiting it to the "
+             "band you filtered on trims the assignments outside it, so the "
+             "comparison is read at that band's resolution.",
+    )
+else:
+    zoom = "all"
+
 st_bands_chart(
     chart_rows,
     title=f"Band occupancy — Brazil — {direction}",
     shared_scale=True,
+    span_ghz=_filter_span if zoom == "filter" else None,
 )
 
 rows = []

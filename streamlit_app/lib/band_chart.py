@@ -23,6 +23,8 @@ import html as _html
 
 import streamlit as st
 
+from .freq_bands import LETTER_BANDS, letter_bands_for
+
 _GREEN = "#5eb37a"          # occupied band segment (single data hue)
 _GREEN_SOFT = "rgba(94, 179, 122, 0.45)"  # PFD-fallback fill (labeled as such)
 _TRACK = "rgba(124, 141, 176, 0.16)"       # empty track
@@ -79,15 +81,55 @@ def _fmt_mhz(freq_ghz: float) -> str:
     return txt.replace(",", " ") + " MHz"
 
 
+def _band_suffix(lo: float, hi: float) -> str:
+    """" · Ku" for a segment inside Ku, " · Ku/Ka" for one that straddles.
+
+    A frequency range on its own says little to a reader scanning a chart; the
+    letter is how the band gets named in conversation. Empty when the range
+    falls in no known band, so the tooltip degrades to the numbers alone.
+    """
+    lo, hi = float(lo), float(hi)
+    if hi <= lo:
+        # A marker is a single frequency, and a zero-width interval intersects
+        # nothing. Name the band that contains it instead.
+        names = [n for n, b_lo, b_hi in LETTER_BANDS if b_lo <= lo < b_hi]
+    else:
+        names = letter_bands_for([(lo, hi)])
+    return f" · {'/'.join(names)}" if names else ""
+
+
 def _seg_html(lo: float, hi: float, x0: float, x1: float,
               kind: str) -> str:
     span = max(x1 - x0, 1e-12)
     left = (lo - x0) / span * 100.0
     width = max((hi - lo) / span * 100.0, 0.15)
-    tip = _html.escape(f"{_fmt_mhz(lo)} – {_fmt_mhz(hi)}")
+    tip = _html.escape(f"{_fmt_mhz(lo)} – {_fmt_mhz(hi)}{_band_suffix(lo, hi)}")
     cls = "so-bc-seg pfd" if kind == "pfd" else "so-bc-seg"
     return (f'<div class="{cls}" style="left:{left:.3f}%;'
             f'width:{width:.3f}%;" title="{tip}"></div>')
+
+
+def clip_bands(
+    bands: "list[tuple[float, float]]",
+    span: "tuple[float, float] | None",
+) -> "list[tuple[float, float]]":
+    """Bands trimmed to ``span``; those entirely outside it disappear.
+
+    Trimming rather than hiding keeps a partially covered assignment visible,
+    which is the honest picture: the system does occupy that much of the band
+    on screen, and the tooltip still carries its real edges.
+    """
+    if span is None:
+        return list(bands)
+    lo, hi = float(span[0]), float(span[1])
+    if hi < lo:
+        lo, hi = hi, lo
+    out = []
+    for a, b in bands:
+        a, b = max(float(a), lo), min(float(b), hi)
+        if b > a:
+            out.append((a, b))
+    return out
 
 
 def bands_chart_html(
@@ -97,6 +139,7 @@ def bands_chart_html(
     shared_scale: bool = True,
     marker_ghz: float | None = None,
     marker_label: str | None = None,
+    span_ghz: "tuple[float, float] | None" = None,
 ) -> str:
     """Build the chart HTML.
 
@@ -104,7 +147,15 @@ def bands_chart_html(
     "kind": "tx"|"pfd"|"common", "sublabel": str|None}, ...]``. Bands must be
     disjoint & sorted (use ``art22_ui.merge_intervals``). Empty ``bands`` →
     gray track + "(0 bands)", like the ITU ISL row.
+
+    ``span_ghz`` pins the axis to an explicit range instead of the extent of
+    the data. Everything outside is trimmed away, so a chart of systems that
+    also hold C-band assignments can be read at Ka resolution rather than being
+    squeezed into the right-hand tenth of the track.
     """
+    if span_ghz is not None:
+        rows = [{**r, "bands": clip_bands(list(r.get("bands") or []), span_ghz)}
+                for r in rows]
     all_edges = [e for r in rows for b in r.get("bands") or [] for e in b]
     if marker_ghz is not None:
         all_edges.append(float(marker_ghz))
@@ -112,12 +163,19 @@ def bands_chart_html(
     if title:
         parts.append(f'<div class="so-bc-title">{_html.escape(title)}</div>')
     if not all_edges:
-        parts.append('<div class="so-bc-legend">No declared band.</div></div>')
+        msg = ("No declared band in the selected range."
+               if span_ghz is not None else "No declared band.")
+        parts.append(f'<div class="so-bc-legend">{msg}</div></div>')
         return "".join(parts)
 
-    gmin, gmax = min(all_edges), max(all_edges)
-    pad = max((gmax - gmin) * 0.015, 1e-6)
-    gmin, gmax = gmin - pad, gmax + pad
+    if span_ghz is not None:
+        gmin, gmax = sorted((float(span_ghz[0]), float(span_ghz[1])))
+        if gmax <= gmin:
+            gmax = gmin + 1e-6
+    else:
+        gmin, gmax = min(all_edges), max(all_edges)
+        pad = max((gmax - gmin) * 0.015, 1e-6)
+        gmin, gmax = gmin - pad, gmax + pad
 
     if not shared_scale:
         parts.append('<div class="so-bc-head" style="margin-left:242px">'
@@ -144,7 +202,10 @@ def bands_chart_html(
         segs = "".join(_seg_html(lo, hi, x0, x1, kind) for lo, hi in bands)
         if marker_ghz is not None and x0 <= float(marker_ghz) <= x1:
             mpos = (float(marker_ghz) - x0) / (x1 - x0) * 100.0
-            mtip = _html.escape(marker_label or _fmt_mhz(float(marker_ghz)))
+            _mk = float(marker_ghz)
+            mtip = _html.escape(
+                marker_label or f"{_fmt_mhz(_mk)}{_band_suffix(_mk, _mk)}"
+            )
             segs += (f'<div class="so-bc-marker" style="left:{mpos:.3f}%;"'
                      f' title="{mtip}"></div>')
         under = ""
