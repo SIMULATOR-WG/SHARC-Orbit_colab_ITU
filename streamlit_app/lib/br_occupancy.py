@@ -115,6 +115,8 @@ from .freq_bands import (  # noqa: F401
     frequency_presets,
     intervals_touch_range,
     letter_bands_for,
+    nearest_stop,
+    slider_stops,
 )
 
 
@@ -128,6 +130,10 @@ def merge_intervals(ivs: list[tuple[float, float]]) -> list[tuple[float, float]]
     return merged
 
 
+# Narrowest overlap that counts as a shared band, in GHz (1 Hz).
+_MIN_OVERLAP_GHZ = 1e-9
+
+
 def intersect_sets(
     a: list[tuple[float, float]],
     b: list[tuple[float, float]],
@@ -136,7 +142,12 @@ def intersect_sets(
     for la, ha in a:
         for lb, hb in b:
             lo, hi = max(la, lb), min(ha, hb)
-            if lo <= hi:
+            # A shared EDGE is not a shared band. 10.7–12.75 against
+            # 12.75–14.5 used to yield the zero-width 12.75–12.75, which the
+            # page then announced as a common occupied band and printed as
+            # "12.750–12.750 GHz". Require real width; 1 Hz is far below any
+            # assignment and far above float noise on GHz-scale edges.
+            if hi - lo > _MIN_OVERLAP_GHZ:
                 res.append((lo, hi))
     return merge_intervals(res)
 
@@ -1023,8 +1034,15 @@ def load_sns_catalog() -> list[OccupancySystem]:
     )
     if isinstance(cached, list) and not stale:
         return [system_from_dict(d) for d in cached]
-    mdb = Path(str(meta.get("mdb") or ""))
-    if mdb.exists() and stale:
+    # ``Path("")`` is ``PosixPath(".")``, which always exists, so an absent or
+    # empty "mdb" entry sent the loader off to re-index the CURRENT DIRECTORY as
+    # an SRS database. On a fresh clone — where data/ is gitignored, so the meta
+    # file does not exist at all — that raised FileNotFoundError and the page
+    # died with a traceback under "1. Catalogs", before the setup card that
+    # tells the user what to do could render.
+    _mdb_raw = str(meta.get("mdb") or "").strip()
+    mdb = Path(_mdb_raw) if _mdb_raw else None
+    if mdb is not None and mdb.exists() and stale:
         reindex_sns_mdb(mdb, extra_meta={k: v for k, v in meta.items()
                                          if k not in {"n_systems"}})
         cached = _read_json(SNS_CATALOG)

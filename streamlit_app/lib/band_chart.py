@@ -99,11 +99,21 @@ def _band_suffix(lo: float, hi: float) -> str:
 
 
 def _seg_html(lo: float, hi: float, x0: float, x1: float,
-              kind: str) -> str:
+              kind: str, full: "tuple[float, float] | None" = None) -> str:
+    """One drawn segment. ``full`` are its real edges when ``lo``/``hi`` are clipped.
+
+    The tooltip must state the assignment, not the part of it that survived the
+    axis. Clipping and then reading the edges back off the drawn rectangle made
+    a 15–20 GHz assignment announce itself as starting at 17.7 under a Ka axis.
+    """
     span = max(x1 - x0, 1e-12)
     left = (lo - x0) / span * 100.0
     width = max((hi - lo) / span * 100.0, 0.15)
-    tip = _html.escape(f"{_fmt_mhz(lo)} – {_fmt_mhz(hi)}{_band_suffix(lo, hi)}")
+    t_lo, t_hi = (full if full is not None else (lo, hi))
+    tip = f"{_fmt_mhz(t_lo)} – {_fmt_mhz(t_hi)}{_band_suffix(t_lo, t_hi)}"
+    if full is not None and (t_lo < lo - 1e-12 or t_hi > hi + 1e-12):
+        tip += f" (shown {_fmt_mhz(lo)} – {_fmt_mhz(hi)})"
+    tip = _html.escape(tip)
     cls = "so-bc-seg pfd" if kind == "pfd" else "so-bc-seg"
     return (f'<div class="{cls}" style="left:{left:.3f}%;'
             f'width:{width:.3f}%;" title="{tip}"></div>')
@@ -154,7 +164,10 @@ def bands_chart_html(
     squeezed into the right-hand tenth of the track.
     """
     if span_ghz is not None:
-        rows = [{**r, "bands": clip_bands(list(r.get("bands") or []), span_ghz)}
+        # Keep the untrimmed edges beside the trimmed ones: the drawing uses the
+        # trimmed pair, the tooltip states the real assignment.
+        rows = [{**r, "bands": clip_bands(list(r.get("bands") or []), span_ghz),
+                 "_full_bands": list(r.get("bands") or [])}
                 for r in rows]
     all_edges = [e for r in rows for b in r.get("bands") or [] for e in b]
     if marker_ghz is not None:
@@ -199,7 +212,17 @@ def bands_chart_html(
             x0, x1 = lo_r - pad_r, hi_r + pad_r
         else:
             x0, x1 = gmin, gmax
-        segs = "".join(_seg_html(lo, hi, x0, x1, kind) for lo, hi in bands)
+        _full = list(r.get("_full_bands") or [])
+
+        def _origin(lo: float, hi: float) -> "tuple[float, float] | None":
+            """The untrimmed band a drawn segment came from, if it was trimmed."""
+            for a, b in _full:
+                if a <= lo + 1e-12 and hi <= b + 1e-12:
+                    return (a, b)
+            return None
+
+        segs = "".join(_seg_html(lo, hi, x0, x1, kind, _origin(lo, hi))
+                       for lo, hi in bands)
         if marker_ghz is not None and x0 <= float(marker_ghz) <= x1:
             mpos = (float(marker_ghz) - x0) / (x1 - x0) * 100.0
             _mk = float(marker_ghz)

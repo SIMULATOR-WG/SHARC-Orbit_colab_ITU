@@ -60,8 +60,8 @@ interpreter. From the repository root:
 
 ```powershell
 # install uv once (skip if already present):
-winget install --id astral-sh.uv --accept-package-agreements --accept-source-agreements
-#   then close & reopen PowerShell so PATH refreshes
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+$env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("PATH","User")
 
 uv python install 3.12.3                # fetch the pinned interpreter (one-time)
 uv venv --python 3.12.3 .venv           # create the venv on that exact patch

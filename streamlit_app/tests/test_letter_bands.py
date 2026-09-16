@@ -138,3 +138,31 @@ def test_frequency_presets_survive_a_missing_article22_table(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", boom)
     presets = mod.frequency_presets()
     assert [k.split(" ·")[0] for k in presets] == list(LETTER_BAND_NAMES[:-1])
+
+
+def test_slider_stops_are_meaningful_edges():
+    """A linear slider is useless over 0.03-333 GHz; the stops carry the meaning."""
+    from streamlit_app.lib.freq_bands import nearest_stop, slider_stops  # noqa: PLC0415
+
+    stops = slider_stops()
+    assert stops == sorted(stops)
+    assert len(set(stops)) == len(stops), "duplicate stops"
+    assert all(s > 0 for s in stops)
+    assert float("inf") not in stops
+
+    # Every finite letter-band edge is reachable.
+    for _name, lo, hi in LETTER_BANDS:
+        assert lo in stops
+        if hi != float("inf"):
+            assert hi in stops
+    # So are the epfd(down) Article 22 edges an examination runs at.
+    for edge in (17.8, 18.6, 19.7, 20.2, 10.7, 11.7):
+        assert edge in stops, edge
+
+    # Extra values from the caller are folded in, and junk is ignored.
+    with_extra = slider_stops([0.031, 333.12, -5, None, "x"])
+    assert 0.031 in with_extra and 333.12 in with_extra
+    assert all(s > 0 for s in with_extra)
+
+    assert nearest_stop(19.70002, stops) == 19.7
+    assert nearest_stop(0.0, stops) == stops[0]

@@ -159,3 +159,132 @@ def test_picker_collapses_once_the_selection_is_long(app):
     # Still rendered, just folded away.
     assert any("Pick systems" in m.label for m in big.multiselect)
     assert _picked(big) == _some_ids(12)
+
+
+def test_orbit_filter_matches_exactly_not_by_substring(app):
+    """"GEO" is a substring of "NGEO": the filter used to let NGEO through."""
+    at_all = app(orbit="all")
+    at_geo = app(orbit="GEO")
+    at_ngeo = app(orbit="NGEO")
+
+    def _count(at) -> int:
+        cap = [c.value for c in at.caption if "after filters" in str(c.value)]
+        assert cap, [c.value for c in at.caption]
+        return int(str(cap[0]).split()[0])
+
+    n_all, n_geo, n_ngeo = _count(at_all), _count(at_geo), _count(at_ngeo)
+    assert n_geo < n_all, (n_geo, n_all)
+    assert n_ngeo > 0
+    # The two classes partition the pool: nothing counted twice, nothing lost.
+    assert n_geo + n_ngeo == n_all, (n_geo, n_ngeo, n_all)
+
+
+def test_filtering_does_not_delete_picked_systems(app):
+    """A filter governs what the picker OFFERS, never what it holds."""
+    ids = _some_ids(4)
+    at = app(system_ids=ids, letter_bands=["Ka"])
+    assert _picked(at) == ids, "picks must survive a filter that excludes them"
+    notes = [i.value for i in at.info if "outside the current filter" in str(i.value)]
+    assert notes, [i.value for i in at.info]
+    # And the escape hatch is offered explicitly.
+    assert any(b.label.startswith("Drop the ") for b in at.button), \
+        [b.label for b in at.button]
+
+
+def test_catalog_section_folds_once_data_is_loaded(app):
+    at = app()
+    labels = [e.label for e in at.expander]
+    assert any(lab.startswith("1. Catalogs —") for lab in labels), labels
+    # The heading is gone from the top-level flow, so the filters come first.
+    assert not any(str(h.value).startswith("1.") for h in at.subheader), \
+        [h.value for h in at.subheader]
+
+
+def test_assignments_table_is_numeric_and_exportable(app):
+    at = app(system_ids=_some_ids(2))
+    frames = [d for d in at.dataframe if "low (GHz)" in list(d.value.columns)]
+    assert frames, [list(d.value.columns) for d in at.dataframe]
+    table = frames[0].value
+    for col in ("low (GHz)", "high (GHz)", "bandwidth (MHz)"):
+        assert table[col].dtype.kind == "f", (col, table[col].dtype)
+    assert "4. Assignments" in [str(h.value) for h in at.subheader]
+
+
+def _axis_caption(at) -> str:
+    hits = [str(c.value) for c in at.caption if str(c.value).startswith("Axis ")]
+    return hits[0] if hits else ""
+
+
+def _chart_axis(at):
+    """The two axis end labels the strip chart rendered."""
+    import re
+
+    md = "".join(str(m.value) for m in at.markdown)
+    m = re.search(
+        r"so-bc-axis[^>]*>\s*<span>([^<]+)</span>.*?<span>([^<]+)</span>\s*</div>",
+        md, re.S)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def test_chart_range_slider_zooms_without_filtering(app):
+    """The slider is a VIEW control: it trims the bars, not the selection.
+
+    It lives beside the chart in section 3 for that reason. An earlier version
+    sat among the filters and changed which systems were selected, which is not
+    what a zoom does.
+    """
+    ids = _some_ids(6)
+    at = app(system_ids=ids)
+    before_axis = _chart_axis(at)
+    before_n = _count_after_filters(at)
+    assert at.slider, "no range slider beside the chart"
+    slider = at.slider[0]
+    assert isinstance(slider.value, tuple), slider.value
+    assert "Chart range" in slider.label, slider.label
+
+    at.slider[0].set_range(11.211, 12.337).run()
+    assert not at.exception, [e.value for e in at.exception]
+
+    # The axis followed the drag, to a value that is not a band edge.
+    axis = _chart_axis(at)
+    assert axis != before_axis
+    assert "11" in axis[0] and "211" in axis[0], axis
+    # The selection did not move.
+    assert _count_after_filters(at) == before_n
+    assert _picked(at) == ids
+    assert "11.211" in _axis_caption(at), _axis_caption(at)
+
+
+def test_chart_range_is_continuous_not_band_edges(app):
+    """Any frequency is reachable, not only the letter-band boundaries."""
+    at = app(system_ids=_some_ids(6))
+    slider = at.slider[0]
+    lo, hi = float(slider.min), float(slider.max)
+    assert hi > lo
+    # A fine step: at least a few hundred positions across the span.
+    assert float(slider.step) <= (hi - lo) / 100.0, slider.step
+    at.slider[0].set_range(lo + float(slider.step), hi - float(slider.step)).run()
+    assert not at.exception, [e.value for e in at.exception]
+
+
+def test_full_width_draws_everything(app):
+    at = app(system_ids=_some_ids(6))
+    full_axis = _chart_axis(at)
+    slider = at.slider[0]
+    at.slider[0].set_range(float(slider.min) + 1.0, float(slider.max) - 1.0).run()
+    assert _chart_axis(at) != full_axis
+    assert _axis_caption(at)
+    at.slider[0].set_range(float(slider.min), float(slider.max)).run()
+    assert _chart_axis(at) == full_axis
+    assert _axis_caption(at) == "", _axis_caption(at)
+
+
+def _count_after_filters(at) -> int:
+    caps = [str(c.value) for c in at.caption if "after filters" in str(c.value)]
+    assert caps, [c.value for c in at.caption]
+    return int(caps[0].split()[0])
+
+
+def _full_span(at) -> tuple[float, float]:
+    opts = list(at.select_slider[0].options)
+    return float(opts[0]), float(opts[-1])

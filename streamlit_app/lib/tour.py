@@ -73,19 +73,6 @@ STEPS: list[dict[str, str]] = [
         ),
     },
     {
-        "page_id": "launcher",
-        "page": "pages/5_Launcher.py",
-        "title": "Campaign launcher — many methods at once",
-        "message": (
-            "Runs **several aggregation methods on the same systems** as one "
-            "reproducible campaign. It mirrors every Aggregate option (WCG "
-            "search, time step, orbital dynamics, grid) — set once, applied to "
-            "all selected methods. The form is **persisted** between visits.\n\n"
-            "Each child run shares a `campaign_id` and rolls up in the Campaign "
-            "dashboard."
-        ),
-    },
-    {
         "page_id": "status",
         "page": "pages/7_Status.py",
         "title": "Watch the run",
@@ -104,17 +91,6 @@ STEPS: list[dict[str, str]] = [
             "CCDF (log-y), normative percentiles, time series and geometry on "
             "the globe. You can **upload reference results `.mdb`** files to "
             "overlay their CCDF curves for comparison."
-        ),
-    },
-    {
-        "page_id": "campaign",
-        "page": "pages/9_Campaign.py",
-        "title": "Campaign dashboard",
-        "message": (
-            "Aggregated view of every run sharing a `campaign_id`: per-child "
-            "status / progress / metrics, and a one-click **XLSX export** "
-            "(campaign + runs + params sheets) for archival. Pick a child run "
-            "to jump to its Status/Results."
         ),
     },
     {

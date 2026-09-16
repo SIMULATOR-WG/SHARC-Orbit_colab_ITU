@@ -115,3 +115,37 @@ def intervals_touch_range(
     return any(float(a) <= hi and lo <= float(b) for a, b in intervals)
 
 
+
+
+def slider_stops(extra: "list[float] | None" = None) -> list[float]:
+    """Frequencies a range slider may stop on, ascending, in GHz.
+
+    A linear slider is useless here: the catalogue runs from 0.03 to 333 GHz, so
+    the whole Ku band is under 2% of the track and cannot be grabbed. Instead of
+    a continuous axis this offers the edges that actually mean something — every
+    letter-band boundary and every Article 22 band edge — plus whatever extra
+    values the caller passes (typically the extremes of the current selection).
+    Dragging therefore lands on a real boundary, and the text boxes beside it
+    stay available for a frequency that is not one.
+    """
+    stops: set[float] = set()
+    for _name, lo, hi in LETTER_BANDS:
+        stops.add(float(lo))
+        if hi != float("inf"):
+            stops.add(float(hi))
+    for lo, hi in frequency_presets().values():
+        stops.add(float(lo))
+        stops.add(float(hi))
+    for v in (extra or []):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            stops.add(round(f, 6))
+    return sorted(stops)
+
+
+def nearest_stop(value: float, stops: "list[float]") -> float:
+    """The stop closest to ``value``; ``stops`` must be non-empty."""
+    return min(stops, key=lambda s: abs(s - float(value)))

@@ -208,3 +208,38 @@ def test_locate_srs_split_parts(tmp_path: Path):
     single.write_bytes(b"x")
     catalog, grp = locate_srs_parts(single)
     assert catalog == grp == single
+
+
+def test_touching_band_edges_are_not_a_shared_band():
+    """10.7-12.75 against 12.75-14.5 share an edge, not a band.
+
+    The zero-width intersection used to be reported on the page as a common
+    occupied band and printed as "12.750-12.750 GHz".
+    """
+    from streamlit_app.lib.br_occupancy import intersect_sets  # noqa: PLC0415
+
+    assert intersect_sets([(10.7, 12.75)], [(12.75, 14.5)]) == []
+    assert intersect_sets([(10.7, 12.75)], [(12.0, 14.5)]) == [(12.0, 12.75)]
+    # A real but very narrow overlap still counts.
+    assert intersect_sets([(10.7, 12.75)], [(12.7499, 14.5)]) == [(12.7499, 12.75)]
+
+
+def test_sns_catalog_survives_a_fresh_install(tmp_path, monkeypatch):
+    """No meta file, no catalogue: return nothing, do not raise.
+
+    ``Path("")`` is ``PosixPath(".")``, which always exists, so an empty "mdb"
+    entry sent the loader off to re-index the current working directory as an
+    SRS database and the page died with a traceback before the setup card that
+    tells the user what to do could render.
+    """
+    from streamlit_app.lib import br_occupancy as mod  # noqa: PLC0415
+
+    monkeypatch.setattr(mod, "SNS_META", tmp_path / "absent_meta.json")
+    monkeypatch.setattr(mod, "SNS_CATALOG", tmp_path / "absent_catalog.json")
+    assert mod.sns_meta() == {}
+    assert mod.load_sns_catalog() == []
+
+    # Meta present but with an empty path is the same trap.
+    (tmp_path / "absent_meta.json").write_text(
+        '{"mdb": "", "n_notice_total": 1, "select_logic": 0}')
+    assert mod.load_sns_catalog() == []
