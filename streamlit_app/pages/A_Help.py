@@ -131,7 +131,7 @@ st.markdown(
     "§D.4.7 dual time step, and orbital dynamics."
 )
 st.markdown(
-    "**Brazil occupancy** — survey of licensed / filed frequency "
+    "**National occupancy** — survey of licensed / filed frequency "
     "occupancy in Brazil. Refresh pulls Anatel `satelites.zip` and the "
     "latest Space IFIC SNS from ITU. Selecting systems shows occupied "
     "bands on the same shared-axis strip chart as Aggregate, including "

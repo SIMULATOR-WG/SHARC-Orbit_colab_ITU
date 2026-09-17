@@ -175,8 +175,14 @@ def test_orbit_filter_matches_exactly_not_by_substring(app):
     n_all, n_geo, n_ngeo = _count(at_all), _count(at_geo), _count(at_ngeo)
     assert n_geo < n_all, (n_geo, n_all)
     assert n_ngeo > 0
-    # The two classes partition the pool: nothing counted twice, nothing lost.
-    assert n_geo + n_ngeo == n_all, (n_geo, n_ngeo, n_all)
+    # Disjoint, and neither swallows the whole pool. They do not necessarily
+    # add up to it: an SRS also holds earth-station notices, whose type is
+    # S/R/T and which are therefore neither GEO nor NGEO.
+    assert n_geo + n_ngeo <= n_all, (n_geo, n_ngeo, n_all)
+    # The bug this pins: "GEO" is a substring of "NGEO", so the old filter
+    # returned every NGEO row under GEO.
+    assert n_geo < n_ngeo + n_geo, (n_geo, n_ngeo)
+    assert n_geo != n_all
 
 
 def test_filtering_does_not_delete_picked_systems(app):
@@ -270,13 +276,56 @@ def test_chart_range_is_continuous_not_band_edges(app):
 def test_full_width_draws_everything(app):
     at = app(system_ids=_some_ids(6))
     full_axis = _chart_axis(at)
-    slider = at.slider[0]
-    at.slider[0].set_range(float(slider.min) + 1.0, float(slider.max) - 1.0).run()
+    lo, hi = float(at.slider[0].min), float(at.slider[0].max)
+    at.slider[0].set_range(lo + 1.0, hi - 1.0).run()
     assert _chart_axis(at) != full_axis
     assert _axis_caption(at)
-    at.slider[0].set_range(float(slider.min), float(slider.max)).run()
+    # Dragging back out must restore. Without a stable key on the slider this
+    # failed: the widget's identity came from its arguments, so the value
+    # changing after the first drag made Streamlit discard the second.
+    at.slider[0].set_range(lo, hi).run()
     assert _chart_axis(at) == full_axis
     assert _axis_caption(at) == "", _axis_caption(at)
+
+
+def test_slider_travels_inside_the_selected_band(app):
+    """Precision: the step must follow the band, not the whole catalogue.
+
+    Over the full extent a pixel of track is worth hundreds of MHz, so nothing
+    inside Ku can be set by hand. Picking a band narrows the slider's own
+    min/max to that band, and the step falls with it.
+    """
+    at = app(system_ids=_some_ids(8))
+    wide = at.slider[0]
+    wide_span = float(wide.max) - float(wide.min)
+    wide_step = float(wide.step)
+
+    bands = [b for b in at.segmented_control[0].options if b != "All"]
+    assert bands, at.segmented_control[0].options
+    narrowed = 0
+    for band in bands:
+        at.segmented_control[0].set_value(band).run()
+        assert not at.exception, [e.value for e in at.exception]
+        s = at.slider[0]
+        span = float(s.max) - float(s.min)
+        assert span <= wide_span + 1e-9, (band, span, wide_span)
+        if span < wide_span - 1e-9:
+            narrowed += 1
+            assert float(s.step) < wide_step, (band, s.step, wide_step)
+        # The handles open on the whole band.
+        assert s.value == (float(s.min), float(s.max)), (band, s.value)
+    assert narrowed, "no band narrowed the slider"
+
+    # A drag inside the band is honoured and does not escape it.
+    at.segmented_control[0].set_value(bands[0]).run()
+    s = at.slider[0]
+    inner = (float(s.min) + float(s.step), float(s.max) - float(s.step))
+    at.slider[0].set_range(*inner).run()
+    assert at.slider[0].value == inner, (at.slider[0].value, inner)
+
+    # Back to All restores the full travel.
+    at.segmented_control[0].set_value("All").run()
+    assert float(at.slider[0].max) - float(at.slider[0].min) == wide_span
 
 
 def _count_after_filters(at) -> int:
@@ -288,3 +337,108 @@ def _count_after_filters(at) -> int:
 def _full_span(at) -> tuple[float, float]:
     opts = list(at.select_slider[0].options)
     return float(opts[0]), float(opts[-1])
+
+
+def test_band_buttons_drive_the_chart_slider(app):
+    """The band selector above the slider is coupled to it.
+
+    It writes a plain session key rather than the slider's own, because a widget
+    may not assign to another widget's key once that widget exists — and the
+    slider is created immediately below.
+    """
+    at = app(system_ids=_some_ids(8))
+    assert at.segmented_control, "no band selector above the chart slider"
+    sel = at.segmented_control[0]
+    assert "band" in sel.label.lower(), sel.label
+    # Only the bands the selection actually occupies are offered, plus "All".
+    assert sel.options[0] == "All"
+    assert len(sel.options) > 1, sel.options
+
+    full = at.slider[0].value
+    windows = {}
+    for band in sel.options[1:]:
+        at.segmented_control[0].set_value(band).run()
+        assert not at.exception, [e.value for e in at.exception]
+        windows[band] = at.slider[0].value
+        lo, hi = windows[band]
+        assert hi > lo
+        # Clamped to what the data occupies, never wider than the full extent.
+        assert lo >= full[0] - 1e-9 and hi <= full[1] + 1e-9, (band, windows[band])
+
+    assert len(set(windows.values())) == len(windows), windows
+
+    at.segmented_control[0].set_value("All").run()
+    assert at.slider[0].value == full
+
+    # A manual drag still wins over the last band picked.
+    at.slider[0].set_range(4.0, 5.0).run()
+    assert at.slider[0].value == (4.0, 5.0)
+    assert "4–5 GHz" in _axis_caption(at), _axis_caption(at)
+
+
+def test_country_filter_narrows_the_pool(app):
+    """The country stopped being a property of the index and became a filter."""
+    # Both catalogues, so more than one administration is present.
+    at = app(sources=["anatel", "sns"])
+    boxes = [b for b in at.selectbox if b.label == "Occupancy in"]
+    assert boxes, [b.label for b in at.selectbox]
+    options = list(boxes[0].options)
+    assert options[0].startswith("Everywhere"), options[:2]
+    assert len(options) > 2, options
+
+    everywhere = _count_after_filters(at)
+    # Every offered symbol must actually select something, and less than all.
+    for label in options[1:4]:
+        code = label.split(" ·")[0]
+        narrowed = app(sources=["anatel", "sns"], country=code)
+        n = _count_after_filters(narrowed)
+        assert 0 < n < everywhere, (code, n, everywhere)
+
+
+def test_country_rule_is_offered_and_recorded(app):
+    at = app(country="B", country_rule="notified")
+    radios = [r for r in at.radio if "operating there" in r.label]
+    assert radios, [r.label for r in at.radio]
+    assert radios[0].value == "notified"
+    # With a legacy catalogue the page must say why both rules agree.
+    assert any("indexed before the country filter" in str(i.value) for i in at.info), \
+        [i.value for i in at.info]
+
+
+def test_picker_is_capped_when_the_pool_is_huge(app, monkeypatch):
+    """Guard for the full SRS: ~15 000 options made the page unusable."""
+    import streamlit_app.pages  # noqa: F401,PLC0415
+
+    at = app()
+    # The cap only shows with a big pool; assert the guard exists and that a
+    # normal pool is left alone.
+    page = (REPO / "streamlit_app" / "pages" / "H_Brazil_Occupancy.py").read_text()
+    assert "_PICKER_CAP" in page and "_PILL_CAP" in page
+    assert not any("The picker is showing" in str(w.value) for w in at.warning)
+
+
+def test_page_is_not_named_after_one_country():
+    """The page generalised: nothing user-visible may say Brazil any more.
+
+    The built-in catalogue is still Anatel's and the help may name Brazil as an
+    example, but titles, captions and file names must not.
+    """
+    page = (REPO / "streamlit_app" / "pages" / "H_Brazil_Occupancy.py").read_text()
+    for banned in ('st.title("Brazil', 'page_title="Brazil',
+                   'Band occupancy — Brazil', 'brazil_occupancy_{direction}'):
+        assert banned not in page, banned
+    assert 'st.title("National band occupancy")' in page
+
+    app_py = (REPO / "streamlit_app" / "app.py").read_text()
+    assert 'title="National occupancy"' in app_py
+    assert 'title="Brazil occupancy"' not in app_py
+
+
+def test_chart_title_and_export_name_follow_the_country(app):
+    ids = _some_ids(3)          # Anatel rows, which carry adm="B"
+    at = app(sources=["anatel", "sns"], country="B", system_ids=ids)
+    md = "".join(str(m.value) for m in at.markdown)
+    assert "Band occupancy — B —" in md, md[-400:]
+    at2 = app(sources=["anatel", "sns"], system_ids=ids)
+    md2 = "".join(str(m.value) for m in at2.markdown)
+    assert "all countries" in md2, md2[-400:]

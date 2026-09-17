@@ -11,6 +11,7 @@ Parsed catalogs are cached under ``streamlit_app/data/br_occupancy/``.
 """
 from __future__ import annotations
 
+import io
 import json
 import re
 import shutil
@@ -52,14 +53,25 @@ ANATEL_META = CACHE_DIR / "anatel_meta.json"
 SNS_META = CACHE_DIR / "sns_meta.json"
 ANATEL_CATALOG = CACHE_DIR / "anatel_catalog.json"
 SNS_CATALOG = CACHE_DIR / "sns_catalog.json"
+# Registry of indexed filing catalogues. Until now the page held exactly ONE:
+# every ingest wrote the two files above, so indexing a second SRS destroyed
+# the first without saying so — the developer's own cache shows a weekly IFIC
+# indexed at 07:40 and overwritten by the full SRS at 09:59.
+SOURCES_DIR = CACHE_DIR / "sources"
+SOURCES_INDEX = SOURCES_DIR / "index.json"
 
-_UA = "SHARC-Orbit/1.0 (Brazil occupancy catalog)"
+_UA = "SHARC-Orbit/1.0 (national occupancy catalog)"
 _ADM_BRAZIL = "B"
 # ITU Preface special geographical areas that include Brazil.
 # XAA = worldwide; XR2 = ITU Region 2 (Americas). Not XR1 / XR3.
 _BRAZIL_IN_SERVICE = frozenset({"B", "XR2", "XAA"})
 # Bump when Brazil-selection rules change so a cached catalog is rebuilt.
-SNS_SELECT_LOGIC = 2
+SNS_SELECT_LOGIC = 3
+# The one select_logic a catalogue can be lifted out of without re-reading the
+# MDB: version 2 wrote earth-station bands in the wrong direction, and the two
+# lists are a plain swap. Pinned to the exact version so a later bump cannot
+# re-invert rows that are already right.
+_EARTH_DIR_FIXED_AT = 3
 _IFIC_NO_RE_NAME = re.compile(
     r"(?:ific|br[\s._-]*ific)[\s._-]*(\d{4})", re.I
 )
@@ -81,6 +93,17 @@ class OccupancySystem:
     ntc_id: str = ""
     ntc_type: str = ""
     adm: str = ""
+    # Country evidence, attached at index time so the filter can run AFTER
+    # indexing. The SRS locates a notice in four different ways and they do not
+    # agree in coverage: 15 909 of 15 909 notices carry a notifying
+    # administration, but only 2 186 carry a service area, so a filter built on
+    # service areas alone would lose most of the file.
+    ntwk_org: str = ""                              # inter/regional org, not a country
+    srv_ctry: list[str] = field(default_factory=list)   # service area covers these
+    srv_excl: list[str] = field(default_factory=list)   # ... explicitly excluded
+    es_ctry: list[str] = field(default_factory=list)    # earth stations in these
+    kind: str = ""                                  # "space" | "earth" | ""
+    source_id: str = ""                             # which indexed catalogue
     extra: dict[str, Any] = field(default_factory=dict)
 
     def intervals(self, direction: str) -> list[tuple[float, float]]:
@@ -92,6 +115,32 @@ class OccupancySystem:
         if direction == "both":
             return merge_intervals(d + u)
         return merge_intervals(d)
+
+    def country_codes(self, *, rule: str = "serves") -> set[str]:
+        """ITU symbols this system can be said to occupy spectrum in.
+
+        ``rule`` chooses how much evidence counts:
+          ``notified`` — only the notifying administration;
+          ``serves``   — plus the declared service area and earth-station
+                         countries, which is the reading the Brazil-only page
+                         used and the one that keeps a foreign filing that
+                         covers the country.
+
+        ``srv_excl`` is NOT subtracted here, and that is deliberate.
+        ``f_excl_api`` sits on ``srv_area(grp_id, ctry)``, so an exclusion
+        belongs to ONE frequency group, not to the notice: a filing whose
+        Ku group serves a country and whose Ka group excludes it does occupy
+        spectrum there. Subtracting at system level would drop it, which is a
+        granularity error, not a stricter reading — and it is what made an
+        earlier version of this method disagree with the shipped catalogue.
+        The excluded codes stay on the row as evidence for whoever needs the
+        detail.
+        """
+        out = {c for c in [(self.adm or "").upper()] if c}
+        if rule != "notified":
+            out |= {c.upper() for c in self.srv_ctry if c}
+            out |= {c.upper() for c in self.es_ctry if c}
+        return out
 
     def label(self) -> str:
         bits = [self.name]
@@ -210,11 +259,19 @@ def system_from_dict(d: dict[str, Any]) -> OccupancySystem:
         orbit=str(d.get("orbit") or ""),
         position=str(d.get("position") or ""),
         rf_bands=list(d.get("rf_bands") or []),
+        # Legacy national rows were written before the licensing administration
+        # was recorded; they are Anatel's, so they are Brazil's.
+        adm=str(d.get("adm") or (_ADM_BRAZIL if d.get("source") == "anatel" else "")),
+        ntwk_org=str(d.get("ntwk_org") or ""),
+        srv_ctry=[str(c) for c in (d.get("srv_ctry") or [])],
+        srv_excl=[str(c) for c in (d.get("srv_excl") or [])],
+        es_ctry=[str(c) for c in (d.get("es_ctry") or [])],
+        kind=str(d.get("kind") or ""),
+        source_id=str(d.get("source_id") or ""),
         downlink_ghz=[list(x) for x in (d.get("downlink_ghz") or [])],
         uplink_ghz=[list(x) for x in (d.get("uplink_ghz") or [])],
         ntc_id=str(d.get("ntc_id") or ""),
         ntc_type=str(d.get("ntc_type") or ""),
-        adm=str(d.get("adm") or ""),
         extra=dict(d.get("extra") or {}),
     )
 
@@ -384,6 +441,37 @@ def _split_csv_rows(text: str) -> tuple[list[str], list[list[str]]]:
     return header, rows[1:]
 
 
+# Direction vocabulary. The Anatel file says "Subida" / "Descida"; another
+# administration will say something else, and the old test — "subida, or starts
+# with u" — filed everything it did not recognise as downlink, silently. A word
+# that matches neither list is still treated as downlink (the conservative
+# reading for a band-occupancy survey) but is reported, so the user learns that
+# a column was not understood instead of reading a half-empty uplink chart.
+_UPLINK_WORDS = (
+    "subida", "uplink", "up-link", "up link", "up", "e-s", "e/s",
+    "earth-to-space", "earth to space", "ascendente", "ascending", "ul",
+)
+_DOWNLINK_WORDS = (
+    "descida", "downlink", "down-link", "down link", "down", "s-e", "s/e",
+    "space-to-earth", "space to earth", "descendente", "descending", "dl",
+)
+
+
+def _dir_match(value: str, words: "tuple[str, ...]") -> bool:
+    v = (value or "").strip().lower()
+    if not v:
+        return False
+    return v in words or any(w in v for w in words if len(w) > 2)
+
+
+def _is_uplink(value: str) -> bool:
+    return _dir_match(value, _UPLINK_WORDS)
+
+
+def _is_downlink(value: str) -> bool:
+    return _dir_match(value, _DOWNLINK_WORDS)
+
+
 def _col(header: list[str], *needles: str) -> int | None:
     lower = [h.lower() for h in header]
     for n in needles:
@@ -399,23 +487,42 @@ def _col(header: list[str], *needles: str) -> int | None:
     return None
 
 
-def parse_anatel_subfaixas_csv(text: str) -> list[OccupancySystem]:
+def parse_anatel_subfaixas_csv(text: str, *, adm: str = _ADM_BRAZIL) -> list[OccupancySystem]:
     header, body = _split_csv_rows(text)
     if not header:
         return []
-    i_op = _col(header, "Operador")
-    i_name = _col(header, "NomeEstacao_STEL_portal", "NomeEstacao")
-    i_num = _col(header, "NumEstacao_STEL_portal")
-    i_orbit = _col(header, "Tipo_orbita_STEL_portal", "Tipo_orbita")
-    i_pos = _col(header, "PosOrbital_STEL_portal", "PosOrbital")
-    i_rf = _col(header, "Banda_RF_estacao_STEL_portal", "Banda_RF")
-    i_dir = _col(header, "Sentido_STEL_portal", "Sentido")
-    i_lo = _col(header, "MedFrequenciaInicialMHz_STEL_portal")
-    i_hi = _col(header, "MedFrequenciaFinalMHz_STEL_portal")
-    i_valid = _col(header, "Validade_licença_estacao_espacial", "Validade")
+    # Anatel's own spellings first, then English equivalents, so an
+    # administration that produces the same table in its own language is read by
+    # meaning rather than by Anatel's exact Portuguese headers. The frequency
+    # columns are the ones that used to match one spelling only, and a file that
+    # named them differently failed whole — see the help entry for the contract.
+    i_op = _col(header, "Operador", "operator", "licensee")
+    i_name = _col(header, "NomeEstacao_STEL_portal", "NomeEstacao",
+                  "station", "station_name", "satellite", "name")
+    i_num = _col(header, "NumEstacao_STEL_portal", "station_id", "licence", "license")
+    i_orbit = _col(header, "Tipo_orbita_STEL_portal", "Tipo_orbita", "orbit")
+    i_pos = _col(header, "PosOrbital_STEL_portal", "PosOrbital",
+                 "orbital_position", "longitude", "position")
+    i_rf = _col(header, "Banda_RF_estacao_STEL_portal", "Banda_RF", "rf_band", "band")
+    i_dir = _col(header, "Sentido_STEL_portal", "Sentido", "direction", "link")
+    i_lo = _col(header, "MedFrequenciaInicialMHz_STEL_portal",
+                "freq_min_mhz", "frequency_min_mhz", "freq_min", "lower_mhz", "start_mhz")
+    i_hi = _col(header, "MedFrequenciaFinalMHz_STEL_portal",
+                "freq_max_mhz", "frequency_max_mhz", "freq_max", "upper_mhz", "stop_mhz")
+    i_valid = _col(header, "Validade_licença_estacao_espacial", "Validade",
+                   "valid_until", "expiry")
     if i_name is None or i_lo is None or i_hi is None:
-        raise ValueError("stel_satelites_subfaixas.csv is missing station/frequency columns")
+        missing = [n for n, i in (("station name", i_name),
+                                  ("lower frequency (MHz)", i_lo),
+                                  ("upper frequency (MHz)", i_hi)) if i is None]
+        raise ValueError(
+            "the licensed-station table is missing the mandatory column(s): "
+            + ", ".join(missing)
+            + ". Header seen: " + "; ".join(header[:12])
+            + ". See the page help for the required fields."
+        )
 
+    unknown_dir: set[str] = set()
     grouped: dict[str, OccupancySystem] = {}
     for row in body:
         def cell(idx: int | None) -> str:
@@ -439,14 +546,21 @@ def parse_anatel_subfaixas_csv(text: str) -> list[OccupancySystem]:
                 operator=cell(i_op),
                 orbit=cell(i_orbit).upper() or "GEO",
                 position=cell(i_pos),
+                # A licensed station is in the licensing country by definition.
+                # Without this the national catalogue carried no country at all
+                # and vanished under any country filter — the one source whose
+                # country is never in doubt.
+                adm=adm,
+                kind="space",
                 extra={"station_id": cell(i_num), "validity": cell(i_valid)},
             )
             grouped[sid] = sys
-        sentido = cell(i_dir).lower()
-        if "subida" in sentido or sentido.startswith("u"):
+        if _is_uplink(cell(i_dir)):
             sys.uplink_ghz.append([iv[0], iv[1]])
         else:
             sys.downlink_ghz.append([iv[0], iv[1]])
+            if not _is_downlink(cell(i_dir)):
+                unknown_dir.add(cell(i_dir).strip())
         rf = cell(i_rf)
         if rf and rf not in sys.rf_bands:
             sys.rf_bands.append(rf)
@@ -693,6 +807,54 @@ def locate_srs_parts(src: Path) -> tuple[Path, Path]:
     return one, one
 
 
+def group_upload_names(names: "list[str]") -> "list[list[str]]":
+    """Split dropped file names into independent catalogues.
+
+    The ITU ships one SRS as ``srsNNNN_part1of4.mdb`` … ``_part4of4.mdb``, and
+    those belong together. Two unrelated filings do not: dropped in one folder
+    they look like parts to :func:`locate_srs_parts`, which then picks the
+    first and indexes only that one, silently losing the rest. Grouping by the
+    part-name stem keeps a split SRS whole and gives every other file its own
+    catalogue.
+    """
+    groups: dict[str, list[str]] = {}
+    singles: list[list[str]] = []
+    for name in names:
+        stem = Path(name).name
+        m = re.search(r"(.*?)[_-]?part\d+of\d+", stem, re.I)
+        if m and m.group(1):
+            groups.setdefault(m.group(1).lower(), []).append(name)
+        else:
+            singles.append([name])
+    return [sorted(v) for v in groups.values()] + singles
+
+
+def stage_upload_groups(
+    files: "list[tuple[str, bytes]]", root: Path,
+) -> "list[tuple[str, Path]]":
+    """Write each independent catalogue into its own directory under ``root``.
+
+    Returns ``(name_hint, path)`` per group: the path is the single file when
+    the group holds one, and the directory when it holds split parts, which is
+    what the ingest functions expect.
+    """
+    by_name = dict(files)
+    out: list[tuple[str, Path]] = []
+    for i, group in enumerate(group_upload_names([n for n, _ in files])):
+        dest = root / f"g{i:02d}"
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in group:
+            (dest / Path(name).name).write_bytes(by_name[name])
+        hint = Path(group[0]).stem
+        if len(group) == 1:
+            out.append((hint, dest / Path(group[0]).name))
+        else:
+            out.append((re.sub(r"[_-]?part\d+of\d+", "", hint, flags=re.I), dest))
+    return out
+
+
 def unpack_srs_zip(zip_path: Path, dest_dir: Path) -> Path:
     """Unzip ``srsNNNN.zip`` (split MDBs) and return the catalog part."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -770,13 +932,31 @@ def select_brazil_ntcs(
     return keep
 
 
-def parse_sns_brazil(
+def parse_sns_catalog(
     mdb_path: Path,
     *,
     anatel_names: set[str] | None = None,
     grp_mdb: Path | None = None,
+    keep_only: str = "",
 ) -> tuple[list[OccupancySystem], dict[str, Any]]:
-    """Index notices that operate in Brazil (any notifying administration)."""
+    """Index an SRS, keeping every notice and attaching its country evidence.
+
+    The page used to index only what operated in Brazil — 999 of 15 909 — which
+    made the country a property of the INDEX and so unchangeable without a
+    re-index. Everything is kept now and the country becomes a filter over the
+    result; the expensive reads were already unconditional, so this costs no
+    extra time, only a larger cached catalogue.
+
+    ``keep_only`` restores the old behaviour for one ITU symbol (``"B"`` for
+    Brazil), which the tests use to show the two agree.
+    """
+    # Validated before any I/O: the compatibility path reproduces one rule and
+    # silently indexing everything instead would be worse than refusing.
+    if keep_only.upper() not in ("", _ADM_BRAZIL):
+        raise ValueError(
+            f"keep_only={keep_only!r} is not supported; pass '' to index the "
+            "whole SRS and filter by country afterwards."
+        )
     mdb_path = Path(mdb_path)
     grp_mdb = Path(grp_mdb) if grp_mdb is not None else mdb_path
     notice = _mdb_export(mdb_path, "notice")
@@ -810,24 +990,40 @@ def parse_sns_brazil(
     grp_rows = _mdb_export(grp_mdb, "grp")
     gid_to_ntc = {_cell(r, "grp_id"): _cell(r, "ntc_id") for r in grp_rows}
 
-    es_br: set[str] = set()
+    # Country evidence for EVERY notice, not just the ones in one country.
+    es_ctry: dict[str, set[str]] = {}
     try:
         for row in _mdb_export(mdb_path, "es_ctry"):
-            if _cell(row, "ctry").upper() == _ADM_BRAZIL:
-                ntc = _cell(row, "ntc_id")
-                if ntc:
-                    es_br.add(ntc)
+            ntc, code = _cell(row, "ntc_id"), _cell(row, "ctry").upper()
+            if ntc and code:
+                es_ctry.setdefault(ntc, set()).add(code)
     except Exception:  # noqa: BLE001
         pass
+    srv_ctry: dict[str, set[str]] = {}
+    srv_excl: dict[str, set[str]] = {}
+    try:
+        for row in _mdb_export(mdb_path, "srv_area"):
+            ntc = gid_to_ntc.get(_cell(row, "grp_id"), "")
+            code = _cell(row, "ctry").upper()
+            if not ntc or not code:
+                continue
+            excluded = _cell(row, "f_excl_api").strip().upper() == "Y"
+            (srv_excl if excluded else srv_ctry).setdefault(ntc, set()).add(code)
+    except Exception:  # noqa: BLE001
+        pass
+    # The compatibility sets are rebuilt with the ORIGINAL per-row predicate.
+    # Deriving them from the aggregated dicts above is not the same thing: a
+    # notice with one row (ctry=B, excl=N) and another (ctry=B, excl=Y) is a hit
+    # row-by-row but is cancelled by an aggregate subtraction, which cost
+    # exactly one notice of the 999 when measured against the cached catalogue.
+    es_br = {n for n, c in es_ctry.items() if _ADM_BRAZIL in c}
     srv_br: set[str] = set()
     try:
         for row in _mdb_export(mdb_path, "srv_area"):
-            if ctry_covers_brazil(
-                _cell(row, "ctry"), excl=_cell(row, "f_excl_api")
-            ):
-                ntc = gid_to_ntc.get(_cell(row, "grp_id"), "")
-                if ntc:
-                    srv_br.add(ntc)
+            if ctry_covers_brazil(_cell(row, "ctry"), excl=_cell(row, "f_excl_api")):
+                _n = gid_to_ntc.get(_cell(row, "grp_id"), "")
+                if _n:
+                    srv_br.add(_n)
     except Exception:  # noqa: BLE001
         pass
 
@@ -839,6 +1035,13 @@ def parse_sns_brazil(
         es_br_ntcs=es_br,
         anatel_names=wanted,
     )
+    if not keep_only:
+        # Everything, with the Brazil reasons kept where they apply so the
+        # provenance the page already shows does not disappear.
+        keep_reasons = {
+            _cell(r, "ntc_id"): keep_reasons.get(_cell(r, "ntc_id"), [])
+            for r in notice if _cell(r, "ntc_id")
+        }
     stats["n_adm_b"] = sum(1 for r in keep_reasons.values() if "adm_b" in r)
     stats["n_srv_br"] = sum(1 for r in keep_reasons.values() if "srv_br" in r)
     stats["n_es_br"] = sum(1 for r in keep_reasons.values() if "es_br" in r)
@@ -859,6 +1062,12 @@ def parse_sns_brazil(
             ntc_id=ntc,
             ntc_type=ntc_type,
             adm=_cell(row, "adm"),
+            ntwk_org=_cell(row, "ntwk_org"),
+            srv_ctry=sorted(srv_ctry.get(ntc, ())),
+            srv_excl=sorted(srv_excl.get(ntc, ())),
+            es_ctry=sorted(es_ctry.get(ntc, ())),
+            kind=("earth" if ntc_type in ("S", "R", "T")
+                  else "space" if ntc_type in ("G", "N") else ""),
             extra={
                 "prov": _cell(row, "prov"),
                 "ntf_rsn": _cell(row, "ntf_rsn"),
@@ -874,7 +1083,17 @@ def parse_sns_brazil(
         iv = mhz_to_ghz_interval(row.get("freq_min"), row.get("freq_max"))
         if iv is None:
             continue
-        if _cell(row, "emi_rcp").upper().startswith("R"):
+        # `emi_rcp` is written relative to the station the notice is FOR, so
+        # the same letter means opposite directions on the two kinds of notice:
+        # a satellite that receives is fed by an uplink, an earth station that
+        # receives is fed by a downlink. Reading every group with the space
+        # convention put every earth-station band in the wrong direction —
+        # 7 645 of the 15 909 SRS notices are earth stations, and an uploaded
+        # filing is mostly earth stations (86 of 87 in USASAT-NGSO-3series), so
+        # a Downlink filter over such a catalogue returned nothing at all.
+        receives = _cell(row, "emi_rcp").upper().startswith("R")
+        uplink = (not receives) if sys.kind == "earth" else receives
+        if uplink:
             sys.uplink_ghz.append([iv[0], iv[1]])
         else:
             sys.downlink_ghz.append([iv[0], iv[1]])
@@ -889,6 +1108,283 @@ def parse_sns_brazil(
     out.sort(key=lambda s: (s.name.lower(), s.ntc_id))
     stats["n_systems"] = len(out)
     return out, stats
+
+
+def parse_sns_brazil(
+    mdb_path: Path,
+    *,
+    anatel_names: set[str] | None = None,
+    grp_mdb: Path | None = None,
+) -> tuple[list[OccupancySystem], dict[str, Any]]:
+    """Brazil-only indexing — the behaviour before the country became a filter.
+
+    Kept so the change can be shown to be behaviour-preserving; new code should
+    call :func:`parse_sns_catalog` and filter afterwards.
+    """
+    return parse_sns_catalog(mdb_path, anatel_names=anatel_names,
+                             grp_mdb=grp_mdb, keep_only=_ADM_BRAZIL)
+
+
+# ── registry of indexed filing catalogues ───────────────────────────────────
+
+@dataclass
+class CatalogSource:
+    """One indexed filing catalogue: an SRS, a weekly IFIC, or an upload."""
+
+    id: str
+    label: str
+    kind: str = "srs"                  # "srs" | "ific"
+    n_systems: int = 0
+    n_notice_total: int = 0
+    fetched_at: str = ""
+    mdb: str = ""
+    ific_no: str = ""
+    enabled: bool = True
+
+    @property
+    def dir(self) -> Path:
+        return SOURCES_DIR / self.id
+
+    def describe(self) -> str:
+        bits = [f"{self.n_systems} system(s)"]
+        if self.n_notice_total:
+            bits.append(f"{self.n_notice_total} notices in the file")
+        if self.ific_no:
+            bits.append(f"IFIC {self.ific_no}")
+        if self.fetched_at:
+            bits.append(f"indexed {self.fetched_at.replace('T', ' ').replace('Z', ' UTC')}")
+        return " · ".join(bits)
+
+
+def source_id_for(meta: dict[str, Any]) -> str:
+    """A stable, readable id for a catalogue about to be registered.
+
+    Derived from what the file says about itself rather than from a content
+    hash: hashing part1of4 alone means reading 1.77 GB, which is minutes of
+    work to answer a question the metadata already answers.
+    """
+    ific = str(meta.get("ific_no") or "").strip()
+    kind = str(meta.get("kind") or "srs").strip() or "srs"
+    if ific:
+        return f"{kind}{ific}"
+    stem = Path(str(meta.get("mdb") or "")).stem or "source"
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", stem)[:48] or "source"
+
+
+def read_sources() -> list[CatalogSource]:
+    """Every registered catalogue, migrating the single legacy slot on first use."""
+    _migrate_legacy_sns()
+    rows = _read_json(SOURCES_INDEX)
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for d in rows:
+        if not isinstance(d, dict) or not d.get("id"):
+            continue
+        out.append(CatalogSource(**{
+            k: d.get(k, getattr(CatalogSource, k, None))
+            for k in ("id", "label", "kind", "n_systems", "n_notice_total",
+                      "fetched_at", "mdb", "ific_no", "enabled")
+            if k in d or k in ("id", "label")
+        }))
+    return out
+
+
+def _write_sources(sources: list[CatalogSource]) -> None:
+    SOURCES_DIR.mkdir(parents=True, exist_ok=True)
+    _write_json(SOURCES_INDEX, [asdict(s) for s in sources])
+
+
+def _migrate_legacy_sns() -> None:
+    """Fold the one pre-registry catalogue into the registry, once.
+
+    The old files are left where they are: a downgrade to an earlier build must
+    still find them, and they cost 0.7 MB.
+    """
+    if SOURCES_INDEX.exists():
+        return
+    cached = _read_json(SNS_CATALOG)
+    if not isinstance(cached, list) or not cached:
+        return
+    meta = sns_meta()
+    sid = source_id_for(meta)
+    src = CatalogSource(
+        id=sid,
+        label=str(meta.get("ific_no") and f"IFIC {meta['ific_no']}" or "Indexed SRS"),
+        kind=str(meta.get("kind") or "srs"),
+        n_systems=len(cached),
+        n_notice_total=int(meta.get("n_notice_total") or 0),
+        fetched_at=str(meta.get("fetched_at") or ""),
+        mdb=str(meta.get("mdb") or ""),
+        ific_no=str(meta.get("ific_no") or ""),
+    )
+    src.dir.mkdir(parents=True, exist_ok=True)
+    _write_json(src.dir / "catalog.json",
+                [{**d, "source_id": sid} for d in cached])
+    _write_json(src.dir / "meta.json", meta)
+    _write_sources([src])
+
+
+def _write_source(src: CatalogSource, catalog: list[OccupancySystem],
+                  meta: dict[str, Any]) -> CatalogSource:
+    """Register (or replace) one catalogue without touching the others."""
+    src.dir.mkdir(parents=True, exist_ok=True)
+    for sysm in catalog:
+        sysm.source_id = src.id
+        # Two catalogues share ntc_ids — 77 of the 174 weekly-IFIC notices also
+        # appear in the full SRS — so the id must name its source or one row
+        # silently shadows the other wherever systems are keyed by id.
+        if not sysm.id.startswith(f"sns:{src.id}:"):
+            sysm.id = f"sns:{src.id}:{sysm.ntc_id or sysm.name}"
+    _write_json(src.dir / "catalog.json", [asdict(s) for s in catalog])
+    meta = dict(meta)
+    meta["n_systems"] = len(catalog)
+    meta["fetched_at"] = meta.get("fetched_at") or _now_iso()
+    meta["select_logic"] = SNS_SELECT_LOGIC
+    _write_json(src.dir / "meta.json", meta)
+
+    src.n_systems = len(catalog)
+    src.n_notice_total = int(meta.get("n_notice_total") or 0)
+    src.fetched_at = str(meta["fetched_at"])
+    src.mdb = str(meta.get("mdb") or "")
+    src.ific_no = str(meta.get("ific_no") or "")
+    others = [s for s in read_sources() if s.id != src.id]
+    _write_sources([*others, src])
+    return src
+
+
+def _swap_earth_directions(rows: list[dict[str, Any]]) -> int:
+    """Undo the space-convention reading of `emi_rcp` on earth-station rows.
+
+    Catalogues indexed under select_logic < 3 stored every earth station's
+    bands in the opposite direction. The two lists are a plain swap, so the
+    correction is exact and needs no second pass over the MDB — which matters,
+    because re-indexing the whole SRS costs minutes and the MDB may be gone.
+    """
+    n = 0
+    for d in rows:
+        if d.get("kind") != "earth":
+            continue
+        if not d.get("downlink_ghz") and not d.get("uplink_ghz"):
+            continue
+        d["downlink_ghz"], d["uplink_ghz"] = (
+            d.get("uplink_ghz") or [], d.get("downlink_ghz") or [])
+        n += 1
+    return n
+
+
+def load_source_catalog(source_id: str) -> list[OccupancySystem]:
+    src_dir = SOURCES_DIR / source_id
+    rows = _read_json(src_dir / "catalog.json")
+    if not isinstance(rows, list):
+        return []
+    meta = _read_json(src_dir / "meta.json")
+    meta = meta if isinstance(meta, dict) else {}
+    try:
+        logic = int(meta.get("select_logic") or 0)
+    except (TypeError, ValueError):
+        logic = 0
+    if logic == _EARTH_DIR_FIXED_AT - 1:
+        _swap_earth_directions(rows)
+        meta["select_logic"] = _EARTH_DIR_FIXED_AT
+        _write_json(src_dir / "catalog.json", rows)
+        _write_json(src_dir / "meta.json", meta)
+    return [system_from_dict(d) for d in rows]
+
+
+def remove_source(source_id: str) -> bool:
+    """Forget one catalogue. The indexed MDB on disk is left alone."""
+    keep = [s for s in read_sources() if s.id != source_id]
+    if len(keep) == len(read_sources()):
+        return False
+    shutil.rmtree(SOURCES_DIR / source_id, ignore_errors=True)
+    _write_sources(keep)
+    return True
+
+
+# ── national catalogue providers ────────────────────────────────────────────
+# A provider is DATA, not page copy: one administration that publishes its
+# licensed stations at a fetchable URL in the documented table shape. The page
+# renders whatever is in this table, so adding a country is a dict entry and
+# never a line of interface text. Today Brazil is the only one published in a
+# form the parser can read directly; that is a fact about the world, not a
+# property of the tool.
+NATIONAL_PROVIDERS: dict[str, dict[str, str]] = {
+    "anatel": {
+        "label": "Anatel (Brazil)",
+        "adm": "B",
+        "url": ANATEL_ZIP_URL,
+    },
+}
+
+
+def national_providers() -> list[dict[str, str]]:
+    """Fetchable national catalogues, as ``{id, label, adm, url}`` rows."""
+    return [{"id": k, **v} for k, v in NATIONAL_PROVIDERS.items()]
+
+
+def pick_catalog_csv(zip_bytes: bytes) -> tuple[str, bytes]:
+    """The licensed-station table inside an uploaded zip, as (name, bytes).
+
+    Anatel's zip carries eight members and only one of them is the sub-band
+    table, so a foreign zip is read the same way: the Anatel member name first,
+    then the only CSV, then the largest one — and an explicit error rather than
+    a guess when there is no CSV at all.
+    """
+    with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+        names = [n for n in zf.namelist() if not n.endswith("/")]
+        exact = [n for n in names if Path(n).name.lower() == ANATEL_SUBFAIXAS.lower()]
+        csvs = [n for n in names if n.lower().endswith(".csv")]
+        if exact:
+            pick = exact[0]
+        elif len(csvs) == 1:
+            pick = csvs[0]
+        elif csvs:
+            pick = max(csvs, key=lambda n: zf.getinfo(n).file_size)
+        else:
+            raise ValueError(
+                "that zip holds no .csv: " + (", ".join(names[:6]) or "(empty)")
+            )
+        return pick, zf.read(pick)
+
+
+def register_national_csv(
+    text: str, *, label: str, adm: str, slug: str = "",
+) -> CatalogSource:
+    """Index a licensed-station table supplied by an administration.
+
+    Same registry as the filing catalogues, with ``kind="national"``: one page
+    then lists every loaded dataset in one place, and a national catalogue can
+    be removed the same way. ``adm`` is the ITU symbol of the licensing
+    administration, which is what makes the rows findable by country.
+
+    Raises ``ValueError`` when the table cannot be trusted, rather than drawing
+    a plausible-looking wrong chart.
+    """
+    catalog = parse_anatel_subfaixas_csv(text, adm=(adm or "").strip().upper())
+    if not catalog:
+        raise ValueError("no station rows found in that table")
+    edges = [e for s_ in catalog for iv in s_.intervals("both") for e in iv]
+    if not edges:
+        raise ValueError("no usable frequency pair in that table")
+    # The GHz-instead-of-MHz trap: it parses cleanly and draws bands a thousand
+    # times too narrow, so nothing downstream would ever complain.
+    if max(edges) < 1.0:
+        raise ValueError(
+            f"the highest frequency in that table is {max(edges) * 1000:.3f} MHz. "
+            "Frequencies must be in MHz — a file in GHz parses without error "
+            "and draws bands a thousand times too narrow."
+        )
+    sid = re.sub(r"[^A-Za-z0-9_-]+", "-", (slug or label or adm or "national")).strip("-")
+    sid = f"nat-{sid[:40].lower() or 'catalogue'}"
+    src = CatalogSource(id=sid, label=label or sid, kind="national")
+    meta = {
+        "kind": "national",
+        "adm": (adm or "").strip().upper(),
+        "n_notice_total": len(catalog),
+        "freq_max_mhz": round(max(edges) * 1000.0, 3),
+    }
+    return _write_source(src, catalog, meta)
 
 
 def _anatel_name_set() -> set[str]:
@@ -908,18 +1404,34 @@ def _write_sns_catalog(
     return meta
 
 
-def reindex_sns_mdb(mdb_path: Path, *, extra_meta: dict[str, Any] | None = None) -> dict[str, Any]:
+def reindex_sns_mdb(mdb_path: Path, *, extra_meta: dict[str, Any] | None = None,
+                    label: str = "", keep_only: str = "") -> dict[str, Any]:
+    """Index one SRS and REGISTER it, instead of overwriting the previous one.
+
+    ``keep_only='B'`` reproduces the old Brazil-only index; the default keeps
+    every notice so the country stays a filter.
+    """
     catalog_p, grp_p = locate_srs_parts(mdb_path)
-    catalog, stats = parse_sns_brazil(
+    catalog, stats = parse_sns_catalog(
         catalog_p, anatel_names=_anatel_name_set(), grp_mdb=grp_p,
+        keep_only=keep_only,
     )
-    stats.pop("kind", None)
+    kind = stats.pop("kind", "srs") or "srs"
     meta = {
         **stats,
         **(extra_meta or {}),
+        "kind": kind,
         "mdb": str(catalog_p),
         "grp_mdb": str(grp_p),
     }
+    sid = source_id_for(meta)
+    src = CatalogSource(
+        id=sid,
+        label=label or (f"IFIC {meta['ific_no']}" if meta.get("ific_no") else sid),
+        kind=kind,
+    )
+    _write_source(src, catalog, meta)
+    # The single-slot files stay in step so an older build still reads them.
     return _write_sns_catalog(catalog, meta)
 
 
@@ -969,13 +1481,13 @@ def extract_iso_from_zip(zip_path: Path, dest_dir: Path) -> Path:
     return dest
 
 
-def ingest_local_srs(src: Path) -> dict[str, Any]:
+def ingest_local_srs(src: Path, *, label: str = "") -> dict[str, Any]:
     """Index a complete SRS.mdb or a folder / split-part of the BR IFIC SRS."""
     src = Path(src).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
     catalog_p, grp_p = locate_srs_parts(src)
-    return reindex_sns_mdb(catalog_p, extra_meta={
+    return reindex_sns_mdb(catalog_p, label=label, extra_meta={
         "kind": "srs",
         "ific_no": ific_no_from_name(catalog_p.name) or ific_no_from_name(src.name),
         "ific_date": "",
@@ -986,14 +1498,14 @@ def ingest_local_srs(src: Path) -> dict[str, Any]:
     })
 
 
-def ingest_local_iso(src: Path) -> dict[str, Any]:
+def ingest_local_iso(src: Path, *, label: str = "") -> dict[str, Any]:
     """Extract SRS from a BR IFIC ISO, bookshop zip, or ``srsNNNN.zip``."""
     src = Path(src).expanduser()
     if not src.exists():
         raise FileNotFoundError(src)
     suffix = src.suffix.lower()
     if suffix in {".mdb", ".accdb"} or src.is_dir():
-        return ingest_local_srs(src)
+        return ingest_local_srs(src, label=label)
     SNS_DIR.mkdir(parents=True, exist_ok=True)
     dest_dir = SNS_DIR / "srs_local"
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1003,7 +1515,7 @@ def ingest_local_iso(src: Path) -> dict[str, Any]:
         kind = zip_kind(src)
         if kind == "srs":
             catalog = unpack_srs_zip(src, dest_dir)
-            return ingest_local_srs(catalog.parent)
+            return ingest_local_srs(catalog.parent, label=label)
         if kind != "iso":
             raise ValueError(f"No .iso or SRS .mdb inside {src.name}")
         extracted_iso = extract_iso_from_zip(src, SNS_DIR / "brific_iso")
@@ -1022,12 +1534,27 @@ def ingest_local_iso(src: Path) -> dict[str, Any]:
                 extracted_iso.unlink()
             except OSError:
                 pass
-    return ingest_local_srs(catalog.parent)
+    return ingest_local_srs(catalog.parent, label=label)
 
 
 def load_sns_catalog() -> list[OccupancySystem]:
     cached = _read_json(SNS_CATALOG)
     meta = sns_meta()
+    # The earth-station direction fix is a pure swap on rows already written,
+    # so it is applied in place rather than counted as staleness: re-indexing
+    # the whole SRS costs minutes and would be triggered by merely opening the
+    # page. Anything that really needs the MDB re-read still goes through the
+    # staleness branch below.
+    try:
+        _logic = int(meta.get("select_logic") or 0)
+    except (TypeError, ValueError):
+        _logic = 0
+    if isinstance(cached, list) and _logic == _EARTH_DIR_FIXED_AT - 1:
+        _swap_earth_directions(cached)
+        meta["select_logic"] = _EARTH_DIR_FIXED_AT
+        _write_json(SNS_CATALOG, cached)
+        _write_json(SNS_META, meta)
+        return [system_from_dict(d) for d in cached]
     stale = (
         meta.get("n_notice_total") is None
         or meta.get("select_logic") != SNS_SELECT_LOGIC
@@ -1059,6 +1586,25 @@ def anatel_meta() -> dict[str, Any]:
 
 def sns_meta() -> dict[str, Any]:
     return _read_json(SNS_META) or {}
+
+
+def load_filings(source_ids: "list[str] | None" = None) -> list[OccupancySystem]:
+    """Systems from the registered filing catalogues.
+
+    ``source_ids=None`` means every enabled one. Falls back to the legacy
+    single-slot catalogue when nothing is registered yet, so a cache written by
+    an older build still shows up.
+    """
+    srcs = [s for s in read_sources() if s.enabled]
+    if source_ids is not None:
+        wanted = set(source_ids)
+        srcs = [s for s in srcs if s.id in wanted]
+    if not srcs:
+        return load_sns_catalog() if source_ids is None else []
+    out: list[OccupancySystem] = []
+    for src in srcs:
+        out.extend(load_source_catalog(src.id))
+    return out
 
 
 def combined_catalog(*, sources: tuple[str, ...] = ("anatel", "sns")) -> list[OccupancySystem]:

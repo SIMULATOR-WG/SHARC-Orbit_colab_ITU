@@ -64,3 +64,27 @@ def test_active_pill_text_is_forced_too():
     i = _rule_start('button[data-testid="stBaseButton-pillsActive"] *')
     body = _CSS[i: _CSS.find("}", i)]
     assert "color" in body and "!important" in body
+
+
+def test_rejected_upload_stays_removable():
+    """The rejection sentence must not cover the delete button.
+
+    Streamlit puts the reason and the delete button in one row. Left to size
+    themselves, a sentence like "application/x-msaccess files are not allowed."
+    grew over the button and the only way to clear it was a page reload.
+    """
+    start = _rule_start('[data-testid="stFileUploaderFile"]')
+    body = _CSS[start: _CSS.find("}", start)]
+    assert "display: flex" in body
+
+    # The text side must be allowed to shrink and wrap...
+    i = _rule_start('[data-testid="stFileUploaderFile"] > *:not(:last-child)')
+    text_rule = _CSS[i: _CSS.find("}", i)]
+    assert "min-width: 0" in text_rule, "a flex item never shrinks without it"
+    assert "overflow-wrap: anywhere" in text_rule
+
+    # ...and the button must keep its own space, above anything that overflows.
+    j = _rule_start('[data-testid="stFileUploaderFile"] button')
+    btn_rule = _CSS[j: _CSS.find("}", j)]
+    assert "flex: 0 0 auto" in btn_rule
+    assert "z-index" in btn_rule

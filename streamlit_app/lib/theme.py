@@ -270,6 +270,40 @@ button[data-testid^="baseButton"]:has(p:empty) [data-testid="stIconMaterial"] {
     justify-content: center !important;
 }
 
+/* File uploader — a rejected file must stay removable.
+
+   Streamlit renders each chosen file as a row: name (or the rejection reason)
+   on the left, a delete button on the right. The reason for a rejection is a
+   whole sentence — "application/x-msaccess files are not allowed." — and with
+   the row's children free to size themselves it grew over the button, so the
+   only way to clear the error was to reload the page. Reserve the button's
+   space and let the message wrap instead. */
+[data-testid="stFileUploaderFile"] {
+    display: flex !important;
+    align-items: center !important;
+    gap: 8px !important;
+}
+[data-testid="stFileUploaderFile"] > *:not(:last-child) {
+    flex: 1 1 auto !important;
+    min-width: 0 !important;          /* without this a flex item never shrinks */
+    overflow-wrap: anywhere !important;
+    white-space: normal !important;
+}
+[data-testid="stFileUploaderFile"] button,
+[data-testid="stFileUploaderDeleteBtn"] button,
+[data-testid="stFileUploaderDeleteBtn"] {
+    flex: 0 0 auto !important;
+    position: relative !important;
+    z-index: 2 !important;            /* above any sibling that still overflows */
+}
+/* The rejection text itself, wherever Streamlit puts it in that row. */
+[data-testid="stFileUploaderFile"] small,
+[data-testid="stFileUploaderFile"] span {
+    white-space: normal !important;
+    overflow: visible !important;
+    text-overflow: clip !important;
+}
+
 /* Pills and segmented control — the MARKED state must look different.
 
    Streamlit renders each option as a button, so the generic button rule above

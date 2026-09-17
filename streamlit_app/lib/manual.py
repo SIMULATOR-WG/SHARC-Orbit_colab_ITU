@@ -191,42 +191,113 @@ _HELP: dict[str, str] = {
         "the multi-host walk-through."
     ),
     "brazil_occupancy": (
-        "**Brazil band occupancy**\n\n"
-        "Survey of frequency occupancy **in Brazil**, from two catalogs "
-        "the page can refresh itself:\n\n"
-        "* **Anatel** — open-data zip "
-        "(`espectro_e_orbita/satelites.zip`): licensed stations and "
-        "the STEL sub-bands (uplink / downlink, MHz).\n"
-        "* **ITU weekly IFIC / full SRS** — notices that **operate in "
-        "Brazil**, regardless of notifying administration (`adm` need "
-        "not be `B`). Kept when the service area covers Brazil "
-        "(country `B`, ITU Region 2 `XR2`, or worldwide `XAA`), an "
-        "earth station is in B, the name matches an Anatel licence, "
-        "or the filing is notified by Brazil. Intelsat, Eutelsat, "
-        "Starlink, … appear here if they serve Brazil.\n"
+        "**National band occupancy**\n\n"
+        "Survey of frequency occupancy in one country, from two kinds of "
+        "catalogue the page can refresh itself:\n\n"
+        "* **A national licensed catalogue** — optional: licensed stations and "
+        "the sub-bands they hold. Upload your administration's table in the "
+        "shape described under **Licensed-station table format** below, or "
+        "refresh one of the catalogues that are published in a fetchable "
+        "form. The page works without any of this; it then shows the filings "
+        "alone.\n"
+        "* **ITU weekly IFIC / full SRS** — the filings. The whole SRS is "
+        "indexed, and the **country is a filter**, not a property of the "
+        "index: each notice carries its notifying administration, its "
+        "declared service area and the countries of its earth stations, "
+        "so you choose the country on screen and can change it without "
+        "re-indexing. A filing counts as operating in a country either "
+        "because that administration notified it, or, under the looser "
+        "rule, because it serves the country — directly, through its ITU "
+        "Region (`XR1`/`XR2`/`XR3`) or worldwide (`XAA`). Symbols are the "
+        "ITU's, not ISO: `B` is Brazil, `F` France, `D` Germany, `G` the "
+        "United Kingdom.\n"
         "* **Full SRS** — paste the path to the BR IFIC ISO you already "
         "downloaded (or to `Databases/SRS_Data/SRS.mdb` extracted from "
         "it). The page pulls `SRS.mdb` out of the ISO with `xorriso` and "
-        "indexes systems that operate in Brazil. Wait until the ISO "
+        "indexes every notice in it. Wait until the ISO "
         "download has finished before indexing.\n\n"
-        "Filter by source / orbit / RF band, pick systems, and the "
+        "Filter by country, source, orbit and RF band, pick systems, and the "
         "page draws the same shared-axis occupancy strips as "
         "**Aggregate**, plus the **common overlap** of the selection. "
-        "This is a survey tool — it does not launch EPFD runs."
+        "This is a survey tool — it does not launch EPFD runs.\n\n"
+        "**Bringing your own licensed catalogue.** The national catalogue is "
+        "optional: the ITU side of the page works on its own. An "
+        "administration that wants its licensed stations drawn beside the "
+        "filings supplies one table in the shape of Anatel's "
+        "`stel_satelites_subfaixas.csv` — see **Licensed-station table "
+        "format** below for the fields."
+    ),
+    "national_catalog_format": (
+        "**Licensed-station table format**\n\n"
+        "One CSV, or a zip containing it. **One row per station per "
+        "sub-band**, not one row per station: a station with four sub-bands "
+        "has four rows, and the page merges them.\n\n"
+        "| Column | Meaning | Required | Example |\n"
+        "| --- | --- | --- | --- |\n"
+        "| station | Name of the licensed space station. Rows sharing a name "
+        "become one system. | **yes** | `STARONE C3` |\n"
+        "| freq_min_mhz | Lower edge of the sub-band, **in MHz**. | **yes** | "
+        "`10700` |\n"
+        "| freq_max_mhz | Upper edge of the sub-band, in MHz. | **yes** | "
+        "`11700` |\n"
+        "| direction | Which way the sub-band goes. | no, but without it "
+        "every row counts as downlink | `downlink` / `uplink` |\n"
+        "| operator | Licensee, shown under the station name. | no | "
+        "`EMBRATEL` |\n"
+        "| orbit | `GEO` or `NGEO`; drives the Orbit filter. | no | `GEO` |\n"
+        "| orbital_position | Longitude or slot, shown on the row. | no | "
+        "`70W` |\n"
+        "| rf_band | The administration's own band label. | no | `Ku` |\n"
+        "| station_id | Licence or station number. | no | `1234` |\n"
+        "| valid_until | Licence validity, carried as provenance. | no | "
+        "`2030-12-31` |\n\n"
+        "**Details that bite.**\n\n"
+        "* **Column names** may be in English as above, or Anatel's "
+        "Portuguese (`NomeEstacao_STEL_portal`, "
+        "`MedFrequenciaInicialMHz_STEL_portal`, `Sentido_STEL_portal`, …). "
+        "Matching is case-insensitive and also accepts a name that merely "
+        "contains the one listed.\n"
+        "* **Frequencies are MHz.** A file in GHz parses without complaint and "
+        "draws bands a thousand times too narrow; the page checks the range "
+        "and refuses a file whose highest frequency is under 1 000.\n"
+        "* **Decimal separator** may be a dot or a comma: `1635,725` and "
+        "`1635.725` are both read as 1 635.725 MHz.\n"
+        "* **Delimiter** is detected, semicolon or comma. **Encoding** may be "
+        "UTF-8 (with or without BOM), CP1252 or Latin-1.\n"
+        "* **Direction** is matched by word, not by language: `subida` / "
+        "`uplink` / `Earth-to-space` / `E-S` / `ascendente` all mean uplink, "
+        "and the descending equivalents mean downlink. A word in neither list "
+        "is filed as downlink and reported, so a column the page did not "
+        "understand is visible rather than silent.\n"
+        "* Columns the page does not use are ignored, so an export with extra "
+        "fields is fine."
     ),
 }
 
 
-def help_expander(page_id: str, *, label: str = "Help on this page") -> None:
+def help_expander(page_id: str, *, label: str = "Help on this page",
+                  extra: "tuple[str, ...] | None" = None) -> None:
     """Drop a collapsed expander on the page with its contextual snippet.
 
-    Silently no-op when ``page_id`` is unknown.
+    ``extra`` names further ``_HELP`` entries to fold in under the first, each
+    in its own nested expander — for reference material a page needs at hand
+    but should not open with, such as an input-file contract.
+
+    Silently no-op when ``page_id`` is unknown; unknown ``extra`` keys are
+    skipped the same way.
     """
     text = _HELP.get(page_id)
     if not text:
         return
     with st.expander(label, expanded=False, icon=":material/help_outline:"):
         st.markdown(text)
+        for key in (extra or ()):
+            body = _HELP.get(key)
+            if not body:
+                continue
+            title = body.lstrip().split("\n", 1)[0].strip("* ")
+            with st.expander(title, expanded=False):
+                st.markdown(body)
         st.page_link(
             "pages/A_Help.py",
             label="Open full manual",

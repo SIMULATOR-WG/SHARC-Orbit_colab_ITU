@@ -180,8 +180,10 @@ PAGES = {
     "Examine": [
         st.Page("pages/3_Single_entry.py",  title="Single-entry",  icon=":material/looks_one:"),
         st.Page("pages/4_Aggregate.py",     title="Aggregate",     icon=":material/grid_view:"),
-        st.Page("pages/H_Brazil_Occupancy.py", title="Brazil occupancy",
-                icon=":material/cell_tower:", url_path="brazil_occupancy"),
+        st.Page("pages/H_Brazil_Occupancy.py", title="National occupancy",
+                # Vertical bars under a radio arc: occupancy is "how much of the
+                # spectrum is taken", not "there is a tower somewhere".
+                icon=":material/key_visualizer:", url_path="brazil_occupancy"),
     ],
     "Runs & results": [
         st.Page("pages/5_Launcher.py",      title="Launcher",      icon=":material/play_circle:",
