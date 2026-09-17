@@ -772,6 +772,7 @@ class PFDMaskMulti(PFDMask):
         self,
         masks_by_id: dict[int, PFDMask],
         mask_id_per_sat: list[int] | np.ndarray,
+        bw_correction_db_by_id: dict[int, float] | None = None,
     ) -> None:
         super().__init__()
         if not masks_by_id:
@@ -829,6 +830,44 @@ class PFDMaskMulti(PFDMask):
         self.ntc_id = primary.ntc_id
         self._dim = primary._dim
 
+        # Per-mask PFD→EPFD reference-bandwidth correction,
+        # 10·log10(RefBW_limit / RefBW_mask), added to the value this mask
+        # returns. OPT-IN: engines that already add a single run-wide
+        # ``pfd_bw_correction_db`` must leave this None, or the correction is
+        # counted twice. It exists because that run-wide scalar is derived from
+        # ``refbw_khz``, which this class inherits from the PRIMARY sub-mask: in
+        # a fused megaconstellation (Resolution 76 / method_3) every other
+        # filing's satellites would then be corrected with a bandwidth that is
+        # not theirs. Callers that pass this must pass
+        # ``pfd_bw_correction_db=0.0`` to the engine.
+        self._bw_corr_by_id: dict[int, float] = {
+            int(k): float(v) for k, v in (bw_correction_db_by_id or {}).items()
+        }
+        if self._bw_corr_by_id:
+            unknown_bw = set(self._bw_corr_by_id) - set(self._masks_by_id)
+            if unknown_bw:
+                raise ValueError(
+                    "bw_correction_db_by_id references unknown mask_id(s): "
+                    f"{sorted(unknown_bw)}."
+                )
+
+    def _bw_corr(self, mask_id: int) -> float:
+        """RefBW correction of one sub-mask (0.0 when not configured)."""
+        mid = int(mask_id)
+        if mid == -1:
+            mid = self._primary_id
+        return self._bw_corr_by_id.get(mid, 0.0)
+
+    @property
+    def has_bw_correction(self) -> bool:
+        """True when this mask applies its own per-sub-mask RefBW correction —
+        the engine's run-wide ``pfd_bw_correction_db`` must then be 0.0."""
+        return bool(self._bw_corr_by_id)
+
+    @property
+    def bw_correction_db_by_id(self) -> dict[int, float]:
+        return dict(self._bw_corr_by_id)
+
     @property
     def primary_mask_id(self) -> int:
         return self._primary_id
@@ -879,8 +918,11 @@ class PFDMaskMulti(PFDMask):
         sat_idx: int | None = None,
     ) -> float:
         if sat_idx is None:
-            return self.primary_mask.get_pfd(alpha_deg, lat_deg, delta_lon_deg)
-        return self.mask_for_sat(int(sat_idx)).get_pfd(alpha_deg, lat_deg, delta_lon_deg)
+            return (self.primary_mask.get_pfd(alpha_deg, lat_deg, delta_lon_deg)
+                    + self._bw_corr(self._primary_id))
+        mid = int(self._mask_id_per_sat[int(sat_idx)])
+        return (self.mask_for_sat(int(sat_idx)).get_pfd(alpha_deg, lat_deg, delta_lon_deg)
+                + self._bw_corr(mid))
 
     def get_pfd_batch(
         self,
@@ -899,7 +941,8 @@ class PFDMaskMulti(PFDMask):
             # No per-satellite identification — uses the primary mask (back-compat
             # for callers not yet migrated). In a real multi-mask scenario,
             # propagating sat_indices is mandatory for the normative correction.
-            return self.primary_mask.get_pfd_batch(alpha_deg, lat_deg, delta_lon_deg)
+            return (self.primary_mask.get_pfd_batch(alpha_deg, lat_deg, delta_lon_deg)
+                    + self._bw_corr(self._primary_id))
 
         sat_indices = np.asarray(sat_indices, dtype=np.int64).ravel()
         if sat_indices.size != n:
@@ -922,7 +965,7 @@ class PFDMaskMulti(PFDMask):
                 raise KeyError(f"PFDMaskMulti: mask_id={mid_int} missing in masks_by_id.")
             out[sel] = mask.get_pfd_batch(
                 alpha_deg[sel], lat_deg[sel], delta_lon_deg[sel],
-            )
+            ) + self._bw_corr(mid_int)
         return out
 
     def detect_wcg_theta_symmetry(self, tol_db: float = 1e-3) -> tuple[bool, str]:

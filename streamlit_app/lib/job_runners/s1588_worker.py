@@ -851,6 +851,7 @@ def _system_contribution_task(
     from src.antenna import create_gso_es_antenna  # type: ignore[import]
     from src.s1588_studies import run_epfd_at_geometry  # type: ignore[import]
     from src.s1588_studies.geometry import GeometryPoint  # type: ignore[import]
+    from src.pfd_mask import PFDMaskMulti  # type: ignore[import]
 
     cfg = _load_cfg(filing, common)
     constellation, mask_ids = create_constellation_for_config(cfg)
@@ -867,6 +868,20 @@ def _system_contribution_task(
         cfg, constellation, joint_ctx["dt"] * joint_ctx["num_steps"],
     )
     mask = _build_mask_for_sats(cfg, mask_ids)
+    # RefBW correction of THIS filing's mask (per sub-mask when the filing
+    # itself carries several), never the joint run's primary-mask scalar.
+    if isinstance(mask, PFDMaskMulti):
+        mask = PFDMaskMulti(
+            masks_by_id=mask.masks_by_id,
+            mask_id_per_sat=mask.mask_id_per_sat,
+            bw_correction_db_by_id={
+                mid: _bw_correction_db(cfg, m)
+                for mid, m in mask.masks_by_id.items()
+            },
+        )
+        bw_corr_task = 0.0
+    else:
+        bw_corr_task = _bw_correction_db(cfg, mask)
     antenna = create_gso_es_antenna(
         joint_ctx["es_diameter_m"], joint_ctx["es_freq_ghz"],
         joint_ctx["es_efficiency"], service=joint_ctx["es_service"],
@@ -882,7 +897,7 @@ def _system_contribution_task(
         time_step_s=joint_ctx["dt"],
         alpha0_deg=joint_ctx["alpha0_deg"],
         min_elevation_deg=joint_ctx["min_elevation_deg"],
-        pfd_bw_correction_db=joint_ctx["pfd_bw_correction_db"],
+        pfd_bw_correction_db=bw_corr_task,
         n_jobs=_task_n_jobs(cfg, common),
         max_co_freq_by_lat=max_co_freq_by_lat,
         strict_max_co_freq_total=joint_ctx["strict_max_co_freq_total"],
@@ -1305,6 +1320,8 @@ def _decompose_by_resimulation(
     bw_correction_db: float,
     per_system_eps0: list | None = None,
     per_system_alpha0: list | None = None,
+    per_system_caps: list | None = None,
+    gso_min_elevation_joint_deg: float | None = None,
 ) -> list[dict[str, Any]]:
     """Fallback decomposition: one full simulation per system at the joint WCG.
 
@@ -1330,16 +1347,35 @@ def _decompose_by_resimulation(
         "strict_exclusion_zone": caps0["strict_exclusion_zone"],
         "min_angle_at_es_deg": caps0["min_angle_at_es_deg"],
         "gso_min_elevation_deg": caps0["gso_min_elevation_deg"],
-        "pfd_bw_correction_db": bw_correction_db,
+        # Kept for diagnostics only: each task now derives its OWN filing's
+        # RefBW correction from its own mask (see _system_contribution_task).
+        "pfd_bw_correction_db_joint_primary": bw_correction_db,
     }
+    if gso_min_elevation_joint_deg is not None:
+        # Victim-side gate: the decomposition must reproduce the joint run's
+        # own εGSO, not any single filing's.
+        joint_ctx["gso_min_elevation_deg"] = float(gso_min_elevation_joint_deg)
+
+    def _ctx_for(i: int) -> dict[str, Any]:
+        """Joint context with THIS filing's own per-system parameters — the
+        same ones the joint pass applied to its satellites, so the parts
+        reproduce the whole."""
+        ctx = {**joint_ctx}
+        if per_system_alpha0 is not None:
+            ctx["alpha0_deg"] = float(per_system_alpha0[i])
+        if per_system_eps0 is not None:
+            ctx["min_elevation_deg"] = float(per_system_eps0[i])
+        if per_system_caps is not None:
+            ctx["strict_exclusion_zone"] = bool(
+                per_system_caps[i]["strict_exclusion_zone"]
+            )
+            ctx["min_angle_at_es_deg"] = float(
+                per_system_caps[i]["min_angle_at_es_deg"]
+            )
+        return ctx
+
     tasks = [
-        (f, common,
-         {**joint_ctx,
-          "alpha0_deg": float(per_system_alpha0[i])
-          if per_system_alpha0 is not None else alpha0,
-          "min_elevation_deg": float(per_system_eps0[i])
-          if per_system_eps0 is not None else min_elev},
-         per_system_nco[i])
+        (f, common, _ctx_for(i), per_system_nco[i])
         for i, f in enumerate(filings)
     ]
     costs = plan.filing_costs(filings, common, sim=True, wcga=False)
@@ -1505,6 +1541,37 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     es_antenna = _build_antenna(cfgs[0])
     alpha0 = float(cfgs[0]["non_gso"].get("alpha0_deg", 0.0))
 
+    # Victim ES per filing — for the WCGA only. The joint SIMULATION has one
+    # real victim ES (`es_antenna` above): that is physics, not a convention.
+    # The WCGA is not a joint quantity: §D3.1.2 runs it once per (mask, orbit)
+    # set and its score is PFD + Grel(φ), with Grel parameterised by D/λ —
+    # and λ is the OWNING filing's frequency (_build_antenna reads
+    # cfg["non_gso"]["frequency_ghz"], which apply_article22_limits_to_config
+    # re-clamps into each filing's own mask band). Scoring filing k's orbits
+    # with filing 0's λ makes each merged per-orbit maximum the argmax of a
+    # function no individual run ever evaluates.
+    per_system_antenna = [_build_antenna(c) for c in cfgs]
+    _victim_keys = {
+        (round(float(c["gso_es"]["antenna_diameter_m"]), 6),
+         round(float(c["gso_es"].get("antenna_efficiency", 0.99)), 6),
+         str(c["gso_es"].get("service", "FSS")).upper(),
+         round(float(c["non_gso"].get("frequency_ghz", 0.0) or 0.0), 6))
+        for c in cfgs
+    }
+    if len(_victim_keys) > 1:
+        _emit(
+            "WARN: [method_3] filings disagree on the victim ES (D, η, service, f): "
+            + " · ".join(
+                f"sys{i}: D={float(c['gso_es']['antenna_diameter_m']):g} m "
+                f"η={float(c['gso_es'].get('antenna_efficiency', 0.99)):g} "
+                f"{str(c['gso_es'].get('service', 'FSS')).upper()} "
+                f"f={float(c['non_gso'].get('frequency_ghz', 0.0) or 0.0):g} GHz"
+                for i, c in enumerate(cfgs)
+            )
+            + " — the joint WCGA uses each filing's OWN antenna; the joint "
+              "simulation still needs ONE victim and uses sys0's."
+        )
+
     # Joint time base (N, Δt_fine, Δt_coarse) — see _joint_time_base. Each
     # filing's own §D4 reference is dimensioned with the JOINT run's shared
     # es_antenna: its θ_3dB is what §D4.2/§D4.7 actually consume, and one
@@ -1532,6 +1599,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
 
     combined: list = []
     masks_by_id: dict[int, Any] = {}
+    mask_owner: dict[int, int] = {}   # global mask id → owning filing index
     mask_id_per_sat: list[int] = []
     system_id_per_sat: list[int] = []
     next_gid = 1
@@ -1558,6 +1626,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
                       for k, lid in enumerate(sorted(mask_obj.masks_by_id))}
             for lid, gid in gid_of.items():
                 masks_by_id[gid] = mask_obj.masks_by_id[lid]
+                mask_owner[gid] = idx
             next_gid += len(gid_of)
             fallback_gid = gid_of[int(mask_obj.primary_mask_id)]
             mask_id_per_sat.extend(
@@ -1565,6 +1634,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
             )
         else:
             masks_by_id[next_gid] = mask_obj
+            mask_owner[next_gid] = idx
             mask_id_per_sat.extend([next_gid] * len(const))
             next_gid += 1
         system_id_per_sat.extend([idx] * len(const))
@@ -1572,22 +1642,102 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     if not combined:
         raise RuntimeError("method_3: no valid constellation")
 
-    pfd_multi = PFDMaskMulti(masks_by_id=masks_by_id, mask_id_per_sat=mask_id_per_sat)
+    # PFD→EPFD RefBW correction PER SUB-MASK, folded into the fused mask.
+    # The engine's run-wide `pfd_bw_correction_db` is derived from
+    # `PFDMaskMulti.refbw_khz`, which is the PRIMARY sub-mask's — so with
+    # filings declaring different RefBW every other filing's satellites entered
+    # the Step-23 sum corrected by a bandwidth that is not theirs. Each mask now
+    # carries 10·log10(RefBW_limit/RefBW_mask) against ITS OWN filing's
+    # Article-22 row, and the engine scalar goes to 0.0 (see sim_kwargs).
+    bw_correction_by_mask_id = {
+        gid: _bw_correction_db(cfgs[owner], masks_by_id[gid])
+        for gid, owner in mask_owner.items()
+    }
+    pfd_multi = PFDMaskMulti(
+        masks_by_id=masks_by_id,
+        mask_id_per_sat=mask_id_per_sat,
+        bw_correction_db_by_id=bw_correction_by_mask_id,
+    )
+    if len({round(v, 6) for v in bw_correction_by_mask_id.values()}) > 1:
+        _emit("[method_3] per-mask RefBW correction: " + " · ".join(
+            f"mask{gid}(sys{mask_owner[gid]})={v:+.2f} dB"
+            for gid, v in sorted(bw_correction_by_mask_id.items())
+        ))
 
     # MAX_CO_FREQ (Steps 19-22), per filing — applied PARTITIONED by system
     # (below, via system_id_per_sat) so each constellation's own SRS sat_oper
     # cap is respected instead of silently becoming "unlimited" (see
-    # _s1503_normative_caps docstring). caps0 covers the OR/exclusion-zone
-    # gates, which are aggregate-wide non-normative extensions (not exposed
-    # per filing in the UI), same convention as alpha0/es_antenna above.
-    caps0 = _s1503_normative_caps(cfgs[0])
-    per_system_nco = [_s1503_normative_caps(c)["max_co_freq_by_lat"] for c in cfgs]
+    # _s1503_normative_caps docstring). The WCGA below uses per_system_caps
+    # (εGSO / exclusion-zone gate of the ORBIT's own filing); caps0 remains the
+    # run-wide value for the joint simulation, whose engine still takes these
+    # three as scalars (gso_min_elevation_deg / strict_exclusion_zone /
+    # min_angle_at_es_deg have no *_per_system counterpart in epfd_calculator).
+    per_system_caps = [_s1503_normative_caps(c) for c in cfgs]
+    caps0 = per_system_caps[0]
+    per_system_nco = [c["max_co_freq_by_lat"] for c in per_system_caps]
+    # Step 18 bullet ② on/off and the Step-21 minimum separation angle at the
+    # ES are both per filing; the engine takes them per system (expanded to a
+    # per-satellite array / keyed by system id) so no filing's reading governs
+    # another's satellites.
+    per_system_strict_excl = [bool(c["strict_exclusion_zone"]) for c in per_system_caps]
+    per_system_min_angle = [float(c["min_angle_at_es_deg"]) for c in per_system_caps]
+    # εGSO is NOT a per-system quantity: it gates the VICTIM geometry
+    # (elevation of the GSO satellite seen from the GSO ES), which is one
+    # geometry for the whole joint run — and the gate zeroes the WHOLE step,
+    # every system's contribution with it. With filings declaring different
+    # values the only defensible resolution is the LEAST restrictive: taking
+    # filing 0's would let it silently delete the other three systems' EPFD at
+    # low GSO elevations.
+    _gso_min_elev_vals = [float(c["gso_min_elevation_deg"]) for c in per_system_caps]
+    gso_min_elev_joint = min(_gso_min_elev_vals) if _gso_min_elev_vals else -90.0
+    if len(set(round(v, 6) for v in _gso_min_elev_vals)) > 1:
+        _emit(
+            "[method_3] filings declare different εGSO ("
+            + " · ".join(f"sys{i}={v:g}°" for i, v in enumerate(_gso_min_elev_vals))
+            + f") — victim-side gate, joint run uses the least restrictive: {gso_min_elev_joint:g}°"
+        )
+    # strict_max_co_freq_total is a non-normative JOINT cap over standard+OR.
+    # It is inert in a fused run (the engine ignores it whenever the Steps 20-21
+    # selection is partitioned per system, which it always is here), but flag a
+    # disagreement rather than let cfgs[0] appear to decide.
+    if len({bool(c["strict_max_co_freq_total"]) for c in per_system_caps}) > 1:
+        _emit(
+            "WARN: [method_3] filings disagree on strict_max_co_freq_total "
+            + " · ".join(f"sys{i}={bool(c['strict_max_co_freq_total'])}"
+                         for i, c in enumerate(per_system_caps))
+            + " — ignored in a fused run: MAX_CO_FREQ is applied per system."
+        )
+    if len(set(per_system_strict_excl)) > 1 or len(set(per_system_min_angle)) > 1:
+        _emit("[method_3] per-system Step-18/21 extensions: " + " · ".join(
+            f"sys{i}: strict_excl={e} min_angle={a:g}°"
+            for i, (e, a) in enumerate(zip(per_system_strict_excl, per_system_min_angle))
+        ))
     # PFD->EPFD RefBW correction: Article-22 row (shared limit config, so
     # cfgs[0] serves) vs the fused mask's refbw_khz — which PFDMaskMulti
     # already reduces to the PRIMARY sub-mask's RefBW, the engine's own
     # convention. Sub-masks with differing RefBW keep the primary's (same
     # limitation as method_1's engine assembly).
     bw_correction_db = _bw_correction_db(cfgs[0], pfd_multi)
+
+    # Article-22 threshold curve per filing, for the WCGA ranking. §D3.1.2
+    # ranks by the MARGIN (epfd − EPFDThreshold[lat]), not by absolute epfd:
+    # under Notes 22.5C.4 / 22.5C.8 the limit ramps ≈5.3 dB with latitude, so
+    # the two argmaxes sit at different latitudes. Each filing's individual run
+    # builds this from its OWN article22_limits row (src/main.py:2390-2398).
+    from src.article22_tables import build_epfd_threshold_by_lat_fn  # type: ignore[import]
+
+    def _thr_fn(cfg: dict[str, Any]):
+        a22 = cfg.get("article22_limits") or {}
+        return build_epfd_threshold_by_lat_fn(
+            rr_reference=a22.get("rr_reference"),
+            rf_diam_cm=a22.get("_epfd_rf_diam_cm"),
+            reference_bandwidth_khz=float(
+                a22.get("reference_bandwidth_khz", 40.0) or 40.0
+            ),
+            curve=a22.get("limits"),
+        )
+
+    per_system_thr = [_thr_fn(c) for c in cfgs]
 
     # Dual time step (§D4.7) for the joint pass. The aggregate worker used to
     # write dual_time_step_mode into the cfg and then never build a
@@ -1626,42 +1776,93 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     else:
         _emit("[method_3] joint WCGA on combined constellation (S.1503-4 §D.3.1)")
         _emit_progress(20)
-        # Iterate unique orbits of the megaconstellation (key = a, e, i, mask_id)
+        # Unique (orbit, system, mask) sets of the megaconstellation.
+        # OrbitalElements declares a/e/i — `a_km` and `i_rad` never existed, so
+        # the old key rounded both to 0.0 and degenerated to (0, e, 0, mask_id):
+        # every shell sharing an eccentricity and a mask id collapsed onto the
+        # FIRST satellite in filing order, i.e. one filing's orbit stood in for
+        # another's. Now keyed like the per-filing driver (src/main.py:2434) —
+        # real elements + mask CONTENT hash — plus system_id, because α₀/ε₀/
+        # εGSO/antenna/threshold below are per filing: two filings sharing an
+        # orbit and a mask are still two different single-entry searches.
+        _mask_hash_cache: dict[int, str] = {}
+
+        def _mask_hash(sat_idx: int) -> str:
+            mid = int(mask_id_per_sat[sat_idx])
+            h = _mask_hash_cache.get(mid)
+            if h is None:
+                h = pfd_multi.mask_for_sat(sat_idx).content_hash()
+                _mask_hash_cache[mid] = h
+            return h
+
         unique_orbits: dict[tuple, int] = {}
         for idx, oe in enumerate(combined):
-            key = (round(getattr(oe, "a_km", 0.0), 3),
-                   round(getattr(oe, "e", 0.0), 6),
-                   round(getattr(oe, "i_rad", 0.0), 6),
-                   int(mask_id_per_sat[idx]))
+            key = (round(float(oe.a), 6),
+                   round(float(oe.e), 9),
+                   round(float(oe.i), 9),
+                   int(system_id_per_sat[idx]),
+                   _mask_hash(idx))
             if key not in unique_orbits:
                 unique_orbits[key] = idx
-        _emit(f"[method_3] {len(unique_orbits)} unique orbit(s) to evaluate")
-        step_deg = float(common.get("s1503_step_deg") or 1.0)
+        _emit(f"[method_3] {len(unique_orbits)} unique (a,e,i,system,mask) set(s) to evaluate")
+        # Normative grid is 0.1° (S.1503-4 §D3: "The search grid is in steps of
+        # 0.1°"); same fallback as the per-filing driver (src/main.py:2360).
+        step_deg = float(common.get("s1503_step_deg") or 0.1)
         # -1 = all cores (matches run_wcg_downlink's own default, src/main.py).
         # Safe here: the orbit loop below is sequential — nothing else runs
         # concurrently to oversubscribe against (unlike _run_at_geometry /
         # _system_contribution_task, dispatched many-at-once via Ray, which
         # correctly keep n_jobs=1 per task).
         n_jobs = int(cfgs[0]["simulation"].get("n_jobs", -1) or -1)
+
+        def _symmetric_for(sid: int, mask) -> bool:
+            """θ-symmetry of the OWNING filing, same precedence as main.py:2361:
+            explicit `s1503_symmetric_mask` wins, else auto-detect on that
+            filing's own mask, else full circle. Omitting it took
+            search_wcg_s1503's default True (half circle θ∈[0,π]) while the
+            individual runs searched the full circle — a strictly smaller
+            merged candidate set."""
+            v = (cfgs[sid].get("wcg_search") or {}).get("s1503_symmetric_mask")
+            if v is not None:
+                return bool(v)
+            try:
+                sym, _reason = mask.detect_wcg_theta_symmetry()
+                return bool(sym)
+            except Exception:  # noqa: BLE001
+                return False
+
+        _BIN_SIZE_DB = 0.1
         best_wcg = None
+        best_margin = -float("inf")
+        best_ang_vel = float("inf")
         for k, (key, ref_idx) in enumerate(unique_orbits.items()):
             oe_ref = combined[ref_idx]
             ref_mask = pfd_multi.mask_for_sat(ref_idx)
             ref_sid = int(system_id_per_sat[ref_idx])
             ref_nco = per_system_nco[ref_sid]
             _emit_progress(20 + 25.0 * (k + 1) / max(1, len(unique_orbits)))
+            # Every WCGA input below belongs to the ORBIT's OWN filing: the
+            # search is single-entry (§D3.1.2 "repeated over each such set"),
+            # so borrowing any of them from another filing evaluates a system
+            # against data that is not its own.
             wcg_kwargs = dict(
                 oe_ref=oe_ref, t_s=0.0,
-                pfd_mask=ref_mask, es_antenna=es_antenna,
-                # Owning filing's own ε₀/α₀ — same values the joint
-                # simulation applies to this orbit's satellites.
+                pfd_mask=ref_mask, es_antenna=per_system_antenna[ref_sid],
                 alpha0_deg=per_system_alpha0[ref_sid],
                 min_elevation_deg=per_system_eps0[ref_sid],
-                gso_min_elevation_deg=caps0["gso_min_elevation_deg"],
+                gso_min_elevation_deg=per_system_caps[ref_sid]["gso_min_elevation_deg"],
                 step_size_deg=step_deg, n_jobs=n_jobs,
+                symmetric_mask=_symmetric_for(ref_sid, ref_mask),
                 orbit_idx=k, total_orbits=len(unique_orbits),
                 max_co_freq_by_lat=ref_nco,
-                strict_exclusion_zone=caps0["strict_exclusion_zone"],
+                strict_exclusion_zone=per_system_caps[ref_sid]["strict_exclusion_zone"],
+                # PFD→EPFD RefBW correction of THIS filing's mask (the fused
+                # PFDMaskMulti reduces refbw to its primary sub-mask, so the
+                # run-wide bw_correction_db is wrong for every other filing);
+                # and THIS filing's Article-22 curve, so the ranking is the
+                # normative margin and not absolute EPFD.
+                pfd_bw_correction_db=_bw_correction_db(cfgs[ref_sid], ref_mask),
+                epfd_threshold_by_lat_fn=per_system_thr[ref_sid],
             )
             wcg_i = None
             # A cluster-dispatch fault (broken runtime env on a worker node)
@@ -1677,8 +1878,22 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
                     break
             if wcg_i is None:
                 continue
-            if best_wcg is None or wcg_i.epfd_dBW > best_wcg.epfd_dBW:
+            # §D3.1.2 cross-set rule, identical to the per-filing driver
+            # (src/main.py:2515-2531): rank by margin, 0.1 dB bin, ties broken
+            # by the LOWEST angular velocity. The old `>` on absolute EPFD
+            # dropped both the threshold and criterion 2.
+            cand_epfd = float(wcg_i.epfd_dBW)
+            cand_ang_vel = float(getattr(wcg_i, "angular_velocity_deg_s", math.inf))
+            cand_margin = cand_epfd - float(per_system_thr[ref_sid](wcg_i.es_lat_deg))
+            if (
+                best_wcg is None
+                or cand_margin > best_margin + _BIN_SIZE_DB
+                or (abs(cand_margin - best_margin) <= _BIN_SIZE_DB
+                    and cand_ang_vel < best_ang_vel)
+            ):
                 best_wcg = wcg_i
+                best_margin = cand_margin
+                best_ang_vel = cand_ang_vel
         if best_wcg is None:
             raise RuntimeError("method_3: joint WCGA produced no valid result")
         wcg = best_wcg
@@ -1720,12 +1935,19 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         # cores at this point.
         n_jobs=int(cfgs[0]["simulation"].get("n_jobs", -1) or -1),
         strict_max_co_freq_total=caps0["strict_max_co_freq_total"],
+        # Scalars kept only as the fallback for callers without the per-system
+        # lists below; every satellite is gated by its OWN filing's value.
         strict_exclusion_zone=caps0["strict_exclusion_zone"],
         min_angle_at_es_deg=caps0["min_angle_at_es_deg"],
-        gso_min_elevation_deg=caps0["gso_min_elevation_deg"],
-        pfd_bw_correction_db=bw_correction_db,
+        gso_min_elevation_deg=gso_min_elev_joint,
+        # 0.0: the RefBW correction now travels inside pfd_multi, per sub-mask
+        # (bw_correction_by_mask_id above). Passing the run-wide scalar here
+        # too would count it twice.
+        pfd_bw_correction_db=0.0,
         system_id_per_sat=np.asarray(system_id_per_sat, dtype=np.int64),
         max_co_freq_by_lat_per_system=per_system_nco,
+        strict_exclusion_zone_per_system=per_system_strict_excl,
+        min_angle_at_es_deg_per_system=per_system_min_angle,
         # Step-18 eligibility partitioned per system: each filing's own ε₀/α₀
         # gate its own satellites (method_1's criterion, kept in the fusion).
         min_elevation_deg_per_system=per_system_eps0,
@@ -1784,6 +2006,8 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
             bw_correction_db=bw_correction_db,
             per_system_eps0=per_system_eps0,
             per_system_alpha0=per_system_alpha0,
+            per_system_caps=per_system_caps,
+            gso_min_elevation_joint_deg=gso_min_elev_joint,
         )
     _emit_progress(88)
 
