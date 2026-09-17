@@ -132,8 +132,10 @@ st.markdown(
 )
 st.markdown(
     "**National occupancy** — survey of licensed / filed frequency "
-    "occupancy in Brazil. Refresh pulls Anatel `satelites.zip` and the "
-    "latest Space IFIC SNS from ITU. Selecting systems shows occupied "
+    "occupancy in one country. Load your administration's licensed-station "
+    "table, or refresh one of the published catalogues, and index an ITU "
+    "SRS or the weekly Space IFIC SNS; the country is a filter over the "
+    "result, not a property of the index. Selecting systems shows occupied "
     "bands on the same shared-axis strip chart as Aggregate, including "
     "the **common overlap**."
 )

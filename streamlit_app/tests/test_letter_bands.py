@@ -1,4 +1,4 @@
-"""Letter-band derivation for the Brazil occupancy filters.
+"""Letter-band derivation for the occupancy filters.
 
 Anatel publishes an ``rf_bands`` label per licensed station; ITU SNS notices
 carry no such column, so a filter built on that label can only see half the
@@ -17,7 +17,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from streamlit_app.lib.br_occupancy import (  # noqa: E402
+from streamlit_app.lib.occupancy import (  # noqa: E402
     LETTER_BANDS,
     LETTER_BAND_NAMES,
     intervals_touch_range,
@@ -101,7 +101,7 @@ def test_every_sns_notice_lands_in_at_least_one_band():
 
 def test_frequency_presets_lead_with_band_names():
     """The picker that fills the From/To boxes is a list of band names."""
-    from streamlit_app.lib.br_occupancy import frequency_presets  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import frequency_presets  # noqa: PLC0415
 
     presets = frequency_presets()
     names = [k.split(" ·")[0] for k in presets]
@@ -126,7 +126,7 @@ def test_frequency_presets_survive_a_missing_article22_table(monkeypatch):
     """The picker is a convenience: a broken import must not empty it."""
     import builtins
 
-    from streamlit_app.lib import br_occupancy as mod  # noqa: PLC0415
+    from streamlit_app.lib import occupancy as occ  # noqa: PLC0415
 
     real_import = builtins.__import__
 
@@ -136,7 +136,7 @@ def test_frequency_presets_survive_a_missing_article22_table(monkeypatch):
         return real_import(name, *a, **k)
 
     monkeypatch.setattr(builtins, "__import__", boom)
-    presets = mod.frequency_presets()
+    presets = occ.frequency_presets()
     assert [k.split(" ·")[0] for k in presets] == list(LETTER_BAND_NAMES[:-1])
 
 

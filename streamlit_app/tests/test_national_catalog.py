@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from streamlit_app.lib.br_occupancy import (  # noqa: E402
+from streamlit_app.lib.occupancy import (  # noqa: E402
     _decode_csv_bytes,
     parse_anatel_subfaixas_csv,
 )
@@ -41,7 +41,7 @@ def test_golden_csv_reproduces_the_cached_catalog():
         # Both sides go through the model, so fields added later — with
         # defaults, as the country evidence was — do not make an old cache look
         # like a parser change.
-        from streamlit_app.lib.br_occupancy import system_from_dict  # noqa: PLC0415
+        from streamlit_app.lib.occupancy import system_from_dict  # noqa: PLC0415
 
         cached = json.loads(_CACHED.read_text())
         # Compare on the keys the cache was written with. Fields added later —
@@ -128,7 +128,7 @@ def test_english_header_parses_the_same_as_the_portuguese_one():
     "Subida", "uplink", "UP", "Earth-to-space", "E-S", "ascendente",
 ])
 def test_uplink_vocabulary(word):
-    from streamlit_app.lib.br_occupancy import _is_uplink  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import _is_uplink  # noqa: PLC0415
 
     assert _is_uplink(word), word
 
@@ -137,20 +137,32 @@ def test_uplink_vocabulary(word):
     "Descida", "downlink", "space-to-earth", "S-E", "descendente",
 ])
 def test_downlink_vocabulary(word):
-    from streamlit_app.lib.br_occupancy import _is_downlink, _is_uplink  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import _is_downlink, _is_uplink  # noqa: PLC0415
 
     assert _is_downlink(word), word
     assert not _is_uplink(word), word
 
 
-def test_missing_column_error_names_what_is_missing():
-    """The old message named Anatel's file and said nothing about the column."""
+def test_missing_column_error_names_a_spelling_the_parser_ACCEPTS():
+    """The old message named Anatel's file and said nothing about the column.
+
+    Then it named the columns in prose — "lower frequency (MHz)" — which is not
+    an alias the parser knows, so a user who added exactly the header the error
+    asked for failed a second time. The message must quote something that
+    works, and this test proves it by feeding the named columns back in.
+    """
     with pytest.raises(ValueError) as exc:
         parse_anatel_subfaixas_csv("operator;station;rf_band\nOP;SAT;Ku")
     msg = str(exc.value)
-    assert "lower frequency (MHz)" in msg and "upper frequency (MHz)" in msg, msg
     assert "station name" not in msg, "station was present; do not report it missing"
     assert "help" in msg.lower()
+
+    named = [w for w in ("freq_min_mhz", "freq_max_mhz") if w in msg]
+    assert len(named) == 2, msg
+    rows = parse_anatel_subfaixas_csv(
+        "station;" + ";".join(named) + "\nSAT;10700;11700"
+    )
+    assert rows and rows[0].intervals("both") == [(10.7, 11.7)]
 
 
 def test_help_documents_the_format_the_parser_accepts():
@@ -185,14 +197,14 @@ def test_help_documents_the_format_the_parser_accepts():
     assert s.downlink_ghz == [[10.7, 11.7]]
 
     # And the page asks for it.
-    page = (REPO / "streamlit_app" / "pages" / "H_Brazil_Occupancy.py").read_text()
+    page = (REPO / "streamlit_app" / "pages" / "H_National_Occupancy.py").read_text()
     assert "national_catalog_format" in page
 
 
 # ── country evidence on every row ───────────────────────────────────────────
 
 def test_country_codes_reads_the_evidence_it_is_given():
-    from streamlit_app.lib.br_occupancy import OccupancySystem  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import OccupancySystem  # noqa: PLC0415
 
     s = OccupancySystem(
         id="x", source="sns", name="N", adm="USA",
@@ -211,7 +223,7 @@ def test_country_evidence_survives_a_round_trip():
     """Old cached rows must still load, and new ones keep their evidence."""
     from dataclasses import asdict  # noqa: PLC0415
 
-    from streamlit_app.lib.br_occupancy import (  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import (  # noqa: PLC0415
         OccupancySystem, system_from_dict,
     )
 
@@ -231,7 +243,7 @@ def test_country_evidence_survives_a_round_trip():
 
 def test_keep_only_rejects_a_country_it_cannot_honour():
     """The compatibility path reproduces the Brazil rule and nothing else."""
-    from streamlit_app.lib.br_occupancy import parse_sns_catalog  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import parse_sns_catalog  # noqa: PLC0415
 
     with pytest.raises(ValueError, match="keep_only"):
         parse_sns_catalog(Path("/nonexistent.mdb"), keep_only="USA")
@@ -243,53 +255,53 @@ _HDR_MIN = "station;freq_min_mhz;freq_max_mhz;direction"
 
 
 def _reg(tmp_path, monkeypatch):
-    from streamlit_app.lib import br_occupancy as br  # noqa: PLC0415
+    from streamlit_app.lib import occupancy as occ  # noqa: PLC0415
 
-    monkeypatch.setattr(br, "CACHE_DIR", tmp_path)
-    monkeypatch.setattr(br, "SOURCES_DIR", tmp_path / "sources")
-    monkeypatch.setattr(br, "SOURCES_INDEX", tmp_path / "sources" / "index.json")
-    monkeypatch.setattr(br, "SNS_CATALOG", tmp_path / "sns_catalog.json")
-    monkeypatch.setattr(br, "SNS_META", tmp_path / "sns_meta.json")
-    return br
+    monkeypatch.setattr(occ, "CACHE_DIR", tmp_path)
+    monkeypatch.setattr(occ, "SOURCES_DIR", tmp_path / "sources")
+    monkeypatch.setattr(occ, "SOURCES_INDEX", tmp_path / "sources" / "index.json")
+    monkeypatch.setattr(occ, "SNS_CATALOG", tmp_path / "sns_catalog.json")
+    monkeypatch.setattr(occ, "SNS_META", tmp_path / "sns_meta.json")
+    return occ
 
 
 def test_a_foreign_catalogue_registers_and_is_findable_by_country(tmp_path, monkeypatch):
-    br = _reg(tmp_path, monkeypatch)
+    occ = _reg(tmp_path, monkeypatch)
     text = "\n".join([_HDR_MIN,
                       "SAT-A;10700;11700;downlink",
                       "SAT-A;14000;14500;uplink",
                       "SAT-B;3700;4200;downlink"])
-    src = br.register_national_csv(text, label="IFT licensed", adm="mex")
+    src = occ.register_national_csv(text, label="IFT licensed", adm="mex")
     assert src.kind == "national" and src.n_systems == 2
-    rows = br.load_source_catalog(src.id)
+    rows = occ.load_source_catalog(src.id)
     assert {r.name for r in rows} == {"SAT-A", "SAT-B"}
     # The licensing administration is what locates them.
     assert all(r.adm == "MEX" for r in rows)
     assert all("MEX" in r.country_codes() for r in rows)
     # It sits in the same registry as the filing catalogues.
-    assert src.id in {s.id for s in br.read_sources()}
+    assert src.id in {s.id for s in occ.read_sources()}
 
 
 def test_a_catalogue_in_ghz_is_refused(tmp_path, monkeypatch):
     """It parses cleanly and draws bands a thousand times too narrow."""
-    br = _reg(tmp_path, monkeypatch)
+    occ = _reg(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="MHz"):
-        br.register_national_csv(f"{_HDR_MIN}\nSAT;10.7;11.7;downlink",
+        occ.register_national_csv(f"{_HDR_MIN}\nSAT;10.7;11.7;downlink",
                                  label="x", adm="X")
-    assert br.read_sources() == []
+    assert occ.read_sources() == []
 
 
 def test_an_empty_or_frequency_less_table_is_refused(tmp_path, monkeypatch):
-    br = _reg(tmp_path, monkeypatch)
+    occ = _reg(tmp_path, monkeypatch)
     with pytest.raises(ValueError):
-        br.register_national_csv(_HDR_MIN, label="x", adm="X")
+        occ.register_national_csv(_HDR_MIN, label="x", adm="X")
 
 
 def test_zip_member_is_chosen_not_guessed():
     import io  # noqa: PLC0415
     import zipfile  # noqa: PLC0415
 
-    from streamlit_app.lib.br_occupancy import pick_catalog_csv  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import pick_catalog_csv  # noqa: PLC0415
 
     def _zip(members):
         buf = io.BytesIO()
@@ -310,3 +322,47 @@ def test_zip_member_is_chosen_not_guessed():
     assert name == "b.csv"
     with pytest.raises(ValueError, match="no .csv"):
         pick_catalog_csv(_zip({"a.txt": "x"}))
+
+
+def test_an_uploaded_catalogue_is_not_attributed_to_anatel(tmp_path, monkeypatch):
+    """Another administration's stations are not Brazil's regulator's.
+
+    ``parse_anatel_subfaixas_csv`` stamped ``source="anatel"`` and an
+    ``anatel:`` id on ANY licensed table, so a catalogue registered with
+    ``adm="MEX"`` rendered in the picker and on every chart row as
+    ``MEXSAT-1 · Anatel · GEO`` — and the tag went into the "source" column of
+    the CSV the page exports, which leaves the tool as a shareable artifact.
+    """
+    from streamlit_app.lib import occupancy as occ  # noqa: PLC0415
+
+    monkeypatch.setattr(occ, "SOURCES_DIR", tmp_path / "sources")
+    monkeypatch.setattr(occ, "SOURCES_INDEX", tmp_path / "sources" / "index.json")
+
+    csv = ("station,operator,orbit,orbital_position,rf_band,"
+           "freq_min_mhz,freq_max_mhz,direction\n"
+           "MEXSAT-1,Telecom MX,GEO,113W,Ku,11700,12200,downlink\n")
+    src = occ.register_national_csv(csv, label="IFT licensed", adm="MEX")
+    rows = occ.load_source_catalog(src.id)
+    assert len(rows) == 1
+    row = rows[0]
+
+    assert "anatel" not in row.source.lower()
+    assert "anatel" not in row.id.lower()
+    assert "Anatel" not in row.label()
+    assert "MEX" in row.label()
+    # Still recognised as a licensed row, which is what the RF-band filter and
+    # the label both key on — the tag changed, the meaning did not.
+    assert occ.is_national_source(row.source)
+    # Not a filing either: the id used to be rewritten with an "sns:" prefix.
+    assert not row.id.startswith("sns:")
+
+
+def test_the_built_in_catalogue_keeps_its_historic_tag():
+    """Anatel's own rows must stay byte-identical to the shipped cache."""
+    from streamlit_app.lib.occupancy import (  # noqa: PLC0415
+        SRC_ANATEL, parse_anatel_subfaixas_csv,
+    )
+
+    rows = parse_anatel_subfaixas_csv("station;freq_min_mhz;freq_max_mhz\nSAT;10700;11700")
+    assert rows[0].source == SRC_ANATEL
+    assert rows[0].id.startswith("anatel:")

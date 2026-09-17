@@ -3,7 +3,7 @@
 Anatel publishes an ``rf_bands`` label per licensed station; ITU SNS notices
 carry no such column. Deriving the band from the frequencies themselves is what
 lets one control cover both catalogues, and lets a chart tooltip name the band a
-segment sits in. Kept out of ``br_occupancy`` so the chart does not have to
+segment sits in. Kept out of ``occupancy`` so the chart does not have to
 import the catalogue machinery to name a band.
 """
 from __future__ import annotations

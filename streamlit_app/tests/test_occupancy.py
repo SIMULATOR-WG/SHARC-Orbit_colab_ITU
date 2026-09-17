@@ -1,4 +1,4 @@
-"""Brazil occupancy catalog: Anatel CSV + ITU WIC index + interval overlap."""
+"""Occupancy catalogues: licensed CSV + ITU WIC index + interval overlap."""
 from __future__ import annotations
 
 import sys
@@ -8,7 +8,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from streamlit_app.lib.br_occupancy import (  # noqa: E402
+from streamlit_app.lib.occupancy import (  # noqa: E402
     OccupancySystem,
     brific_iso_url,
     common_intervals,
@@ -216,7 +216,7 @@ def test_touching_band_edges_are_not_a_shared_band():
     The zero-width intersection used to be reported on the page as a common
     occupied band and printed as "12.750-12.750 GHz".
     """
-    from streamlit_app.lib.br_occupancy import intersect_sets  # noqa: PLC0415
+    from streamlit_app.lib.occupancy import intersect_sets  # noqa: PLC0415
 
     assert intersect_sets([(10.7, 12.75)], [(12.75, 14.5)]) == []
     assert intersect_sets([(10.7, 12.75)], [(12.0, 14.5)]) == [(12.0, 12.75)]
@@ -232,14 +232,14 @@ def test_sns_catalog_survives_a_fresh_install(tmp_path, monkeypatch):
     SRS database and the page died with a traceback before the setup card that
     tells the user what to do could render.
     """
-    from streamlit_app.lib import br_occupancy as mod  # noqa: PLC0415
+    from streamlit_app.lib import occupancy as occ  # noqa: PLC0415
 
-    monkeypatch.setattr(mod, "SNS_META", tmp_path / "absent_meta.json")
-    monkeypatch.setattr(mod, "SNS_CATALOG", tmp_path / "absent_catalog.json")
-    assert mod.sns_meta() == {}
-    assert mod.load_sns_catalog() == []
+    monkeypatch.setattr(occ, "SNS_META", tmp_path / "absent_meta.json")
+    monkeypatch.setattr(occ, "SNS_CATALOG", tmp_path / "absent_catalog.json")
+    assert occ.sns_meta() == {}
+    assert occ.load_sns_catalog() == []
 
     # Meta present but with an empty path is the same trap.
     (tmp_path / "absent_meta.json").write_text(
         '{"mdb": "", "n_notice_total": 1, "select_logic": 0}')
-    assert mod.load_sns_catalog() == []
+    assert occ.load_sns_catalog() == []

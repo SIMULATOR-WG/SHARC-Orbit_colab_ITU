@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[2]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-import streamlit_app.lib.br_occupancy as br  # noqa: E402
+import streamlit_app.lib.occupancy as occ  # noqa: E402
 
 
 # One satellite and one earth station, both RECEIVING, in the two bands the
@@ -50,12 +50,12 @@ def fake_srs(monkeypatch):
             return list(_GRP)
         return []
 
-    monkeypatch.setattr(br, "_mdb_export", _export)
+    monkeypatch.setattr(occ, "_mdb_export", _export)
     return Path("nowhere.mdb")
 
 
 def test_direction_follows_the_notified_station(fake_srs):
-    systems, _ = br.parse_sns_catalog(fake_srs)
+    systems, _ = occ.parse_sns_catalog(fake_srs)
     by_ntc = {s.ntc_id: s for s in systems}
 
     space = by_ntc["1"]
@@ -73,10 +73,10 @@ def test_direction_follows_the_notified_station(fake_srs):
 
 
 def test_earth_station_survives_the_downlink_filter(fake_srs):
-    systems, _ = br.parse_sns_catalog(fake_srs)
+    systems, _ = occ.parse_sns_catalog(fake_srs)
     earth = next(s for s in systems if s.ntc_id == "2")
     # 10.7-17.7 GHz downlink: what the page asked for when it showed nothing.
-    assert br.intervals_touch_range(earth.intervals("downlink"), 10.7, 17.7)
+    assert occ.intervals_touch_range(earth.intervals("downlink"), 10.7, 17.7)
 
 
 def _write_v2_source(root: Path, sid: str) -> None:
@@ -95,10 +95,10 @@ def _write_v2_source(root: Path, sid: str) -> None:
 
 def test_an_indexed_catalogue_is_corrected_without_re_reading_the_mdb(tmp_path, monkeypatch):
     """The MDB may be minutes of work away, or gone. The swap is exact."""
-    monkeypatch.setattr(br, "SOURCES_DIR", tmp_path)
+    monkeypatch.setattr(occ, "SOURCES_DIR", tmp_path)
     _write_v2_source(tmp_path, "old")
 
-    rows = br.load_source_catalog("old")
+    rows = occ.load_source_catalog("old")
     earth = next(s for s in rows if s.kind == "earth")
     space = next(s for s in rows if s.kind == "space")
     assert earth.downlink_ghz == [[12.2, 12.75]] and earth.uplink_ghz == []
@@ -106,15 +106,15 @@ def test_an_indexed_catalogue_is_corrected_without_re_reading_the_mdb(tmp_path, 
     assert space.downlink_ghz == [[17.8, 18.6]] and space.uplink_ghz == []
 
     meta = json.loads((tmp_path / "old" / "meta.json").read_text())
-    assert meta["select_logic"] == br._EARTH_DIR_FIXED_AT
+    assert meta["select_logic"] == occ._EARTH_DIR_FIXED_AT
 
     # Loading again must not swap back.
-    again = next(s for s in br.load_source_catalog("old") if s.kind == "earth")
+    again = next(s for s in occ.load_source_catalog("old") if s.kind == "earth")
     assert again.downlink_ghz == [[12.2, 12.75]]
 
 
 def test_a_current_catalogue_is_left_alone(tmp_path, monkeypatch):
-    monkeypatch.setattr(br, "SOURCES_DIR", tmp_path)
+    monkeypatch.setattr(occ, "SOURCES_DIR", tmp_path)
     d = tmp_path / "new"
     d.mkdir()
     (d / "catalog.json").write_text(json.dumps([
@@ -122,7 +122,7 @@ def test_a_current_catalogue_is_left_alone(tmp_path, monkeypatch):
          "ntc_id": "2", "downlink_ghz": [[12.2, 12.75]], "uplink_ghz": []},
     ]))
     (d / "meta.json").write_text(json.dumps(
-        {"select_logic": br.SNS_SELECT_LOGIC}))
+        {"select_logic": occ.SNS_SELECT_LOGIC}))
 
-    row = br.load_source_catalog("new")[0]
+    row = occ.load_source_catalog("new")[0]
     assert row.downlink_ghz == [[12.2, 12.75]] and row.uplink_ghz == []

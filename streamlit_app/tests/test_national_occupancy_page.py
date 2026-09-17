@@ -1,4 +1,4 @@
-"""Brazil occupancy page: the controls that rewrite the system selection.
+"""National occupancy page: the controls that rewrite the system selection.
 
 Driven through Streamlit's own AppTest, because the interesting failures are
 not in the helpers but in the wiring: Streamlit refuses to let a script assign
@@ -22,7 +22,7 @@ if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 
 _CAT = APP / "data" / "br_occupancy" / "anatel_catalog.json"
-_PAGE = str(APP / "pages" / "H_Brazil_Occupancy.py")
+_PAGE = str(APP / "pages" / "H_National_Occupancy.py")
 
 pytestmark = pytest.mark.skipif(
     not _CAT.exists(), reason="Anatel catalogue not cached"
@@ -412,7 +412,7 @@ def test_picker_is_capped_when_the_pool_is_huge(app, monkeypatch):
     at = app()
     # The cap only shows with a big pool; assert the guard exists and that a
     # normal pool is left alone.
-    page = (REPO / "streamlit_app" / "pages" / "H_Brazil_Occupancy.py").read_text()
+    page = (REPO / "streamlit_app" / "pages" / "H_National_Occupancy.py").read_text()
     assert "_PICKER_CAP" in page and "_PILL_CAP" in page
     assert not any("The picker is showing" in str(w.value) for w in at.warning)
 
@@ -423,15 +423,28 @@ def test_page_is_not_named_after_one_country():
     The built-in catalogue is still Anatel's and the help may name Brazil as an
     example, but titles, captions and file names must not.
     """
-    page = (REPO / "streamlit_app" / "pages" / "H_Brazil_Occupancy.py").read_text()
+    page = (REPO / "streamlit_app" / "pages" / "H_National_Occupancy.py").read_text()
     for banned in ('st.title("Brazil', 'page_title="Brazil',
                    'Band occupancy — Brazil', 'brazil_occupancy_{direction}'):
         assert banned not in page, banned
     assert 'st.title("National band occupancy")' in page
 
+    # A tally that only counts one country's notices is Brazil naming too, and
+    # it reached the user: indexing anybody else's SRS printed "service 0,
+    # adm=B 0" next to the systems count.
+    # Reading the legacy tallies to DETECT an old catalogue is fine; printing
+    # them is not. Only the comment that records why may mention the string.
+    rendered = "\n".join(
+        ln for ln in page.splitlines() if not ln.lstrip().startswith("#")
+    )
+    assert "adm=B" not in rendered
+
     app_py = (REPO / "streamlit_app" / "app.py").read_text()
     assert 'title="National occupancy"' in app_py
     assert 'title="Brazil occupancy"' not in app_py
+    # The URL is user-visible — address bar and bookmarks.
+    assert 'url_path="brazil_occupancy"' not in app_py
+    assert 'url_path="national_occupancy"' in app_py
 
 
 def test_chart_title_and_export_name_follow_the_country(app):

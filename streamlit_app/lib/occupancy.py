@@ -1,13 +1,22 @@
-"""Brazil band-occupancy catalog from Anatel open data + ITU Space IFIC SNS.
+"""National band-occupancy catalogues: licensed stations + ITU Space IFIC SNS.
 
-Downloads (stdlib urllib only, user-triggered Refresh):
+Three kinds of input, any of which may be absent:
 
-* Anatel ``satelites.zip`` — licensed stations / sub-bands in Brazil.
-* BR IFIC online ISO / SRS (subscription) — complete ``SRS.mdb``.
-* Public weekly ``ificXXXX.mdb`` from the ITU WIC year page (that week's
-  publications only).
+* a national licensed-station table, uploaded by the administration that
+  issued it, or fetched where one is published — Anatel's ``satelites.zip``
+  is the catalogue that ships built in;
+* BR IFIC online ISO / SRS (subscription) — complete ``SRS.mdb``;
+* public weekly ``ificXXXX.mdb`` from the ITU WIC year page (that week's
+  publications only), and any additional filing ``.mdb`` for study.
 
-Parsed catalogs are cached under ``streamlit_app/data/br_occupancy/``.
+Every notice is indexed; the country is a FILTER over the result, not a
+property of the index, so one cache serves every administration.
+
+Downloads use stdlib urllib only and are user-triggered.
+
+Parsed catalogs are cached under ``streamlit_app/data/br_occupancy/`` — the
+directory keeps its original name so an existing installation does not lose
+the catalogues it has already indexed.
 """
 from __future__ import annotations
 
@@ -46,6 +55,9 @@ ANATEL_ZIP_URL = (
 )
 ANATEL_SUBFAIXAS = "stel_satelites_subfaixas.csv"
 
+# The on-disk name predates the generalisation and is deliberately NOT renamed:
+# it holds every catalogue an installation has indexed, and renaming it would
+# orphan them. Only the code above it stopped naming one country.
 CACHE_DIR = DATA_ROOT / "br_occupancy"
 ANATEL_DIR = CACHE_DIR / "anatel"
 SNS_DIR = CACHE_DIR / "sns"
@@ -61,6 +73,21 @@ SOURCES_DIR = CACHE_DIR / "sources"
 SOURCES_INDEX = SOURCES_DIR / "index.json"
 
 _UA = "SHARC-Orbit/1.0 (national occupancy catalog)"
+# The two tags a licensed row can carry. "anatel" is the catalogue that ships
+# built in and keeps its historic tag so its cached JSON stays byte-identical;
+# anything an administration uploads is "national". Both mean the same thing —
+# a licensed station, not an ITU filing — so every test of "is this licensed?"
+# must accept both, which is what `is_national_source` is for.
+SRC_ANATEL = "anatel"
+SRC_NATIONAL = "national"
+_NATIONAL_SOURCES = frozenset({SRC_ANATEL, SRC_NATIONAL})
+
+
+def is_national_source(source: str) -> bool:
+    """True for a licensed-station row, whoever licensed it."""
+    return (source or "") in _NATIONAL_SOURCES
+
+
 _ADM_BRAZIL = "B"
 # ITU Preface special geographical areas that include Brazil.
 # XAA = worldwide; XR2 = ITU Region 2 (Americas). Not XR1 / XR3.
@@ -82,7 +109,7 @@ class OccupancySystem:
     """One selectable row: Anatel station or SNS notice."""
 
     id: str
-    source: str                    # "anatel" | "sns"
+    source: str                    # "anatel" | "national" | "sns"
     name: str
     operator: str = ""
     orbit: str = ""                # GEO | NGEO | G | N | …
@@ -143,12 +170,20 @@ class OccupancySystem:
         return out
 
     def label(self) -> str:
+        """What the picker and the chart rows show.
+
+        This used to print the literal "Anatel" for every licensed row, which
+        put Brazil's regulator on another administration's own stations: a
+        table uploaded with adm="MEX" rendered as "MEXSAT-1 · Anatel · GEO".
+        The row says what it is and which administration licensed it, the same
+        way a filing row names its notifying administration.
+        """
         bits = [self.name]
         if self.source == "sns" and self.ntc_id:
             bits.append(f"ntc {self.ntc_id}")
-        elif self.source == "anatel":
-            bits.append("Anatel")
-        if self.source == "sns" and self.adm:
+        elif is_national_source(self.source):
+            bits.append("licensed")
+        if self.adm:
             bits.append(self.adm)
         if self.orbit:
             bits.append(self.orbit)
@@ -157,7 +192,7 @@ class OccupancySystem:
 
 # Letter bands live in their own module so the strip charts can name a band
 # without importing the catalogue machinery. Re-exported here because the
-# Brazil occupancy page and its tests reach for them through ``br``.
+# occupancy page and its tests reach for them through ``occ``.
 from .freq_bands import (  # noqa: F401
     LETTER_BANDS,
     LETTER_BAND_NAMES,
@@ -487,7 +522,13 @@ def _col(header: list[str], *needles: str) -> int | None:
     return None
 
 
-def parse_anatel_subfaixas_csv(text: str, *, adm: str = _ADM_BRAZIL) -> list[OccupancySystem]:
+def parse_anatel_subfaixas_csv(
+    text: str,
+    *,
+    adm: str = _ADM_BRAZIL,
+    source: str = SRC_ANATEL,
+    id_prefix: str = SRC_ANATEL,
+) -> list[OccupancySystem]:
     header, body = _split_csv_rows(text)
     if not header:
         return []
@@ -512,11 +553,15 @@ def parse_anatel_subfaixas_csv(text: str, *, adm: str = _ADM_BRAZIL) -> list[Occ
     i_valid = _col(header, "Validade_licença_estacao_espacial", "Validade",
                    "valid_until", "expiry")
     if i_name is None or i_lo is None or i_hi is None:
-        missing = [n for n, i in (("station name", i_name),
-                                  ("lower frequency (MHz)", i_lo),
-                                  ("upper frequency (MHz)", i_hi)) if i is None]
+        # Name the spellings the parser ACCEPTS, not a description of them:
+        # the message used to ask for "lower frequency (MHz)", which is not an
+        # alias, so a user who added exactly that header failed again.
+        missing = [n for n, i in (("station", i_name),
+                                  ("freq_min_mhz", i_lo),
+                                  ("freq_max_mhz", i_hi)) if i is None]
         raise ValueError(
-            "the licensed-station table is missing the mandatory column(s): "
+            "the licensed-station table is missing the mandatory column(s) "
+            "(or an accepted alias of them): "
             + ", ".join(missing)
             + ". Header seen: " + "; ".join(header[:12])
             + ". See the page help for the required fields."
@@ -536,12 +581,12 @@ def parse_anatel_subfaixas_csv(text: str, *, adm: str = _ADM_BRAZIL) -> list[Occ
         iv = mhz_to_ghz_interval(cell(i_lo), cell(i_hi))
         if iv is None:
             continue
-        sid = f"anatel:{norm_name(name) or name}"
+        sid = f"{id_prefix}:{norm_name(name) or name}"
         sys = grouped.get(sid)
         if sys is None:
             sys = OccupancySystem(
                 id=sid,
-                source="anatel",
+                source=source,
                 name=name,
                 operator=cell(i_op),
                 orbit=cell(i_orbit).upper() or "GEO",
@@ -960,14 +1005,12 @@ def parse_sns_catalog(
     mdb_path = Path(mdb_path)
     grp_mdb = Path(grp_mdb) if grp_mdb is not None else mdb_path
     notice = _mdb_export(mdb_path, "notice")
-    stats: dict[str, Any] = {
-        "n_notice_total": len(notice),
-        "n_adm_b": 0,
-        "n_srv_br": 0,
-        "n_es_br": 0,
-        "n_name_match": 0,
-        "kind": "srs",
-    }
+    stats: dict[str, Any] = {"n_notice_total": len(notice), "kind": "srs"}
+    if keep_only:
+        # Declared only on the compatibility path: these four count notices
+        # against ONE country's rule, so on a general index they are not a
+        # zero, they are a category error.
+        stats.update(n_adm_b=0, n_srv_br=0, n_es_br=0, n_name_match=0)
     if not notice:
         return [], stats
 
@@ -1011,41 +1054,50 @@ def parse_sns_catalog(
             (srv_excl if excluded else srv_ctry).setdefault(ntc, set()).add(code)
     except Exception:  # noqa: BLE001
         pass
-    # The compatibility sets are rebuilt with the ORIGINAL per-row predicate.
-    # Deriving them from the aggregated dicts above is not the same thing: a
-    # notice with one row (ctry=B, excl=N) and another (ctry=B, excl=Y) is a hit
-    # row-by-row but is cancelled by an aggregate subtraction, which cost
-    # exactly one notice of the 999 when measured against the cached catalogue.
-    es_br = {n for n, c in es_ctry.items() if _ADM_BRAZIL in c}
-    srv_br: set[str] = set()
-    try:
-        for row in _mdb_export(mdb_path, "srv_area"):
-            if ctry_covers_brazil(_cell(row, "ctry"), excl=_cell(row, "f_excl_api")):
-                _n = gid_to_ntc.get(_cell(row, "grp_id"), "")
-                if _n:
-                    srv_br.add(_n)
-    except Exception:  # noqa: BLE001
-        pass
-
-    wanted = anatel_names or set()
-    keep_reasons = select_brazil_ntcs(
-        notice,
-        sat_name_by_ntc,
-        srv_br_ntcs=srv_br,
-        es_br_ntcs=es_br,
-        anatel_names=wanted,
-    )
-    if not keep_only:
-        # Everything, with the Brazil reasons kept where they apply so the
-        # provenance the page already shows does not disappear.
+    # Brazil's selection machinery belongs to the compatibility path ONLY.
+    # It used to run on every index, which was three separate wrongs: it read
+    # srv_area a second whole time (the 1.7 GB SRS pays for that), it loaded
+    # Anatel's licensed names to name-match them against another country's
+    # filings, and it wrote four Brazil tallies into the meta.json of every
+    # catalogue — an uploaded USA filing carried "n_adm_b": 0, and the page
+    # printed those counters next to the systems count.
+    if keep_only:
+        # The compatibility sets are rebuilt with the ORIGINAL per-row
+        # predicate. Deriving them from the aggregated dicts above is not the
+        # same thing: a notice with one row (ctry=B, excl=N) and another
+        # (ctry=B, excl=Y) is a hit row-by-row but is cancelled by an aggregate
+        # subtraction, which cost exactly one notice of the 999 when measured
+        # against the cached catalogue.
+        es_br = {n for n, c in es_ctry.items() if _ADM_BRAZIL in c}
+        srv_br: set[str] = set()
+        try:
+            for row in _mdb_export(mdb_path, "srv_area"):
+                if ctry_covers_brazil(_cell(row, "ctry"),
+                                      excl=_cell(row, "f_excl_api")):
+                    _n = gid_to_ntc.get(_cell(row, "grp_id"), "")
+                    if _n:
+                        srv_br.add(_n)
+        except Exception:  # noqa: BLE001
+            pass
+        keep_reasons = select_brazil_ntcs(
+            notice,
+            sat_name_by_ntc,
+            srv_br_ntcs=srv_br,
+            es_br_ntcs=es_br,
+            anatel_names=anatel_names or set(),
+        )
+        stats["n_adm_b"] = sum(1 for r in keep_reasons.values() if "adm_b" in r)
+        stats["n_srv_br"] = sum(1 for r in keep_reasons.values() if "srv_br" in r)
+        stats["n_es_br"] = sum(1 for r in keep_reasons.values() if "es_br" in r)
+        stats["n_name_match"] = sum(
+            1 for r in keep_reasons.values() if "anatel_name" in r)
+    else:
+        # Every notice, no per-country provenance. The country is a filter over
+        # the result now, so a reason vocabulary written in one country's terms
+        # would only be able to say "no" about everybody else.
         keep_reasons = {
-            _cell(r, "ntc_id"): keep_reasons.get(_cell(r, "ntc_id"), [])
-            for r in notice if _cell(r, "ntc_id")
+            _cell(r, "ntc_id"): [] for r in notice if _cell(r, "ntc_id")
         }
-    stats["n_adm_b"] = sum(1 for r in keep_reasons.values() if "adm_b" in r)
-    stats["n_srv_br"] = sum(1 for r in keep_reasons.values() if "srv_br" in r)
-    stats["n_es_br"] = sum(1 for r in keep_reasons.values() if "es_br" in r)
-    stats["n_name_match"] = sum(1 for r in keep_reasons.values() if "anatel_name" in r)
     notice_by_ntc = {_cell(r, "ntc_id"): r for r in notice}
 
     grouped: dict[str, OccupancySystem] = {}
@@ -1229,13 +1281,15 @@ def _write_source(src: CatalogSource, catalog: list[OccupancySystem],
                   meta: dict[str, Any]) -> CatalogSource:
     """Register (or replace) one catalogue without touching the others."""
     src.dir.mkdir(parents=True, exist_ok=True)
+    # A licensed catalogue is not a filing, so its rows are not prefixed "sns:".
+    _pfx = SRC_NATIONAL if src.kind == "national" else "sns"
     for sysm in catalog:
         sysm.source_id = src.id
         # Two catalogues share ntc_ids — 77 of the 174 weekly-IFIC notices also
         # appear in the full SRS — so the id must name its source or one row
         # silently shadows the other wherever systems are keyed by id.
-        if not sysm.id.startswith(f"sns:{src.id}:"):
-            sysm.id = f"sns:{src.id}:{sysm.ntc_id or sysm.name}"
+        if not sysm.id.startswith(f"{_pfx}:{src.id}:"):
+            sysm.id = f"{_pfx}:{src.id}:{sysm.ntc_id or sysm.name}"
     _write_json(src.dir / "catalog.json", [asdict(s) for s in catalog])
     meta = dict(meta)
     meta["n_systems"] = len(catalog)
@@ -1361,7 +1415,16 @@ def register_national_csv(
     Raises ``ValueError`` when the table cannot be trusted, rather than drawing
     a plausible-looking wrong chart.
     """
-    catalog = parse_anatel_subfaixas_csv(text, adm=(adm or "").strip().upper())
+    sid = re.sub(r"[^A-Za-z0-9_-]+", "-", (slug or label or adm or "national")).strip("-")
+    sid = f"nat-{sid[:40].lower() or 'catalogue'}"
+    # Tagged as its own catalogue, not as Anatel's. The tag reaches the user:
+    # it is the "source" column of the Assignments table and of the CSV the
+    # page exports, so stamping "anatel" on another administration's stations
+    # misattributed them in a file that leaves the tool.
+    catalog = parse_anatel_subfaixas_csv(
+        text, adm=(adm or "").strip().upper(),
+        source=SRC_NATIONAL, id_prefix=sid,
+    )
     if not catalog:
         raise ValueError("no station rows found in that table")
     edges = [e for s_ in catalog for iv in s_.intervals("both") for e in iv]
@@ -1375,8 +1438,6 @@ def register_national_csv(
             "Frequencies must be in MHz — a file in GHz parses without error "
             "and draws bands a thousand times too narrow."
         )
-    sid = re.sub(r"[^A-Za-z0-9_-]+", "-", (slug or label or adm or "national")).strip("-")
-    sid = f"nat-{sid[:40].lower() or 'catalogue'}"
     src = CatalogSource(id=sid, label=label or sid, kind="national")
     meta = {
         "kind": "national",
@@ -1413,8 +1474,10 @@ def reindex_sns_mdb(mdb_path: Path, *, extra_meta: dict[str, Any] | None = None,
     """
     catalog_p, grp_p = locate_srs_parts(mdb_path)
     catalog, stats = parse_sns_catalog(
-        catalog_p, anatel_names=_anatel_name_set(), grp_mdb=grp_p,
-        keep_only=keep_only,
+        catalog_p, grp_mdb=grp_p, keep_only=keep_only,
+        # Only the compatibility path name-matches against a licensed
+        # catalogue, so only it pays for loading one.
+        anatel_names=_anatel_name_set() if keep_only else None,
     )
     kind = stats.pop("kind", "srs") or "srs"
     meta = {

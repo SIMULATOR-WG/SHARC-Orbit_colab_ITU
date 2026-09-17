@@ -16,7 +16,7 @@ from contextlib import nullcontext as _nullcontext
 import pandas as pd
 import streamlit as st
 
-from lib import br_occupancy as br
+from lib import occupancy as occ
 from lib import theme
 from lib.band_chart import st_bands_chart
 from lib.manual import help_expander
@@ -30,12 +30,12 @@ st.set_page_config(
 theme.inject()
 
 st.title("National band occupancy")
-help_expander("brazil_occupancy", extra=("national_catalog_format",))
+help_expander("national_occupancy", extra=("national_catalog_format",))
 st.caption(
     "Licensed occupancy from a national catalogue — load your administration's "
     "own table, or refresh a published one — plus the filings in the "
     "complete **SRS.mdb** from a BR IFIC ISO "
-    f"([IFIC 3079 ISO]({br.brific_iso_url('3079')})), "
+    f"([IFIC 3079 ISO]({occ.brific_iso_url('3079')})), "
     "or the public weekly `ificXXXX.mdb` "
     "([ITU WIC 2026](https://www.itu.int/sns/wic/demowic26.html)). "
     "Pick systems to see occupied bands and their **common** overlap — the "
@@ -83,15 +83,15 @@ def _operates_caption(meta: dict) -> str:
 # Loading a catalogue is a setup step done once and then never again, yet it
 # owned the first screen on every visit and pushed the results 1 700 px down.
 # Once data is present it folds into a one-line summary that still opens.
-anatel = br.load_anatel_catalog()
+anatel = occ.load_anatel_catalog()
 # A broken or half-indexed catalogue must degrade to the setup card, never take
 # the page down with it: the card is where the user fixes exactly this.
 _sns_error = None
 try:
-    sns = br.load_sns_catalog()
+    sns = occ.load_sns_catalog()
 except Exception as exc:  # noqa: BLE001 — surfaced below, not swallowed
     sns, _sns_error = [], exc
-a_meta, s_meta = br.anatel_meta(), br.sns_meta()
+a_meta, s_meta = occ.anatel_meta(), occ.sns_meta()
 if _sns_error is not None:
     st.warning(
         f"Could not open the indexed ITU SNS catalogue: {_sns_error}. "
@@ -120,10 +120,10 @@ with _cat_box:
         # listed beside any other administration's.
         with st.container(border=True):
             st.markdown("**National licensed catalogues** · stations / sub-bands")
-            _nat_srcs = [x for x in br.read_sources() if x.kind == "national"]
+            _nat_srcs = [x for x in occ.read_sources() if x.kind == "national"]
             # Providers come from the data table, so the interface never names
             # one country: adding another administration is a dict entry.
-            _prov = br.national_providers()[0] if br.national_providers() else None
+            _prov = occ.national_providers()[0] if occ.national_providers() else None
             if anatel and _prov:
                 st.markdown(
                     theme.pill(f"{_prov['label']} · {len(anatel)} systems", "ok"),
@@ -148,7 +148,7 @@ with _cat_box:
                     if st.button("", icon=":material/delete:",
                                  key=f"br_rm_nat_{_ns.id}",
                                  help="Forget this catalogue."):
-                        br.remove_source(_ns.id)
+                        occ.remove_source(_ns.id)
                         st.rerun()
             if _prov and st.button(
                 f"Refresh {_prov['label']}", icon=":material/download:",
@@ -157,7 +157,7 @@ with _cat_box:
             ):
                 with st.spinner("Downloading the published catalogue…"):
                     try:
-                        meta = br.refresh_anatel()
+                        meta = occ.refresh_anatel()
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"Refresh failed: {exc}")
                     else:
@@ -208,10 +208,10 @@ with _cat_box:
                 try:
                     _raw = _nat_file.getvalue()
                     if _nat_file.name.lower().endswith(".zip"):
-                        _member, _raw = br.pick_catalog_csv(_raw)
+                        _member, _raw = occ.pick_catalog_csv(_raw)
                         st.caption(f"Read `{_member}` from the zip.")
-                    _src = br.register_national_csv(
-                        br._decode_csv_bytes(_raw),
+                    _src = occ.register_national_csv(
+                        occ._decode_csv_bytes(_raw),
                         label=_nat_label.strip() or _nat_file.name,
                         adm=_nat_adm.strip(),
                     )
@@ -267,9 +267,9 @@ with _cat_box:
                     _jobs = [(_p.stem, _p)]
                 elif _add_files:
                     _stamp = f"{abs(hash(tuple(f.name for f in _add_files))):08x}"
-                    _jobs = br.stage_upload_groups(
+                    _jobs = occ.stage_upload_groups(
                         [(f.name, f.getvalue()) for f in _add_files],
-                        br.SNS_DIR / "uploads" / _stamp,
+                        occ.SNS_DIR / "uploads" / _stamp,
                     )
                 _done, _failed = [], []
                 for _i, (_hint, _target) in enumerate(_jobs):
@@ -281,7 +281,7 @@ with _cat_box:
                             f"Indexing {_hint} ({_i + 1} of {len(_jobs)}) — "
                             "minutes on a full SRS…"
                         ):
-                            _meta = br.ingest_local_iso(_target, label=_lbl or _hint)
+                            _meta = occ.ingest_local_iso(_target, label=_lbl or _hint)
                     except Exception as exc:  # noqa: BLE001
                         _failed.append(f"{_hint}: {exc}")
                     else:
@@ -343,16 +343,20 @@ with _cat_box:
                     "every notice in the file…"
                 ):
                     try:
-                        meta = br.ingest_local_iso(Path(raw))
+                        meta = occ.ingest_local_iso(Path(raw))
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"SRS index failed: {exc}")
                     else:
+                        # No per-country tally here. The two counters this line
+                        # used to print — service area covers B, administration
+                        # is B — are Brazil's, left over from the Brazil-only
+                        # index; every notice is kept now and the country is a
+                        # filter below, so on anyone else's data they read
+                        # "service 0, adm=B 0".
                         st.success(
                             f"SRS (IFIC {meta.get('ific_no') or '—'}): "
                             f"{meta.get('n_notice_total', 0)} notices, "
-                            f"**{meta.get('n_systems', 0)}** systems indexed "
-                            f"(service {meta.get('n_srv_br', 0)}, "
-                            f"adm=B {meta.get('n_adm_b', 0)})."
+                            f"**{meta.get('n_systems', 0)}** systems indexed."
                         )
                         st.rerun()
             if st.button("Refresh weekly IFIC", icon=":material/download:",
@@ -362,16 +366,14 @@ with _cat_box:
                     "every notice in the file…"
                 ):
                     try:
-                        meta = br.refresh_sns()
+                        meta = occ.refresh_sns()
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"IFIC refresh failed: {exc}")
                     else:
                         st.success(
                             f"IFIC **{meta.get('ific_no')}**: "
                             f"{meta.get('n_notice_total', 0)} notices this week, "
-                            f"**{meta.get('n_systems', 0)}** systems indexed "
-                            f"(service {meta.get('n_srv_br', 0)}, "
-                            f"adm=B {meta.get('n_adm_b', 0)})."
+                            f"**{meta.get('n_systems', 0)}** systems indexed."
                         )
                         st.rerun()
             srs_files = st.file_uploader(
@@ -387,7 +389,7 @@ with _cat_box:
             if srs_files and st.button(
                 "Index uploaded SRS", icon=":material/database:", key="br_srs_index"
             ):
-                dest = br.SNS_DIR / "_upload_srs"
+                dest = occ.SNS_DIR / "_upload_srs"
                 if dest.exists():
                     shutil.rmtree(dest)
                 dest.mkdir(parents=True, exist_ok=True)
@@ -398,7 +400,7 @@ with _cat_box:
                 target = zips[0] if len(zips) == 1 and not mdbs else dest
                 with st.spinner("Indexing SRS (this can take several minutes)…"):
                     try:
-                        meta = br.ingest_local_iso(target)
+                        meta = occ.ingest_local_iso(target)
                     except Exception as exc:  # noqa: BLE001
                         st.error(f"SRS index failed: {exc}")
                     else:
@@ -413,7 +415,7 @@ with _cat_box:
     # registered at once, which is what makes "compare my filing against what
     # is already there" possible; before this a second index destroyed the
     # first without a word.
-    _registered = br.read_sources()
+    _registered = occ.read_sources()
     with st.container(border=True):
         st.markdown("**Indexed filings** · one row per catalogue")
         if not _registered:
@@ -440,7 +442,7 @@ with _cat_box:
                     help="Forget this catalogue. The indexed file on disk is "
                          "left alone and can be indexed again.",
                 ):
-                    br.remove_source(_src.id)
+                    occ.remove_source(_src.id)
                     st.rerun()
 
 if not anatel and not sns:
@@ -457,7 +459,7 @@ st.subheader("2. Systems")
 # One entry per catalogue, not the old anatel/sns pair: several SRS or IFIC
 # files can be registered at once now, and a comparison usually means "my
 # filing against what is already indexed", which needs them apart.
-_srcs = br.read_sources()
+_srcs = occ.read_sources()
 _src_label = {"anatel": f"National licensed ({len(anatel)})"}
 src_opts = ["anatel"] if anatel else []
 for _s in _srcs:
@@ -522,7 +524,7 @@ if "sns" in sources:
     pool.extend(sns)
 _picked_srcs = [s for s in sources if s not in ("anatel", "sns")]
 if _picked_srcs:
-    pool.extend(br.load_filings(_picked_srcs))
+    pool.extend(occ.load_filings(_picked_srcs))
 
 # ── Country / area ───────────────────────────────────────────────────────────
 # The country used to be welded into the index: only what operated in Brazil
@@ -573,9 +575,9 @@ with k2:
         horizontal=True,
         format_func=lambda r: _rule_opts[r],
         disabled=not country,
-        help="The looser rule is what the page applied to Brazil before the "
-             "country was a choice, and it is what keeps a foreign filing that "
-             "covers the country.",
+        help="The looser rule is the one to use to find a filing that merely "
+             "covers the country: notified elsewhere, but with a service area "
+             "or an earth station here.",
     )
 
 # A catalogue indexed before the country became a filter carries no service
@@ -601,15 +603,15 @@ if country:
 # otherwise it renders as an empty, unusable select.
 _pool_ivs = {s.id: s.intervals(direction) for s in pool}
 band_all = [
-    b for b in br.LETTER_BAND_NAMES
-    if any(b in br.letter_bands_for(_pool_ivs[s.id]) for s in pool)
+    b for b in occ.LETTER_BAND_NAMES
+    if any(b in occ.letter_bands_for(_pool_ivs[s.id]) for s in pool)
 ]
 band_default = [b for b in (prev.get("letter_bands") or []) if b in band_all]
 
 # The From/To boxes take any range, but typing band edges from memory is how
 # a wrong examination band gets in. The picker fills them from the Article 22
 # tables the engine itself uses, plus the letter bands.
-_PRESETS = br.frequency_presets()
+_PRESETS = occ.frequency_presets()
 _PRESET_NONE = "Custom range"
 _BAND_ALL = "All"
 st.session_state.setdefault("br_occ_freq_low", str(prev.get("freq_low_ghz") or ""))
@@ -729,13 +731,15 @@ for s in pool:
     # The Anatel label exists only on licensed stations. Applying it to the
     # whole pool silently deleted every ITU SNS notice while the Source control
     # still said ITU SNS was selected, so it only prunes Anatel rows.
-    if rf_bands and s.source == "anatel" and not (set(rf_bands) & set(s.rf_bands)):
-        continue
-    if letter_bands and not (
-        set(letter_bands) & set(br.letter_bands_for(_pool_ivs[s.id]))
+    if rf_bands and occ.is_national_source(s.source) and not (
+        set(rf_bands) & set(s.rf_bands)
     ):
         continue
-    if (low_ghz is not None or high_ghz is not None) and not br.intervals_touch_range(
+    if letter_bands and not (
+        set(letter_bands) & set(occ.letter_bands_for(_pool_ivs[s.id]))
+    ):
+        continue
+    if (low_ghz is not None or high_ghz is not None) and not occ.intervals_touch_range(
         _pool_ivs[s.id], low_ghz, high_ghz
     ):
         continue
@@ -872,7 +876,7 @@ if len(sel_ids) > 1:
             sy = id_to_sys.get(i)
             if sy is None:
                 return i
-            bands = "/".join(br.letter_bands_for(_pool_ivs.get(i) or []))
+            bands = "/".join(occ.letter_bands_for(_pool_ivs.get(i) or []))
             tail = f" · {bands}" if bands else ""
             if sy.source == "sns" and sy.ntc_id:
                 tail = f" · ntc {sy.ntc_id}{tail}"
@@ -954,8 +958,8 @@ if not sel_ids:
     st.stop()
 
 selected = [_all_by_id[i] for i in sel_ids if i in _all_by_id]
-common = br.common_intervals(selected, direction) if len(selected) >= 2 else []
-union = br.union_intervals(selected, direction)
+common = occ.common_intervals(selected, direction) if len(selected) >= 2 else []
+union = occ.union_intervals(selected, direction)
 
 # ── 3. Occupancy ─────────────────────────────────────────────────────────────
 st.subheader("3. Occupied bands")
@@ -1010,7 +1014,7 @@ if len(selected) >= 2:
                 1
                 for i in range(len(_ivs))
                 for j in range(i + 1, len(_ivs))
-                if br.intersect_sets(_ivs[i], _ivs[j])
+                if occ.intersect_sets(_ivs[i], _ivs[j])
             )
         msg = (f"**No band is occupied by all {len(selected)} selected systems** "
                "at once in this direction.")
@@ -1053,10 +1057,10 @@ if _chart_edges:
     _lo_all = round(min(_chart_edges), 3)
     _hi_all = round(max(_chart_edges), 3)
     if _hi_all - _lo_all > 1e-6:
-        _band_edge = {n: (lo, hi) for n, lo, hi in br.LETTER_BANDS}
+        _band_edge = {n: (lo, hi) for n, lo, hi in occ.LETTER_BANDS}
         _bands_here = [
-            b for b in br.LETTER_BAND_NAMES
-            if any(b in br.letter_bands_for(r["bands"]) for r in chart_rows)
+            b for b in occ.LETTER_BAND_NAMES
+            if any(b in occ.letter_bands_for(r["bands"]) for r in chart_rows)
         ]
 
         def _band_bounds(name: str) -> "tuple[float, float]":
@@ -1160,7 +1164,7 @@ if _chart_edges:
             _chart_range = None          # the whole catalogue: draw everything
         if _chart_range:
             _kept = sum(1 for r in chart_rows
-                        if br.intervals_touch_range(r["bands"], *_chart_range))
+                        if occ.intervals_touch_range(r["bands"], *_chart_range))
             st.caption(
                 f"Axis {_chart_range[0]:g}–{_chart_range[1]:g} GHz · "
                 f"{_kept} of {len(chart_rows)} row(s) have something in it. "
@@ -1188,7 +1192,7 @@ for s in selected:
             # Numbers stay numbers: as formatted strings the column sorted
             # lexicographically, so 10.7 came before 3.7, and the exported CSV
             # had to be re-parsed before use.
-            "band": br.letter_bands_for([(lo, hi)])[0] if br.letter_bands_for([(lo, hi)]) else "—",
+            "band": occ.letter_bands_for([(lo, hi)])[0] if occ.letter_bands_for([(lo, hi)]) else "—",
             "low (GHz)": round(lo, 4),
             "high (GHz)": round(hi, 4),
             "bandwidth (MHz)": round((hi - lo) * 1000.0, 3),

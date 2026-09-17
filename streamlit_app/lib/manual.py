@@ -190,7 +190,7 @@ _HELP: dict[str, str] = {
         "with `ray start --address=<HEAD>:6379`. See the Help page for "
         "the multi-host walk-through."
     ),
-    "brazil_occupancy": (
+    "national_occupancy": (
         "**National band occupancy**\n\n"
         "Survey of frequency occupancy in one country, from two kinds of "
         "catalogue the page can refresh itself:\n\n"
