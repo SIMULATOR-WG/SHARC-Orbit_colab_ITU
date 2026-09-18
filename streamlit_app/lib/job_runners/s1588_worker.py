@@ -1489,6 +1489,201 @@ def _joint_time_base(
     }
 
 
+def _gmst0_for_cfg(cfg: dict[str, Any]) -> float:
+    """GMST0 of ONE filing — same precedence as ``run_wcg_downlink``
+    (src/main.py:1950-1960): explicit ``simulation.earth_rotation_initial_deg``
+    override, else the SRS-inferred ``non_gso._gmst0_deg`` (right_asc −
+    long_asc, honouring the declared ascending-node longitude), else 0.0."""
+    sim = cfg.get("simulation") or {}
+    ngso = cfg.get("non_gso") or {}
+    if sim.get("earth_rotation_initial_deg") is not None:
+        return float(sim["earth_rotation_initial_deg"])
+    if "_gmst0_deg" in ngso:
+        return float(ngso.get("_gmst0_deg", 0.0) or 0.0)
+    return 0.0
+
+
+def _rotate_raan_for_common_gmst0(
+    constellation: list, gmst0_own_deg: float, gmst0_joint_deg: float,
+) -> list:
+    """Rotate a filing's satellites about the polar axis by
+    (GMST0_joint − GMST0_own) so that, under the joint run's single GMST0, its
+    ECEF geometry is exactly what its own run (with its own GMST0) simulates:
+
+        ECEF(0) = R(−g_joint) · R(g_joint − g_own) · ECI = R(−g_own) · ECI.
+
+    A rotation about z adds the angle to RAAN and changes nothing else
+    (J2 rates depend on a, e, i only), so the identity holds for every t.
+    Returns the same list when the two agree; copies otherwise."""
+    import copy as _copy
+    d_deg = ((float(gmst0_joint_deg) - float(gmst0_own_deg) + 180.0) % 360.0) - 180.0
+    if abs(d_deg) < 1e-9:
+        return constellation
+    d_rad = math.radians(d_deg)
+    out = []
+    for oe in constellation:
+        oe2 = _copy.copy(oe)
+        oe2.raan = (float(oe.raan) + d_rad) % (2.0 * math.pi)
+        out.append(oe2)
+    return out
+
+
+def _joint_wcga(
+    *,
+    cfgs: list[dict[str, Any]],
+    combined: list,
+    pfd_multi: Any,
+    mask_id_per_sat: list[int],
+    system_id_per_sat: list[int],
+    per_system_antenna: list,
+    per_system_alpha0: list[float],
+    per_system_eps0: list[float],
+    per_system_caps: list[dict[str, Any]],
+    per_system_nco: list,
+    per_system_thr: list,
+    step_deg: float,
+    n_jobs: int,
+    search_fn: Any,
+    progress: Any | None = None,
+    fallback_local: Any | None = None,
+) -> tuple[Any, int, dict[str, Any]]:
+    """Joint WCGA over a fused megaconstellation — S.1503-4 §D3.1.2 applied
+    literally: ONE single-entry search per unique (a, e, i, system, mask) set,
+    every input of that search taken from the set's OWN filing, then the
+    normative cross-set rule (margin vs that filing's Article-22 curve, 0.1 dB
+    bin, ties to the LOWEST angular velocity — src/main.py:2515-2531).
+
+    There is no aggregate quantity anywhere in this function: the joint WCG is
+    by construction the WCG of one of the merged systems (the reviewer's
+    point), recomputed under nothing but that system's data.
+
+    Returns ``(best_wcg, best_ref_idx, meta)``; ``meta["candidates"]`` lists
+    every set's own winner — what an identity check against the individual
+    WCGs needs (lat, Δλ, α, margin, ω, system).
+    """
+    if fallback_local is None:
+        fallback_local = _fall_back_to_local_compute
+
+    # Dedup key: the satellite's REAL elements (OrbitalElements declares
+    # a/e/i — `a_km` / `i_rad` never existed, so the old key rounded both to
+    # 0.0 and collapsed every shell sharing an eccentricity and a mask id onto
+    # the first satellite in filing order: one filing's orbit stood in for
+    # another's), the mask CONTENT hash (as src/main.py:2434), and the system
+    # id — α₀/ε₀/εGSO/antenna/threshold are per filing, so two filings sharing
+    # an orbit and a mask are still two different single-entry searches.
+    _mask_hash_cache: dict[int, str] = {}
+
+    def _mask_hash(sat_idx: int) -> str:
+        mid = int(mask_id_per_sat[sat_idx])
+        h = _mask_hash_cache.get(mid)
+        if h is None:
+            h = pfd_multi.mask_for_sat(sat_idx).content_hash()
+            _mask_hash_cache[mid] = h
+        return h
+
+    unique_orbits: dict[tuple, int] = {}
+    for idx, oe in enumerate(combined):
+        key = (round(float(oe.a), 6), round(float(oe.e), 9), round(float(oe.i), 9),
+               int(system_id_per_sat[idx]), _mask_hash(idx))
+        if key not in unique_orbits:
+            unique_orbits[key] = idx
+    _emit(f"[method_3] {len(unique_orbits)} unique (a,e,i,system,mask) set(s) to evaluate")
+
+    def _symmetric_for(sid: int, mask) -> bool:
+        """θ-symmetry of the OWNING filing, same precedence as main.py:2361:
+        explicit `s1503_symmetric_mask` wins, else auto-detect on that
+        filing's own mask, else full circle. Omitting it took
+        search_wcg_s1503's default True (half circle θ∈[0,π]) while the
+        individual runs searched the full circle."""
+        v = (cfgs[sid].get("wcg_search") or {}).get("s1503_symmetric_mask")
+        if v is not None:
+            return bool(v)
+        try:
+            sym, _reason = mask.detect_wcg_theta_symmetry()
+            return bool(sym)
+        except Exception:  # noqa: BLE001
+            return False
+
+    bin_size_db = 0.1
+    best_wcg = None
+    best_ref_idx = -1
+    best_margin = -float("inf")
+    best_ang_vel = float("inf")
+    candidates: list[dict[str, Any]] = []
+    total = max(1, len(unique_orbits))
+    for k, (key, ref_idx) in enumerate(unique_orbits.items()):
+        oe_ref = combined[ref_idx]
+        ref_mask = pfd_multi.mask_for_sat(ref_idx)
+        ref_sid = int(system_id_per_sat[ref_idx])
+        if progress is not None:
+            progress((k + 1) / total)
+        # Every input below belongs to the ORBIT's OWN filing.
+        wcg_kwargs = dict(
+            oe_ref=oe_ref, t_s=0.0,
+            pfd_mask=ref_mask, es_antenna=per_system_antenna[ref_sid],
+            alpha0_deg=per_system_alpha0[ref_sid],
+            min_elevation_deg=per_system_eps0[ref_sid],
+            gso_min_elevation_deg=per_system_caps[ref_sid]["gso_min_elevation_deg"],
+            step_size_deg=step_deg, n_jobs=n_jobs,
+            symmetric_mask=_symmetric_for(ref_sid, ref_mask),
+            orbit_idx=k, total_orbits=len(unique_orbits),
+            max_co_freq_by_lat=per_system_nco[ref_sid],
+            strict_exclusion_zone=per_system_caps[ref_sid]["strict_exclusion_zone"],
+            # THIS filing's mask RefBW correction (the fused PFDMaskMulti
+            # reduces refbw to its primary sub-mask) and THIS filing's
+            # Article-22 curve, so the ranking is the normative margin.
+            pfd_bw_correction_db=_bw_correction_db(cfgs[ref_sid], ref_mask),
+            epfd_threshold_by_lat_fn=per_system_thr[ref_sid],
+        )
+        wcg_i = None
+        # A cluster-dispatch fault (broken runtime env on a worker node)
+        # must not cost the orbit: disarm and redo it locally, once.
+        for _attempt in (1, 2):
+            try:
+                wcg_i = search_fn(**wcg_kwargs)
+                break
+            except Exception as exc:  # noqa: BLE001
+                if _attempt == 1 and fallback_local(str(exc)):
+                    continue
+                _emit(f"WARN: WCGA set {k} (sys{ref_sid}, sat#{ref_idx}): {exc}")
+                break
+        if wcg_i is None:
+            continue
+        cand_epfd = float(wcg_i.epfd_dBW)
+        cand_ang_vel = float(getattr(wcg_i, "angular_velocity_deg_s", math.inf))
+        cand_margin = cand_epfd - float(per_system_thr[ref_sid](wcg_i.es_lat_deg))
+        candidates.append({
+            "system_index": ref_sid, "sat_index": int(ref_idx),
+            "a_km": float(oe_ref.a), "e": float(oe_ref.e), "i_deg": math.degrees(float(oe_ref.i)),
+            "mask_id": int(mask_id_per_sat[ref_idx]),
+            "es_lat_deg": float(wcg_i.es_lat_deg), "es_lon_deg": float(wcg_i.es_lon_deg),
+            "gso_lon_deg": float(wcg_i.gso_lon_deg),
+            "alpha_deg": float(getattr(wcg_i, "alpha_deg", float("nan"))),
+            "epfd_dbw": cand_epfd, "margin_db": cand_margin, "ang_vel_deg_s": cand_ang_vel,
+        })
+        # §D3.1.2 cross-set rule, identical to the per-filing driver: margin,
+        # 0.1 dB bin, ties broken by the LOWEST angular velocity.
+        if (
+            best_wcg is None
+            or cand_margin > best_margin + bin_size_db
+            or (abs(cand_margin - best_margin) <= bin_size_db and cand_ang_vel < best_ang_vel)
+        ):
+            best_wcg, best_ref_idx = wcg_i, int(ref_idx)
+            best_margin, best_ang_vel = cand_margin, cand_ang_vel
+    if best_wcg is None:
+        raise RuntimeError("method_3: joint WCGA produced no valid result")
+    meta = {
+        "mode": "joint_wcga",
+        "unique_sets": len(unique_orbits),
+        "winning_system": int(system_id_per_sat[best_ref_idx]),
+        "winning_sat_index": int(best_ref_idx),
+        "best_margin_db": float(best_margin),
+        "best_ang_vel_deg_s": float(best_ang_vel),
+        "candidates": candidates,
+    }
+    return best_wcg, best_ref_idx, meta
+
+
 def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     """Joint simulation (Method 2B): fused megaconstellation, single sim run."""
     from src.main import (  # type: ignore[import]
@@ -1597,6 +1792,29 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     # shorter) standalone T_run.
     t_run_joint = dt * num_steps
 
+    # ── GMST0 (initial Earth rotation): ONE per run, every filing honoured ──
+    # Each filing's individual run sets GMST0 from ITS SRS (right_asc −
+    # long_asc, so its declared ascending-node longitude is honoured —
+    # src/main.py:1950-1960). The joint run never set it, inheriting whatever
+    # the process global held (0.0, or a previous run's). One Earth cannot
+    # take four values — so the joint run sets one GMST0 and rotates each
+    # filing's RAAN by (GMST0_joint − GMST0_k): ECEF(0) = R(−g_c)·R(g_c−g_k)·ECI_k
+    # = R(−g_k)·ECI_k, i.e. every filing's ECEF ground track is EXACTLY the
+    # one its own run simulates (J2 rates depend on a, e, i only, so the
+    # identity holds for all t). Rigid per filing — the WCGA and the CCDF of
+    # each system are untouched; only absolute longitudes become comparable.
+    from src.coordinates import set_earth_rotation_initial_deg  # type: ignore[import]
+    per_system_gmst0 = [_gmst0_for_cfg(c) for c in cfgs]
+    gmst0_joint = float(per_system_gmst0[0])
+    set_earth_rotation_initial_deg(gmst0_joint)
+    if len({round(g, 6) for g in per_system_gmst0}) > 1:
+        _emit("[method_3] GMST0 per filing: " + " · ".join(
+            f"sys{i}={g:.4f}°" for i, g in enumerate(per_system_gmst0))
+            + f" → joint GMST0={gmst0_joint:.4f}° (sys0); other filings' RAAN "
+              "rotated by (GMST0_joint − GMST0_k) so each keeps its own ground track")
+    else:
+        _emit(f"[method_3] GMST0 = {gmst0_joint:.4f}° (all filings agree)")
+
     combined: list = []
     masks_by_id: dict[int, Any] = {}
     mask_owner: dict[int, int] = {}   # global mask id → owning filing index
@@ -1612,6 +1830,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         # (see _apply_orbit_dynamics — run_epfd_simulation's raan_dot_*/
         # wdelta_deg scalars would apply ONE filing's rate to everyone).
         const = _apply_orbit_dynamics(cfg, const, t_run_joint)
+        const = _rotate_raan_for_common_gmst0(const, per_system_gmst0[idx], gmst0_joint)
         combined.extend(const)
         # This filing's own per-satellite mask routing (mask_lnk1, same rule
         # as method_1 — see _build_mask_for_sats), remapped onto ids GLOBAL
@@ -1738,6 +1957,32 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         )
 
     per_system_thr = [_thr_fn(c) for c in cfgs]
+    # The WCG is defined per RUN — {direction, service, frequency, ES dish,
+    # epfd threshold, RefBW} (§D3.1.2 "for specified GSO ES type"). Ranking
+    # each system by ITS OWN margin is the normative reading, but margins
+    # against DIFFERENT limit rows are not the same quantity: a fused run
+    # mixing Article-22 rows is ill-posed at the level of the Recommendation.
+    # Say so, loudly, instead of letting the comparison look routine.
+    _a22_rows = {}
+    for i, c in enumerate(cfgs):
+        a22 = c.get("article22_limits") or {}
+        key = (
+            str(a22.get("rr_reference")), str(a22.get("_epfd_rf_diam_cm")),
+            float(a22.get("reference_bandwidth_khz", 40.0) or 40.0),
+            json.dumps(a22.get("limits"), sort_keys=True, default=str),
+        )
+        _a22_rows.setdefault(key, []).append(i)
+    if len(_a22_rows) > 1:
+        _emit(
+            "WARN: [method_3] filings carry DIFFERENT Article-22 limit rows — "
+            + " · ".join(
+                f"sys{ids}: {k[0]} D={k[1]} cm RefBW={k[2]:g} kHz"
+                for k, ids in _a22_rows.items()
+            )
+            + " — the joint WCGA ranks each system by its own margin, so the "
+              "cross-system comparison mixes different thresholds; a fused run "
+              "should share ONE limits row (same band / dish class)."
+        )
 
     # Dual time step (§D4.7) for the joint pass. The aggregate worker used to
     # write dual_time_step_mode into the cfg and then never build a
@@ -1771,133 +2016,99 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
             gso_lon_deg=float(params["geometry_gso_lon"]),
         )
         wcg = geometry_to_wcg_result(gp)
+        wcga_meta = {"mode": "manual", "gmst0_joint_deg": float(gmst0_joint),
+                     "per_system_gmst0_deg": [float(g) for g in per_system_gmst0]}
         _emit(f"[method_3] manual geometry: ES({gp.es_lat_deg},{gp.es_lon_deg}) GSO {gp.gso_lon_deg}")
         _emit_progress(45)
     else:
         _emit("[method_3] joint WCGA on combined constellation (S.1503-4 §D.3.1)")
         _emit_progress(20)
-        # Unique (orbit, system, mask) sets of the megaconstellation.
-        # OrbitalElements declares a/e/i — `a_km` and `i_rad` never existed, so
-        # the old key rounded both to 0.0 and degenerated to (0, e, 0, mask_id):
-        # every shell sharing an eccentricity and a mask id collapsed onto the
-        # FIRST satellite in filing order, i.e. one filing's orbit stood in for
-        # another's. Now keyed like the per-filing driver (src/main.py:2434) —
-        # real elements + mask CONTENT hash — plus system_id, because α₀/ε₀/
-        # εGSO/antenna/threshold below are per filing: two filings sharing an
-        # orbit and a mask are still two different single-entry searches.
-        _mask_hash_cache: dict[int, str] = {}
-
-        def _mask_hash(sat_idx: int) -> str:
-            mid = int(mask_id_per_sat[sat_idx])
-            h = _mask_hash_cache.get(mid)
-            if h is None:
-                h = pfd_multi.mask_for_sat(sat_idx).content_hash()
-                _mask_hash_cache[mid] = h
-            return h
-
-        unique_orbits: dict[tuple, int] = {}
-        for idx, oe in enumerate(combined):
-            key = (round(float(oe.a), 6),
-                   round(float(oe.e), 9),
-                   round(float(oe.i), 9),
-                   int(system_id_per_sat[idx]),
-                   _mask_hash(idx))
-            if key not in unique_orbits:
-                unique_orbits[key] = idx
-        _emit(f"[method_3] {len(unique_orbits)} unique (a,e,i,system,mask) set(s) to evaluate")
         # Normative grid is 0.1° (S.1503-4 §D3: "The search grid is in steps of
         # 0.1°"); same fallback as the per-filing driver (src/main.py:2360).
         step_deg = float(common.get("s1503_step_deg") or 0.1)
         # -1 = all cores (matches run_wcg_downlink's own default, src/main.py).
-        # Safe here: the orbit loop below is sequential — nothing else runs
+        # Safe here: the orbit loop is sequential — nothing else runs
         # concurrently to oversubscribe against (unlike _run_at_geometry /
         # _system_contribution_task, dispatched many-at-once via Ray, which
         # correctly keep n_jobs=1 per task).
         n_jobs = int(cfgs[0]["simulation"].get("n_jobs", -1) or -1)
+        wcg, best_ref_idx, wcga_meta = _joint_wcga(
+            cfgs=cfgs, combined=combined, pfd_multi=pfd_multi,
+            mask_id_per_sat=mask_id_per_sat, system_id_per_sat=system_id_per_sat,
+            per_system_antenna=per_system_antenna,
+            per_system_alpha0=per_system_alpha0, per_system_eps0=per_system_eps0,
+            per_system_caps=per_system_caps, per_system_nco=per_system_nco,
+            per_system_thr=per_system_thr,
+            step_deg=step_deg, n_jobs=n_jobs, search_fn=search_wcg_s1503,
+            progress=lambda frac: _emit_progress(20 + 25.0 * frac),
+        )
+        best_sid = int(system_id_per_sat[best_ref_idx])
+        _emit(
+            f"[method_3] WCG_agg: ES({wcg.es_lat_deg:.2f},{wcg.es_lon_deg:.2f}) "
+            f"GSO {wcg.gso_lon_deg:.2f} · winner sys{best_sid} sat#{best_ref_idx} "
+            f"margin={wcga_meta['best_margin_db']:.2f} dB "
+            f"ω={wcga_meta['best_ang_vel_deg_s']:.5f} °/s "
+            f"({wcga_meta['unique_sets']} single-entry set(s) searched)"
+        )
 
-        def _symmetric_for(sid: int, mask) -> bool:
-            """θ-symmetry of the OWNING filing, same precedence as main.py:2361:
-            explicit `s1503_symmetric_mask` wins, else auto-detect on that
-            filing's own mask, else full circle. Omitting it took
-            search_wcg_s1503's default True (half circle θ∈[0,π]) while the
-            individual runs searched the full circle — a strictly smaller
-            merged candidate set."""
-            v = (cfgs[sid].get("wcg_search") or {}).get("s1503_symmetric_mask")
-            if v is not None:
-                return bool(v)
-            try:
-                sym, _reason = mask.detect_wcg_theta_symmetry()
-                return bool(sym)
-            except Exception:  # noqa: BLE001
-                return False
+        # ΔM alignment — parity with run_wcg_downlink (src/main.py:2583-2592):
+        # rotate the mean anomaly so the WINNING satellite sits on the WCGA
+        # snapshot at t = 0. Applied to the winning FILING's satellites only:
+        # rigid within the filing (its own geometry is untouched), and the
+        # relative phase between two filings at t = 0 has no common epoch in
+        # the SRS — it is not a physical quantity to preserve.
+        ref_sat = combined[best_ref_idx]
+        _ref_eci = np.asarray(getattr(wcg, "ref_sat_eci", np.zeros(3)), dtype=float).ravel()[:3]
+        if float(np.linalg.norm(_ref_eci)) > 1e-6:
+            from src.orbit_propagator import eci_to_mean_anomaly  # type: ignore[import]
+            import copy as _copy
+            delta_M = (eci_to_mean_anomaly(ref_sat, _ref_eci) - float(ref_sat.M)) % (2.0 * math.pi)
+            if delta_M > math.pi:
+                delta_M -= 2.0 * math.pi
+            n_aligned = 0
+            for j, oe in enumerate(combined):
+                if int(system_id_per_sat[j]) == best_sid:
+                    oe2 = _copy.copy(oe)
+                    oe2.M = (float(oe.M) + delta_M) % (2.0 * math.pi)
+                    combined[j] = oe2
+                    n_aligned += 1
+            wcga_meta["delta_M_deg"] = math.degrees(delta_M)
+            wcga_meta["n_sats_aligned"] = n_aligned
+            _emit(f"[method_3] alignment to WCG: ΔM = {math.degrees(delta_M):+.2f}° "
+                  f"applied to the {n_aligned} satellite(s) of sys{best_sid}")
 
-        _BIN_SIZE_DB = 0.1
-        best_wcg = None
-        best_margin = -float("inf")
-        best_ang_vel = float("inf")
-        for k, (key, ref_idx) in enumerate(unique_orbits.items()):
-            oe_ref = combined[ref_idx]
-            ref_mask = pfd_multi.mask_for_sat(ref_idx)
-            ref_sid = int(system_id_per_sat[ref_idx])
-            ref_nco = per_system_nco[ref_sid]
-            _emit_progress(20 + 25.0 * (k + 1) / max(1, len(unique_orbits)))
-            # Every WCGA input below belongs to the ORBIT's OWN filing: the
-            # search is single-entry (§D3.1.2 "repeated over each such set"),
-            # so borrowing any of them from another filing evaluates a system
-            # against data that is not its own.
-            wcg_kwargs = dict(
-                oe_ref=oe_ref, t_s=0.0,
-                pfd_mask=ref_mask, es_antenna=per_system_antenna[ref_sid],
-                alpha0_deg=per_system_alpha0[ref_sid],
-                min_elevation_deg=per_system_eps0[ref_sid],
-                gso_min_elevation_deg=per_system_caps[ref_sid]["gso_min_elevation_deg"],
-                step_size_deg=step_deg, n_jobs=n_jobs,
-                symmetric_mask=_symmetric_for(ref_sid, ref_mask),
-                orbit_idx=k, total_orbits=len(unique_orbits),
-                max_co_freq_by_lat=ref_nco,
-                strict_exclusion_zone=per_system_caps[ref_sid]["strict_exclusion_zone"],
-                # PFD→EPFD RefBW correction of THIS filing's mask (the fused
-                # PFDMaskMulti reduces refbw to its primary sub-mask, so the
-                # run-wide bw_correction_db is wrong for every other filing);
-                # and THIS filing's Article-22 curve, so the ranking is the
-                # normative margin and not absolute EPFD.
-                pfd_bw_correction_db=_bw_correction_db(cfgs[ref_sid], ref_mask),
-                epfd_threshold_by_lat_fn=per_system_thr[ref_sid],
+        # S.1503-4 §D3 + Fig. 13: shift ES/GSO longitude so the winning
+        # satellite of the TEMPORAL model (full orbit, fine Δt of THIS run)
+        # crosses the WCGA geometry in its first orbit. The per-filing run
+        # applies it by default (src/main.py:3216); the joint run never did,
+        # so its absolute longitude was the raw WCGA output — incomparable
+        # with the individual WCGs and unaligned with the simulated track.
+        # Orbit dynamics (§D6.3) are already folded per filing into
+        # `combined` (_apply_orbit_dynamics), hence the zero rates here.
+        wcg.es_lat_nominal = float(wcg.es_lat_deg)
+        wcg.es_lon_nominal = float(wcg.es_lon_deg)
+        wcg.gso_lon_nominal = float(wcg.gso_lon_deg)
+        if bool(_sim0.get("s1503_figure13", True)):
+            from src.s1503_figure13_wcg_lon import (  # type: ignore[import]
+                apply_s1503_figure13_wcg_longitude_adjustment,
             )
-            wcg_i = None
-            # A cluster-dispatch fault (broken runtime env on a worker node)
-            # must not cost the orbit: disarm and redo it locally, once.
-            for _attempt in (1, 2):
-                try:
-                    wcg_i = search_wcg_s1503(**wcg_kwargs)
-                    break
-                except Exception as exc:  # noqa: BLE001
-                    if _attempt == 1 and _fall_back_to_local_compute(str(exc)):
-                        continue
-                    _emit(f"WARN: WCGA orbit {k}: {exc}")
-                    break
-            if wcg_i is None:
-                continue
-            # §D3.1.2 cross-set rule, identical to the per-filing driver
-            # (src/main.py:2515-2531): rank by margin, 0.1 dB bin, ties broken
-            # by the LOWEST angular velocity. The old `>` on absolute EPFD
-            # dropped both the threshold and criterion 2.
-            cand_epfd = float(wcg_i.epfd_dBW)
-            cand_ang_vel = float(getattr(wcg_i, "angular_velocity_deg_s", math.inf))
-            cand_margin = cand_epfd - float(per_system_thr[ref_sid](wcg_i.es_lat_deg))
-            if (
-                best_wcg is None
-                or cand_margin > best_margin + _BIN_SIZE_DB
-                or (abs(cand_margin - best_margin) <= _BIN_SIZE_DB
-                    and cand_ang_vel < best_ang_vel)
-            ):
-                best_wcg = wcg_i
-                best_margin = cand_margin
-                best_ang_vel = cand_ang_vel
-        if best_wcg is None:
-            raise RuntimeError("method_3: joint WCGA produced no valid result")
-        wcg = best_wcg
-        _emit(f"[method_3] WCG_agg: ES({wcg.es_lat_deg:.2f},{wcg.es_lon_deg:.2f}) GSO {wcg.gso_lon_deg:.2f}")
+            fig13 = apply_s1503_figure13_wcg_longitude_adjustment(
+                wcg_result=wcg, constellation=combined,
+                dominant_sat_idx=best_ref_idx, fine_dt_s=float(dt),
+                raan_dot_artificial_rad_s=0.0, raan_dot_override_rad_s=None,
+                wdelta_deg=0.0, t_run_s=float(t_run_joint),
+            )
+            if fig13.get("applied"):
+                _emit(f"[method_3] Fig. 13: Δlon = {fig13['corr_deg']:+.4f}° "
+                      f"(t_best={fig13['t_best_s']:.1f}s) → ES lon "
+                      f"{wcg.es_lon_deg:.4f}°, GSO lon {wcg.gso_lon_deg:.4f}°")
+            else:
+                _emit(f"[method_3] Fig. 13 not applied: {fig13.get('reason')}")
+        else:
+            fig13 = {"applied": False, "reason": "disabled_by_config"}
+        wcga_meta["s1503_figure13"] = fig13
+        wcga_meta["gmst0_joint_deg"] = float(gmst0_joint)
+        wcga_meta["per_system_gmst0_deg"] = [float(g) for g in per_system_gmst0]
         _emit_progress(45)
 
     # Persist the joint WCG the moment it is known — it is the headline geometry
@@ -2074,6 +2285,10 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
         "post_sum": post_sum,
         "per_system": per_system,
         "per_system_at_wcg": per_system_at_wcg,
+        # WCGA provenance: winning system/satellite, every single-entry
+        # candidate (one per (a,e,i,system,mask) set — what the identity test
+        # against the individual WCGs needs), ΔM alignment, Fig. 13, GMST0.
+        "wcg_meta": wcga_meta,
         "n_systems": len(filings),
         # Joint megaconstellation timeline (one shared N / Δt ladder).
         "dual_time_step": _dual_time_step_block(
