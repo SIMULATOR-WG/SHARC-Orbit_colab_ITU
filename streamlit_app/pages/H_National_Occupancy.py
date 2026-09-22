@@ -970,6 +970,27 @@ if len(selected) >= 2:
             msg += " No two of them share a band either."
         st.warning(msg)
 
+def _row_caption(s) -> str | None:
+    """Second line under a chart row: the bands this row occupies.
+
+    The name line already carries the notice id and the administration. A bare
+    orbital longitude (``44.0``, ``0.0``) does not say which spectrum the bar
+    is, and on an earth-station notice ``0.0`` is an empty ``long_nom``, not a
+    slot. The letter bands are derived from the same intervals the bar draws,
+    so the caption and the bar cannot disagree. The operator is kept when the
+    filing names one.
+    """
+    bands = occ.letter_bands_for(s.intervals(direction))
+    bits = []
+    if s.operator:
+        bits.append(s.operator)
+    if bands:
+        bits.append(", ".join(bands))
+    elif s.rf_bands:
+        bits.append(", ".join(s.rf_bands))
+    return " · ".join(bits) or None
+
+
 chart_rows = []
 for s in selected:
     iv = s.intervals(direction)
@@ -977,10 +998,7 @@ for s in selected:
         "label": s.label(),
         "bands": iv,
         "kind": "tx",
-        "sublabel": (
-            (s.operator or s.position or "")
-            + (f" · {', '.join(s.rf_bands)}" if s.rf_bands else "")
-        ) or None,
+        "sublabel": _row_caption(s),
     })
 if len(selected) >= 2:
     chart_rows.append({
