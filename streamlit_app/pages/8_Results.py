@@ -73,6 +73,31 @@ def _limit_curves(data: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _worst_window_curve(data: dict[str, Any]) -> dict[str, Any] | None:
+    """The window set with the highest peak, as one chart series."""
+    windows = [
+        p for p in (data.get("per_window") or [])
+        if p.get("ccdf_bins_db") and p.get("ccdf_pct")
+    ]
+    if not windows:
+        return None
+    want = data.get("worst_window_index", -1)
+    chosen = None
+    if isinstance(want, int) and want >= 0:
+        chosen = next((p for p in windows if int(p.get("window_index", -1)) == want), None)
+    if chosen is None:
+        chosen = max(windows, key=lambda p: float(p.get("max_epfd_dbw") or -1e9))
+    wi = int(chosen.get("window_index", -1))
+    return {
+        "name": f"worst window set #{wi}",
+        "epfd": chosen["ccdf_bins_db"],
+        "percent": chosen["ccdf_pct"],
+        "color": "rgba(148,163,184,0.85)",
+        "width": 1.2,
+        "dash": "dot",
+    }
+
+
 def _plot_ccdf(data: dict[str, Any]) -> None:
     series: list[dict[str, Any]] = []
     bins = data.get("ccdf_bins_db") or []
@@ -116,16 +141,13 @@ def _plot_ccdf(data: dict[str, Any]) -> None:
             "width": 1.8,
         })
 
-    # §D5.1.4.2 track-duration: overlay each slide-window set's CCDF (light);
-    # the headline curve is their worst-per-level envelope.
-    for p in data.get("per_window") or []:
-        if p.get("ccdf_bins_db") and p.get("ccdf_pct"):
-            wi = int(p.get("window_index", -1))
-            series.append({
-                "name": f"window set #{wi}",
-                "epfd": p["ccdf_bins_db"], "percent": p["ccdf_pct"],
-                "color": "rgba(148,163,184,0.55)", "width": 1.0, "dash": "dot",
-            })
+    # §D5.1.4.2: the headline is already the worst-per-level envelope of every
+    # window set. Drawing each set (N_TW is often >100) only fills the legend.
+    # Keep the one set whose peak is highest, so the chart still shows which
+    # phase alignment drives that peak.
+    _worst_pw = _worst_window_curve(data)
+    if _worst_pw is not None:
+        series.append(_worst_pw)
 
     # Grid convolution (method_2 / method_5): overlay the convolved CCDF of each
     # grid point (light); the headline is their worst-per-level envelope.
@@ -599,10 +621,11 @@ def _render_track_duration(data: dict[str, Any]) -> None:
         pw = data.get("per_window") or []
         worst = data.get("worst_window_index", -1)
         st.caption(
-            f"Ran {len(pw)} window set(s); headline CCDF is the worst-per-level "
-            "envelope across sets (the network complies only if **every** set "
-            "complies). "
-            + (f"Worst peak in set #{worst}. " if isinstance(worst, int) and worst >= 0 else "")
+            f"Ran {len(pw)} window set(s). The chart's headline is the "
+            "worst-per-level envelope (the network complies only if **every** "
+            "set complies). "
+            + (f"Only set #{worst}, the one with the highest peak, is drawn "
+               "beside it. " if isinstance(worst, int) and worst >= 0 else "")
             + "Dual time step is disabled for this variant (defined in fine steps)."
         )
 

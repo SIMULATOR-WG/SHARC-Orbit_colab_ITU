@@ -211,6 +211,22 @@ def write_per_system_timeseries_csv(result_path: Path, sim_data: dict[str, Any])
     return out.name
 
 
+def _worst_window_for_plot(sim_data: dict[str, Any]) -> dict[str, Any] | None:
+    """The window set with the highest peak. The PNG draws that one curve."""
+    windows = [
+        p for p in (sim_data.get("per_window") or [])
+        if p.get("ccdf_bins_db") and p.get("ccdf_pct")
+    ]
+    if not windows:
+        return None
+    want = sim_data.get("worst_window_index", -1)
+    if isinstance(want, int) and want >= 0:
+        hit = next((p for p in windows if int(p.get("window_index", -1)) == want), None)
+        if hit is not None:
+            return hit
+    return max(windows, key=lambda p: float(p.get("max_epfd_dbw") or -1e9))
+
+
 def _mpl():
     import matplotlib
     matplotlib.use("Agg")
@@ -221,7 +237,8 @@ def _mpl():
 def write_ccdf_png(result_path: Path, sim_data: dict[str, Any]) -> str | None:
     """``ccdf.png`` — CCDF on a log-y axis with the SAME content as the
     Results-page chart: headline curve, light overlays (per-point grid
-    convolutions, per-system single entries, §D5.1.4.2 window sets, post_sum)
+    convolutions, per-system single entries, the worst §D5.1.4.2 window
+    set, post_sum)
     and BOTH limit curves (Article 22 + Resolution 76) when present."""
     bins = sim_data.get("ccdf_bins_db") or []
     pct = sim_data.get("ccdf_pct") or []
@@ -245,8 +262,11 @@ def write_ccdf_png(result_path: Path, sim_data: dict[str, Any]) -> str | None:
     _overlay(sim_data.get("per_point") or [], "#60a5fa", "grid points (conv.)")
     _overlay(sim_data.get("per_system") or [], "#94a3b8",
              "single-entry curves", ls=":", lw=0.9)
-    _overlay(sim_data.get("per_window") or [], "#94a3b8",
-             "window sets (§D5.1.4.2)", ls=":", lw=0.9)
+    _worst = _worst_window_for_plot(sim_data)
+    if _worst is not None:
+        _overlay([_worst], "#94a3b8",
+                 f"worst window set #{_worst.get('window_index', 0)}",
+                 ls=":", lw=0.9)
     ps = sim_data.get("post_sum") or {}
     if ps.get("ccdf_bins_db") and ps.get("ccdf_pct"):
         ax.semilogy(ps["ccdf_bins_db"], ps["ccdf_pct"], lw=1.2, ls="--",
