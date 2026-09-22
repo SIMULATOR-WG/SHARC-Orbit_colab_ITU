@@ -23,13 +23,14 @@ if str(APP) not in sys.path:
 
 _CAT = APP / "data" / "br_occupancy" / "anatel_catalog.json"
 _PAGE = str(APP / "pages" / "H_National_Occupancy.py")
+_LICENSED = "licensed"
 
 pytestmark = pytest.mark.skipif(
-    not _CAT.exists(), reason="Anatel catalogue not cached"
+    not _CAT.exists(), reason="licensed-station catalogue fixture not cached"
 )
 
 _BASE = {
-    "sources": ["anatel"], "orbit": "all", "direction": "downlink",
+    "sources": [_LICENSED], "orbit": "all", "direction": "downlink",
     "rf_bands": [], "letter_bands": [], "freq_low_ghz": "", "freq_high_ghz": "",
     "chart_span": "filter", "system_ids": [], "query": "",
 }
@@ -53,10 +54,39 @@ def app(tmp_path, monkeypatch):
     from streamlit.testing.v1 import AppTest
 
     import lib.manual as manual
+    import lib.occupancy as occ
     import lib.state as state
 
     monkeypatch.setattr(manual, "help_expander", lambda *a, **k: None)
     monkeypatch.setattr(state, "DATA_ROOT", tmp_path)
+    src_root = tmp_path / "sources"
+    monkeypatch.setattr(occ, "SOURCES_DIR", src_root)
+    monkeypatch.setattr(occ, "SOURCES_INDEX", src_root / "index.json")
+    rows = json.loads(_CAT.read_text())
+    lic = src_root / _LICENSED
+    lic.mkdir(parents=True)
+    (lic / "catalog.json").write_text(json.dumps(rows))
+    (lic / "meta.json").write_text(json.dumps({
+        "kind": "national", "n_systems": len(rows), "select_logic": 3,
+    }))
+    registered = [occ.CatalogSource(
+        id=_LICENSED, label="Licensed stations", kind="national",
+        n_systems=len(rows), enabled=True,
+    )]
+    if occ.SNS_CATALOG.exists():
+        sns_rows = json.loads(occ.SNS_CATALOG.read_text())
+        if isinstance(sns_rows, list) and sns_rows:
+            sdir = src_root / "sns"
+            sdir.mkdir()
+            (sdir / "catalog.json").write_text(json.dumps(sns_rows))
+            (sdir / "meta.json").write_text(json.dumps({
+                "kind": "srs", "n_systems": len(sns_rows), "select_logic": 3,
+            }))
+            registered.append(occ.CatalogSource(
+                id="sns", label="ITU SNS", kind="srs",
+                n_systems=len(sns_rows), enabled=True,
+            ))
+    occ._write_sources(registered)
 
     def _start(**overrides):
         (tmp_path / "state_br_occupancy.form.json").write_text(
@@ -379,7 +409,7 @@ def test_band_buttons_drive_the_chart_slider(app):
 def test_country_filter_narrows_the_pool(app):
     """The country stopped being a property of the index and became a filter."""
     # Both catalogues, so more than one administration is present.
-    at = app(sources=["anatel", "sns"])
+    at = app(sources=[_LICENSED, "sns"])
     boxes = [b for b in at.selectbox if b.label == "Occupancy in"]
     assert boxes, [b.label for b in at.selectbox]
     options = list(boxes[0].options)
@@ -390,7 +420,7 @@ def test_country_filter_narrows_the_pool(app):
     # Every offered symbol must actually select something, and less than all.
     for label in options[1:4]:
         code = label.split(" ·")[0]
-        narrowed = app(sources=["anatel", "sns"], country=code)
+        narrowed = app(sources=[_LICENSED, "sns"], country=code)
         n = _count_after_filters(narrowed)
         assert 0 < n < everywhere, (code, n, everywhere)
 
@@ -420,8 +450,8 @@ def test_picker_is_capped_when_the_pool_is_huge(app, monkeypatch):
 def test_page_is_not_named_after_one_country():
     """The page generalised: nothing user-visible may say Brazil any more.
 
-    The built-in catalogue is still Anatel's and the help may name Brazil as an
-    example, but titles, captions and file names must not.
+    The help may name a country as an example of an ITU symbol, but titles,
+    captions and file names must not.
     """
     page = (REPO / "streamlit_app" / "pages" / "H_National_Occupancy.py").read_text()
     for banned in ('st.title("Brazil', 'page_title="Brazil',
@@ -448,10 +478,10 @@ def test_page_is_not_named_after_one_country():
 
 
 def test_chart_title_and_export_name_follow_the_country(app):
-    ids = _some_ids(3)          # Anatel rows, which carry adm="B"
-    at = app(sources=["anatel", "sns"], country="B", system_ids=ids)
+    ids = _some_ids(3)          # licensed rows, which carry adm="B"
+    at = app(sources=[_LICENSED, "sns"], country="B", system_ids=ids)
     md = "".join(str(m.value) for m in at.markdown)
     assert "Band occupancy — B —" in md, md[-400:]
-    at2 = app(sources=["anatel", "sns"], system_ids=ids)
+    at2 = app(sources=[_LICENSED, "sns"], system_ids=ids)
     md2 = "".join(str(m.value) for m in at2.markdown)
     assert "all countries" in md2, md2[-400:]

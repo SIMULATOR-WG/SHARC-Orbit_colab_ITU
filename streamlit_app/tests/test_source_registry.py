@@ -268,10 +268,10 @@ def test_provenance_caption_names_the_rule_not_the_country(tmp_path, monkeypatch
 
 
 def test_no_country_or_authority_in_the_interface_copy(tmp_path, monkeypatch):
-    """It is a platform for any administration, so none may be named in the UI.
+    """It is a platform for any administration, so none is built in.
 
-    A country appears only as DATA — a provider row, an ITU symbol in a filter,
-    the label a user typed. Never as page copy.
+    A country appears only as DATA — an ITU symbol in a filter, the label a
+    user typed. Never as a download button or a shipped catalogue.
     """
     at, page_occ = _page_app(tmp_path, monkeypatch)
     shown = " ".join(
@@ -282,28 +282,22 @@ def test_no_country_or_authority_in_the_interface_copy(tmp_path, monkeypatch):
         + [str(m.label) for m in at.multiselect]
         + [str(s.label) for s in at.selectbox]
     )
-    # A provider's own label IS data and may name its country; strip those
-    # before looking for a country welded into the copy.
-    for row in page_occ.national_providers():
-        shown = shown.replace(row["label"], "<provider>")
     for banned in ("Anatel", "Brazilian", "occupancy in Brazil", "Brazil catalogue"):
         assert banned not in shown, (banned, shown[:400])
     # "BR IFIC" is the ITU Radiocommunication Bureau's product, not Brazil.
     assert "Brazil" not in shown.replace("BR IFIC", ""), shown[:400]
+    assert not hasattr(page_occ, "national_providers")
+    assert not hasattr(page_occ, "refresh_anatel")
 
 
-def test_the_published_catalogue_is_a_data_row(tmp_path, monkeypatch):
-    """Adding another administration must be a dict entry, not UI text."""
-    at, page_occ = _page_app(tmp_path, monkeypatch)
-    provs = page_occ.national_providers()
-    assert provs, "no provider configured"
-    for row in provs:
-        assert {"id", "label", "adm", "url"} <= set(row), row
-        assert row["url"].startswith("http")
-    # The page renders the provider's own label rather than a literal.
+def test_no_built_in_national_catalogue(tmp_path, monkeypatch):
+    """A licensed catalogue is uploaded. No administration is fetched for you."""
+    _page_app(tmp_path, monkeypatch)
     page = (REPO / "streamlit_app" / "pages" / "H_National_Occupancy.py").read_text()
-    assert "_prov['label']" in page
+    assert "refresh_anatel" not in page
+    assert "national_providers" not in page
     assert '"Anatel"' not in page and "'Anatel'" not in page
+    assert "Add a national licensed catalogue" in page
 
 
 def test_a_newly_added_catalogue_is_selected_and_reaches_the_chart(tmp_path, monkeypatch):

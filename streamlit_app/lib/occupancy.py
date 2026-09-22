@@ -3,16 +3,19 @@
 Three kinds of input, any of which may be absent:
 
 * a national licensed-station table, uploaded by the administration that
-  issued it, or fetched where one is published — Anatel's ``satelites.zip``
-  is the catalogue that ships built in;
-* BR IFIC online ISO / SRS (subscription) — complete ``SRS.mdb``;
-* public weekly ``ificXXXX.mdb`` from the ITU WIC year page (that week's
-  publications only), and any additional filing ``.mdb`` for study.
+  issued it, in the documented CSV shape;
+* BR IFIC online ISO / SRS (subscription) — complete ``SRS.mdb``,
+  plus any additional filing ``.mdb`` the user indexes for study.
+
+The public weekly ``ificXXXX.mdb`` is not a source: it only carries that
+week's publications and does not hold the assignments an occupancy
+evaluation needs.
 
 Every notice is indexed; the country is a FILTER over the result, not a
 property of the index, so one cache serves every administration.
 
-Downloads use stdlib urllib only and are user-triggered.
+There is no built-in national catalogue and no download of one. An
+administration that wants its licensed stations on the chart uploads a table.
 
 Parsed catalogs are cached under ``streamlit_app/data/br_occupancy/`` — the
 directory keeps its original name so an existing installation does not lose
@@ -28,16 +31,12 @@ import subprocess
 import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, urljoin
-from urllib.request import Request, urlopen
+from urllib.parse import quote
 
 from . import DATA_ROOT, REPO_ROOT
 
-ITU_WIC_BASE = "https://www.itu.int/sns/wic/"
-ITU_WIC_YEAR_URL = "https://www.itu.int/sns/wic/demowic26.html"
 ITU_BRIFIC_BASE = "https://www.itu.int/epublications/brific-space"
 # Same Download-ISO control as the BR IFIC portal banner.
 _BRIFIC_ISO_PATH = "iso"
@@ -48,10 +47,6 @@ _BRIFIC_SRS_ISO_PATHS = (
     "/Databases/SRS_Data/SRS.mdb",
     "/Databases/SRS_Data/srs.mdb",
     "/SRS_Data/SRS.mdb",
-)
-ANATEL_ZIP_URL = (
-    "https://www.anatel.gov.br/dadosabertos/paineis_de_dados/"
-    "espectro_e_orbita/satelites.zip"
 )
 ANATEL_SUBFAIXAS = "stel_satelites_subfaixas.csv"
 
@@ -72,12 +67,11 @@ SNS_CATALOG = CACHE_DIR / "sns_catalog.json"
 SOURCES_DIR = CACHE_DIR / "sources"
 SOURCES_INDEX = SOURCES_DIR / "index.json"
 
-_UA = "SHARC-Orbit/1.0 (national occupancy catalog)"
-# The two tags a licensed row can carry. "anatel" is the catalogue that ships
-# built in and keeps its historic tag so its cached JSON stays byte-identical;
-# anything an administration uploads is "national". Both mean the same thing —
-# a licensed station, not an ITU filing — so every test of "is this licensed?"
-# must accept both, which is what `is_national_source` is for.
+# The two tags a licensed row can carry. "anatel" is the catalogue tag that
+# keeps its historic name so a cached JSON stays byte-identical; anything an
+# administration uploads is "national". Both mean the same thing — a licensed
+# station, not an ITU filing — so every test of "is this licensed?" must
+# accept both, which is what `is_national_source` is for.
 SRC_ANATEL = "anatel"
 SRC_NATIONAL = "national"
 _NATIONAL_SOURCES = frozenset({SRC_ANATEL, SRC_NATIONAL})
@@ -311,123 +305,6 @@ def system_from_dict(d: dict[str, Any]) -> OccupancySystem:
     )
 
 
-# ── HTTP ─────────────────────────────────────────────────────────────────────
-
-def http_get_bytes(url: str, *, timeout: float = 120.0) -> bytes:
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "*/*"})
-    with urlopen(req, timeout=timeout) as resp:  # noqa: S310 — user-triggered catalog refresh
-        return resp.read()
-
-
-def http_download(url: str, dest: Path, *, timeout: float = 600.0) -> int:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    req = Request(url, headers={"User-Agent": _UA, "Accept": "*/*"})
-    n = 0
-    with urlopen(req, timeout=timeout) as resp, dest.open("wb") as fh:  # noqa: S310
-        while True:
-            chunk = resp.read(1024 * 1024)
-            if not chunk:
-                break
-            fh.write(chunk)
-            n += len(chunk)
-    return n
-
-
-# ── ITU WIC index ────────────────────────────────────────────────────────────
-
-class _IficIndexParser(HTMLParser):
-    """Collect Space IFIC zip links and nearby publication-date text."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str]] = []  # (href, inner_text)
-        self._buf: list[str] = []
-        self._href: str | None = None
-        self.plain: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag == "a":
-            href = dict(attrs).get("href") or ""
-            if re.search(r"ific\d+\.zip", href, re.I):
-                self._href = href
-                self._buf = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag == "a" and self._href is not None:
-            self.links.append((self._href, "".join(self._buf).strip()))
-            self._href = None
-            self._buf = []
-
-    def handle_data(self, data: str) -> None:
-        t = data.strip()
-        if t:
-            self.plain.append(t)
-        if self._href is not None:
-            self._buf.append(data)
-
-
-_IFIC_NO_RE = re.compile(r"ific(\d+)\.zip", re.I)
-_DATE_RE = re.compile(r"(\d{2}\.\d{2}\.\d{4})")
-
-
-def parse_ific_index(html: str, page_url: str = ITU_WIC_YEAR_URL) -> list[dict[str, str]]:
-    """Parse the ITU WIC year page into ``[{ific_no, date, zip_url, label}, ...]``.
-
-    Rows follow document order (latest first on the 2026 page).
-    """
-    parser = _IficIndexParser()
-    parser.feed(html or "")
-    dates = _DATE_RE.findall("\n".join(parser.plain))
-    out: list[dict[str, str]] = []
-    seen: set[str] = set()
-    for i, (href, label) in enumerate(parser.links):
-        m = _IFIC_NO_RE.search(href)
-        if not m:
-            continue
-        no = m.group(1)
-        if no in seen:
-            continue
-        seen.add(no)
-        date = dates[i] if i < len(dates) else ""
-        out.append({
-            "ific_no": no,
-            "date": date,
-            "zip_url": urljoin(page_url, href),
-            "label": (label or no).strip(),
-        })
-    return out
-
-
-def latest_ific(entries: list[dict[str, str]]) -> dict[str, str] | None:
-    return entries[0] if entries else None
-
-
-def itu_wic_url_for_year(year: int | None = None) -> str:
-    y = int(year or datetime.now(timezone.utc).year)
-    return urljoin(ITU_WIC_BASE, f"demowic{y % 100:02d}.html")
-
-
-def fetch_ific_index(*, year: int | None = None) -> list[dict[str, str]]:
-    urls = [itu_wic_url_for_year(year), ITU_WIC_YEAR_URL]
-    last_err: Exception | None = None
-    seen: set[str] = set()
-    for url in urls:
-        if url in seen:
-            continue
-        seen.add(url)
-        try:
-            raw = http_get_bytes(url, timeout=60.0)
-        except Exception as exc:  # noqa: BLE001
-            last_err = exc
-            continue
-        entries = parse_ific_index(raw.decode("utf-8", errors="replace"), url)
-        if entries:
-            return entries
-    if last_err:
-        raise last_err
-    return []
-
-
 def brific_iso_url(ific_no: str) -> str:
     """Portal 'Download ISO' URL for one BR IFIC edition."""
     no = str(ific_no).strip()
@@ -621,40 +498,9 @@ def parse_anatel_subfaixas_csv(
     return out
 
 
-def extract_anatel_zip(zip_path: Path, dest: Path) -> Path:
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(dest)
-    # zip may nest a folder
-    found = list(dest.rglob(ANATEL_SUBFAIXAS))
-    if not found:
-        raise FileNotFoundError(f"{ANATEL_SUBFAIXAS} not found inside {zip_path}")
-    return found[0]
-
-
 def bundled_anatel_csv() -> Path | None:
     p = REPO_ROOT / "docs" / "satelites" / ANATEL_SUBFAIXAS
     return p if p.exists() else None
-
-
-def refresh_anatel(*, timeout: float = 120.0) -> dict[str, Any]:
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = CACHE_DIR / "satelites.zip"
-    n = http_download(ANATEL_ZIP_URL, zip_path, timeout=timeout)
-    csv_path = extract_anatel_zip(zip_path, ANATEL_DIR)
-    catalog = parse_anatel_subfaixas_csv(_decode_csv_bytes(csv_path.read_bytes()))
-    _write_json(ANATEL_CATALOG, [asdict(s) for s in catalog])
-    meta = {
-        "source_url": ANATEL_ZIP_URL,
-        "fetched_at": _now_iso(),
-        "bytes": n,
-        "csv": str(csv_path),
-        "n_systems": len(catalog),
-        "n_downlink": sum(1 for s in catalog if s.downlink_ghz),
-        "n_uplink": sum(1 for s in catalog if s.uplink_ghz),
-    }
-    _write_json(ANATEL_META, meta)
-    return meta
 
 
 def load_anatel_catalog() -> list[OccupancySystem]:
@@ -676,36 +522,6 @@ def load_anatel_catalog() -> list[OccupancySystem]:
 
 
 # ── SNS / Space IFIC ─────────────────────────────────────────────────────────
-
-def find_sns_mdb(root: Path) -> Path | None:
-    mdbs = [p for p in root.rglob("*") if p.suffix.lower() in {".mdb", ".accdb"}]
-    if not mdbs:
-        return None
-
-    def score(p: Path) -> tuple[int, int]:
-        n = p.name.lower()
-        s = 0
-        if "srs" in n or "sns" in n:
-            s += 20
-        if "ific" in n:
-            s += 10
-        if "sps" in n or "plan" in n:
-            s -= 5
-        return (s, p.stat().st_size)
-
-    mdbs.sort(key=score, reverse=True)
-    return mdbs[0]
-
-
-def extract_ific_zip(zip_path: Path, dest: Path) -> Path:
-    dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(dest)
-    mdb = find_sns_mdb(dest)
-    if mdb is None:
-        raise FileNotFoundError(f"No .mdb found inside {zip_path}")
-    return mdb
-
 
 def _score_srs_iso_path(path: str) -> int:
     n = path.replace("\\", "/").lower()
@@ -819,8 +635,8 @@ def locate_srs_parts(src: Path) -> tuple[Path, Path]:
     """``(catalog_mdb, grp_mdb)`` for a single SRS file or ITU split parts.
 
     Recent BR IFICs ship ``srsNNNN_part1of4.mdb`` (notice / geo / srv_area)
-    and ``…_part3of4.mdb`` (``grp`` frequency assignments). Weekly
-    ``ificXXXX.mdb`` is a single file with both.
+    and ``…_part3of4.mdb`` (``grp`` frequency assignments). A single
+    ``.mdb`` that already holds both is used as catalog and as ``grp``.
     """
     src = Path(src).expanduser().resolve()
     if src.is_file() and src.suffix.lower() in {".mdb", ".accdb"}:
@@ -1181,7 +997,7 @@ def parse_sns_brazil(
 
 @dataclass
 class CatalogSource:
-    """One indexed filing catalogue: an SRS, a weekly IFIC, or an upload."""
+    """One indexed filing catalogue: a complete SRS, or an uploaded filing."""
 
     id: str
     label: str
@@ -1356,27 +1172,6 @@ def remove_source(source_id: str) -> bool:
     return True
 
 
-# ── national catalogue providers ────────────────────────────────────────────
-# A provider is DATA, not page copy: one administration that publishes its
-# licensed stations at a fetchable URL in the documented table shape. The page
-# renders whatever is in this table, so adding a country is a dict entry and
-# never a line of interface text. Today Brazil is the only one published in a
-# form the parser can read directly; that is a fact about the world, not a
-# property of the tool.
-NATIONAL_PROVIDERS: dict[str, dict[str, str]] = {
-    "anatel": {
-        "label": "Anatel (Brazil)",
-        "adm": "B",
-        "url": ANATEL_ZIP_URL,
-    },
-}
-
-
-def national_providers() -> list[dict[str, str]]:
-    """Fetchable national catalogues, as ``{id, label, adm, url}`` rows."""
-    return [{"id": k, **v} for k, v in NATIONAL_PROVIDERS.items()]
-
-
 def pick_catalog_csv(zip_bytes: bytes) -> tuple[str, bytes]:
     """The licensed-station table inside an uploaded zip, as (name, bytes).
 
@@ -1496,29 +1291,6 @@ def reindex_sns_mdb(mdb_path: Path, *, extra_meta: dict[str, Any] | None = None,
     _write_source(src, catalog, meta)
     # The single-slot files stay in step so an older build still reads them.
     return _write_sns_catalog(catalog, meta)
-
-
-def refresh_sns(*, year: int | None = None, timeout: float = 600.0) -> dict[str, Any]:
-    """Download the public weekly ``ificXXXX.mdb`` (not the full SRS)."""
-    entries = fetch_ific_index(year=year)
-    latest = latest_ific(entries)
-    if latest is None:
-        raise RuntimeError("No Space IFIC zip link found on the ITU WIC page.")
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    zip_path = SNS_DIR / f"ific{latest['ific_no']}.zip"
-    extract_dir = SNS_DIR / f"ific{latest['ific_no']}"
-    if zip_path.exists():
-        n = zip_path.stat().st_size
-    else:
-        n = http_download(latest["zip_url"], zip_path, timeout=timeout)
-    mdb = find_sns_mdb(extract_dir) or extract_ific_zip(zip_path, extract_dir)
-    return reindex_sns_mdb(mdb, extra_meta={
-        "kind": "ific",
-        "ific_no": latest["ific_no"],
-        "ific_date": latest.get("date") or "",
-        "zip_url": latest["zip_url"],
-        "bytes": n,
-    })
 
 
 def extract_iso_from_zip(zip_path: Path, dest_dir: Path) -> Path:

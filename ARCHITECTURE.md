@@ -15,7 +15,7 @@ Python libraries — supporting continuous technical evaluation of the solution.
 |---|---|
 | **Python-only** | No code in other languages in the application or the engine. One exception: the optional `tools/jackcess/MdbWriter.java` helper that writes real JET4 `.mdb` files, gated by `mdb_writer.is_available()` with a YAML+XML fallback when no JDK is present. No JS/TS. |
 | **No client-server with auth** | Streamlit runs on loopback. No login. |
-| **No mandatory external APIs** | No external API is required to run a simulation — every simulation input is a local SRS `.mdb`. The National occupancy page can optionally fetch published catalogues (ITU WIC weekly `ificXXXX.mdb`, BR IFIC ISO, an administration's open data) over stdlib `urllib`; each download is user-triggered and cached under `data/br_occupancy/`. |
+| **No mandatory external APIs** | No external API is required to run a simulation — every simulation input is a local SRS `.mdb`. The National occupancy page does not fetch catalogues. A licensed-station table is uploaded, and the ITU side is a complete SRS the user already has (BR IFIC ISO or `srsNNNN.zip`), not the public weekly `ificXXXX.mdb`. Indexed catalogues are cached under `data/br_occupancy/`. |
 | **Open source** | Distributable via `pip install` or `git clone`. |
 | **Reproducibility** | Every run writes `params.json` + deterministic artifacts to disk. |
 | **Engine reuse** | The numerical engine in `src/` is imported unchanged. |
@@ -207,7 +207,7 @@ streamlit_app/
 | Help | In-app manual + **guided tour launcher** (`lib/tour.py`) |
 | Constellation | 3D globe of the non-GSO constellation — `t=0` ECEF snapshot rendered inline via Plotly; filter by Article 22 scenario (**emitters-in-band** vs all) with per-satellite emission flags from `grp ⋈ mask_lnk1`; colour by **emitter status** or **orbital plane**; per-scenario metrics (N_total, emitters, planes, altitude, inclination, e). Built live from the SRS `.mdb` — **no run required** |
 | Manual system | Define an NGSO system with no SRS filing — pick a constellation template (Walker, ring, train, Molniya, tundra, IGSO, multi-shell), edit the generated plane list (RAAN/ω/per-sat phases), preview on the 3D globe, attach a standalone PFD-mask XML, and either launch an EPFD↓ run directly or **register it as a filing** (real JET4 `_SRS.mdb`/`_Mask.mdb` pair via Jackcess, or a YAML+XML fallback) |
-| National occupancy | Frequency-occupancy survey for one country — a national licensed catalogue (uploaded, or fetched where an administration publishes one) plus any number of registered ITU filing catalogues (complete `SRS.mdb` from a BR IFIC ISO, the weekly `ificXXXX.mdb`, or an uploaded `.mdb`). Filters by source, country, orbit and letter band; renders shared-axis occupancy strips with a common-overlap row |
+| National occupancy | Frequency-occupancy survey for one country — a national licensed catalogue (uploaded, or fetched where an administration publishes one) plus any number of registered ITU filing catalogues (complete `SRS.mdb` from a BR IFIC ISO, or an uploaded `.mdb`). A licensed-station table is uploaded; no administration is built in. The public weekly `ificXXXX.mdb` is not a source. Filters by source, country, orbit and letter band; renders shared-axis occupancy strips with a common-overlap row |
 | Mask generator | Build a PFD mask from beam parameters (`pfd_i = P_i + G_i(θ) − 10log10(4πd²)` per cell, §C2.3.1, summed over the N_co strongest beams) in Option 1 (α×ΔLong) or Option 2 (az×el), with GSO-arc mitigation (beam-off / α-cutoff) and an operating-latitude band; preview + export round-trippable §C4.2 XML usable directly as a Manual-System mask |
 
 Each workflow page also gets a collapsed `Help on this page` expander
@@ -1658,14 +1658,14 @@ Brazil-only, and the generalisation moved the whole selection to query time
 
 1. a **national licensed-station table** — one CSV, one row per station per
    sub-band, read by meaning rather than by one administration's column
-   spellings (`parse_anatel_subfaixas_csv`, `register_national_csv`). Anatel's
-   `satelites.zip` ships as the built-in example and can be refreshed
-   (`refresh_anatel`); the required fields are documented in the page help;
+   spellings (`parse_anatel_subfaixas_csv`, `register_national_csv`). Nothing
+   is fetched: the administration uploads the table. The required fields are
+   documented in the page help;
 2. the complete **`SRS.mdb`** from a BR IFIC ISO (`extract_srs_from_iso` →
-   `ingest_local_iso`);
-3. the public weekly **`ificXXXX.mdb`** from the ITU WIC year page
-   (`fetch_ific_index` → `refresh_sns`), or any additional filing `.mdb`
-   uploaded for study.
+   `ingest_local_iso`), or any additional filing `.mdb` uploaded for study.
+
+The public weekly **`ificXXXX.mdb`** is not ingested: it only carries that
+week's publications and does not hold the assignments the survey needs.
 
 **Every notice is indexed, not only the ones in one country.** Each row carries
 its country evidence — notifying administration, service area (`srv_area`, with

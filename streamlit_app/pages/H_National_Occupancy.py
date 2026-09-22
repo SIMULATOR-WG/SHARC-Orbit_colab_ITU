@@ -1,10 +1,9 @@
 """National band occupancy — a licensed-station catalogue + ITU SNS filings.
 
 Survey of frequency occupancy in one country. A national licensed catalogue is
-optional and may be uploaded or, where an administration publishes one, fetched;
-the filings come from a Space IFIC SNS database. Selecting systems draws the
-same shared-axis occupancy strips used on Aggregate, including the
-common-overlap row.
+optional and is uploaded by the administration; the filings come from a
+complete SRS. Selecting systems draws the same shared-axis occupancy strips
+used on Aggregate, including the common-overlap row.
 """
 from __future__ import annotations
 
@@ -32,18 +31,15 @@ theme.inject()
 st.title("National band occupancy")
 help_expander("national_occupancy", extra=("national_catalog_format",))
 st.caption(
-    "Licensed occupancy from a national catalogue — load your administration's "
-    "own table, or refresh a published one — plus the filings in the "
-    "complete **SRS.mdb** from a BR IFIC ISO "
-    f"([IFIC 3079 ISO]({occ.brific_iso_url('3079')})), "
-    "or the public weekly `ificXXXX.mdb` "
-    "([ITU WIC 2026](https://www.itu.int/sns/wic/demowic26.html)). "
+    "Licensed occupancy from a national catalogue you upload, plus the filings "
+    "in the complete **SRS.mdb** from a BR IFIC ISO "
+    f"([IFIC 3079 ISO]({occ.brific_iso_url('3079')})). "
     "Pick systems to see occupied bands and their **common** overlap — the "
     "same strip chart as **Aggregate**."
 )
 
 prev = use_persisted_state("br_occupancy.form", {
-    "sources": ["anatel"],
+    "sources": [],
     "known_sources": [],
     "orbit": "all",
     "direction": "downlink",
@@ -83,7 +79,6 @@ def _operates_caption(meta: dict) -> str:
 # Loading a catalogue is a setup step done once and then never again, yet it
 # owned the first screen on every visit and pushed the results 1 700 px down.
 # Once data is present it folds into a one-line summary that still opens.
-anatel = occ.load_anatel_catalog()
 # A broken or half-indexed catalogue must degrade to the setup card, never take
 # the page down with it: the card is where the user fixes exactly this.
 _sns_error = None
@@ -91,17 +86,19 @@ try:
     sns = occ.load_sns_catalog()
 except Exception as exc:  # noqa: BLE001 — surfaced below, not swallowed
     sns, _sns_error = [], exc
-a_meta, s_meta = occ.anatel_meta(), occ.sns_meta()
+_registered_now = occ.read_sources()
+_nat_now = [s for s in _registered_now if s.kind == "national"]
+s_meta = occ.sns_meta()
 if _sns_error is not None:
     st.warning(
         f"Could not open the indexed ITU SNS catalogue: {_sns_error}. "
         "Index an ISO or SRS below.", icon=":material/warning:",
     )
-_have_data = bool(anatel or sns)
+_have_data = bool(_nat_now or sns or _registered_now)
 if _have_data:
     _bits = []
-    if anatel:
-        _bits.append(f"licensed {len(anatel)}")
+    if _nat_now:
+        _bits.append(f"licensed {sum(s.n_systems for s in _nat_now)}")
     if sns:
         _bits.append(f"ITU SNS {len(sns)}")
     _cat_box = st.expander(
@@ -115,27 +112,11 @@ else:
 with _cat_box:
     c1, c2 = st.columns(2)
     with c1:
-        # One card for licensed catalogues, whoever issues them. Anatel is not a
-        # section of its own any more: it is the catalogue that ships built in,
-        # listed beside any other administration's.
         with st.container(border=True):
             st.markdown("**National licensed catalogues** · stations / sub-bands")
-            _nat_srcs = [x for x in occ.read_sources() if x.kind == "national"]
-            # Providers come from the data table, so the interface never names
-            # one country: adding another administration is a dict entry.
-            _prov = occ.national_providers()[0] if occ.national_providers() else None
-            if anatel and _prov:
-                st.markdown(
-                    theme.pill(f"{_prov['label']} · {len(anatel)} systems", "ok"),
-                    unsafe_allow_html=True,
-                )
-                st.caption(
-                    ("Published catalogue · fetched " + _fmt_fetched(a_meta))
-                    if a_meta.get("fetched_at")
-                    else "Published catalogue · from the bundled copy; refresh for the live file."
-                )
-            elif _prov:
-                st.caption(f"{_prov['label']} is not downloaded yet.")
+            _nat_srcs = _nat_now
+            if not _nat_srcs:
+                st.caption("None loaded. Add one in the card below.")
             for _ns in _nat_srcs:
                 q1, q2 = st.columns([5, 1])
                 with q1:
@@ -149,22 +130,6 @@ with _cat_box:
                                  key=f"br_rm_nat_{_ns.id}",
                                  help="Forget this catalogue."):
                         occ.remove_source(_ns.id)
-                        st.rerun()
-            if _prov and st.button(
-                f"Refresh {_prov['label']}", icon=":material/download:",
-                key="br_refresh_anatel",
-                help=f"Downloads {_prov['url']}",
-            ):
-                with st.spinner("Downloading the published catalogue…"):
-                    try:
-                        meta = occ.refresh_anatel()
-                    except Exception as exc:  # noqa: BLE001
-                        st.error(f"Refresh failed: {exc}")
-                    else:
-                        st.success(
-                            f"Catalogue: **{meta['n_systems']}** systems "
-                            f"({meta['bytes']:,} bytes)."
-                        )
                         st.rerun()
 
         # ── add a national licensed catalogue ───────────────────────────────
@@ -187,8 +152,8 @@ with _cat_box:
                 _nat_adm = st.text_input(
                     "ITU symbol", key="br_nat_adm", placeholder="MEX",
                     help="The licensing administration's ITU symbol, which is "
-                         "what makes these rows findable by country. B is "
-                         "Brazil, F France, D Germany.",
+                         "what makes these rows findable by country. "
+                         "Use the ITU symbol, not an ISO code.",
                 )
             _nat_file = st.file_uploader(
                 "CSV or zip containing it", type=["csv", "zip"],
@@ -296,7 +261,7 @@ with _cat_box:
                     st.rerun()
     with c2:
         with st.container(border=True):
-            st.markdown("**ITU filings** · SRS from a BR IFIC ISO, or a weekly IFIC")
+            st.markdown("**ITU filings** · complete SRS from a BR IFIC ISO")
             kind = s_meta.get("kind") or ("ific" if s_meta.get("ific_no") else "")
             if s_meta.get("mdb"):
                 n_tot = s_meta.get("n_notice_total")
@@ -325,8 +290,9 @@ with _cat_box:
             else:
                 st.caption(
                     "The complete **SRS** is `databases/SRS_Data/srsNNNN.zip` "
-                    "inside the BR IFIC ISO (split Access parts), not the "
-                    "public weekly `ificXXXX.mdb`."
+                    "inside the BR IFIC ISO (split Access parts). The public "
+                    "weekly `ificXXXX.mdb` is not used: it only has that week's "
+                    "publications, not the assignments this survey needs."
                 )
             iso_raw = st.text_input(
                 "Path to ISO / bookshop zip / srsNNNN.zip / SRS folder",
@@ -356,23 +322,6 @@ with _cat_box:
                         st.success(
                             f"SRS (IFIC {meta.get('ific_no') or '—'}): "
                             f"{meta.get('n_notice_total', 0)} notices, "
-                            f"**{meta.get('n_systems', 0)}** systems indexed."
-                        )
-                        st.rerun()
-            if st.button("Refresh weekly IFIC", icon=":material/download:",
-                         key="br_refresh_sns"):
-                with st.spinner(
-                    "Downloading ificXXXX.mdb from ITU and indexing "
-                    "every notice in the file…"
-                ):
-                    try:
-                        meta = occ.refresh_sns()
-                    except Exception as exc:  # noqa: BLE001
-                        st.error(f"IFIC refresh failed: {exc}")
-                    else:
-                        st.success(
-                            f"IFIC **{meta.get('ific_no')}**: "
-                            f"{meta.get('n_notice_total', 0)} notices this week, "
                             f"**{meta.get('n_systems', 0)}** systems indexed."
                         )
                         st.rerun()
@@ -420,9 +369,8 @@ with _cat_box:
         st.markdown("**Indexed filings** · one row per catalogue")
         if not _registered:
             st.caption(
-                "Nothing indexed yet. Index an ISO, an `srsNNNN.zip` or a "
-                "weekly IFIC above; each one is kept, so a new file never "
-                "replaces the previous."
+                "Nothing indexed yet. Index an ISO or an `srsNNNN.zip` above; "
+                "each one is kept, so a new file never replaces the previous."
             )
         for _src in _registered:
             r1, r2, r3 = st.columns([3, 5, 1])
@@ -445,12 +393,11 @@ with _cat_box:
                     occ.remove_source(_src.id)
                     st.rerun()
 
-if not anatel and not sns:
+if not _nat_now and not sns and not _registered_now:
     st.info(
-        "Load a national licensed table, or refresh a published catalogue, to "
-        "see licensed occupancy. "
-        "Optionally refresh **ITU SNS** to overlay the filings from "
-        "the latest Space IFIC."
+        "Upload a national licensed table to see licensed occupancy. "
+        "Optionally index a complete **SRS** from a BR IFIC ISO to overlay "
+        "the filings."
     )
     st.stop()
 
@@ -460,8 +407,8 @@ st.subheader("2. Systems")
 # files can be registered at once now, and a comparison usually means "my
 # filing against what is already indexed", which needs them apart.
 _srcs = occ.read_sources()
-_src_label = {"anatel": f"National licensed ({len(anatel)})"}
-src_opts = ["anatel"] if anatel else []
+_src_label = {}
+src_opts = []
 for _s in _srcs:
     if not _s.enabled:
         continue
@@ -479,7 +426,7 @@ if "sns" in _saved and "sns" not in src_opts:
 # and invisible. Only genuinely NEW ids are auto-selected, so a source the user
 # deliberately unticked stays unticked.
 _known = set(prev.get("known_sources") or [])
-_fresh = [i for i in src_opts if i not in _known and i != "anatel"]
+_fresh = [i for i in src_opts if i not in _known]
 if _fresh and _known:
     st.caption(
         ":material/add_circle: Newly indexed and selected: "
@@ -518,11 +465,9 @@ with f3:
     )
 
 pool = []
-if "anatel" in sources:
-    pool.extend(anatel)
 if "sns" in sources:
     pool.extend(sns)
-_picked_srcs = [s for s in sources if s not in ("anatel", "sns")]
+_picked_srcs = [s for s in sources if s != "sns"]
 if _picked_srcs:
     pool.extend(occ.load_filings(_picked_srcs))
 

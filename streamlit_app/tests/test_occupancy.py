@@ -1,4 +1,4 @@
-"""Occupancy catalogues: licensed CSV + ITU WIC index + interval overlap."""
+"""Occupancy catalogues: licensed CSV + interval overlap."""
 from __future__ import annotations
 
 import sys
@@ -16,26 +16,14 @@ from streamlit_app.lib.occupancy import (  # noqa: E402
     extract_iso_from_zip,
     extract_srs_from_iso,
     ific_no_from_name,
-    latest_ific,
     locate_srs_parts,
     mhz_to_ghz_interval,
     norm_name,
     parse_anatel_subfaixas_csv,
-    parse_ific_index,
     parse_mhz,
     select_brazil_ntcs,
     union_intervals,
 )
-
-_WIC_HTML = """
-<html><body>
-<table>
-<tr><td>01.09.2026</td><td><a href="../ific10/ific3079.zip">3079</a></td></tr>
-<tr><td>18.08.2026</td><td><a href="../ific10/ific3078.zip">3078</a></td></tr>
-<tr><td>04.08.2026</td><td><a href="../ific10/ific3077.zip">3077</a></td></tr>
-</table>
-</body></html>
-"""
 
 _ANATEL_CSV = """Operador;NomeEstacao_STEL_portal;NumEstacao_STEL_portal;Tipo_orbita_STEL_portal;PosOrbital_STEL_portal;Banda_RF_estacao_STEL_portal;Sentido_STEL_portal;MedFrequenciaInicialMHz_STEL_portal;MedFrequenciaFinalMHz_STEL_portal;BW_Faixa_MHz
 OP A;SAT-A;1;GEO;70 W;Ku;Descida ↓;10950;11200;250,00
@@ -55,17 +43,6 @@ def test_parse_mhz_comma():
 def test_mhz_to_ghz_interval():
     iv = mhz_to_ghz_interval("10950", "11200")
     assert iv == (10.95, 11.2)
-
-
-def test_parse_ific_index_latest_first():
-    rows = parse_ific_index(
-        _WIC_HTML, "https://www.itu.int/sns/wic/demowic26.html")
-    assert [r["ific_no"] for r in rows] == ["3079", "3078", "3077"]
-    latest = latest_ific(rows)
-    assert latest is not None
-    assert latest["ific_no"] == "3079"
-    assert latest["date"] == "01.09.2026"
-    assert latest["zip_url"] == "https://www.itu.int/sns/ific10/ific3079.zip"
 
 
 def test_parse_anatel_groups_stations_and_directions():
