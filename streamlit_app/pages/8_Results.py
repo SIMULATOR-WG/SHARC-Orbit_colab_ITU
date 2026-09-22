@@ -347,10 +347,19 @@ def _render_metrics(data: dict[str, Any]) -> None:
             )
     if _is_single_grid(data):
         _codes = data.get("country_codes") or []
+        _td = data.get("track_duration") or {}
+        _td_note = ""
+        if _td.get("n_windowed"):
+            _td_note = (
+                f" · MIN_DURATION at {_td['n_windowed']} point(s)"
+            )
+            if _td.get("n_degenerate"):
+                _td_note += f" ({_td['n_degenerate']} classic)"
         st.caption(
             f"ES×GSO grid (no WCGA) · {data.get('n_grid_points', '—')} point(s)"
             + (f" · countries {', '.join(str(c) for c in _codes)}"
                if _codes else " · world-wide")
+            + _td_note
         )
     cols = st.columns(5)
     me = data.get("max_epfd_dbw_m2_40khz")

@@ -18,14 +18,16 @@ import numpy as np
 
 from ..coordinates import lla_to_ecef
 from ..wcg_search import WCGResult
-from ..epfd_calculator import EPFDSimulationResult, run_epfd_simulation
+from ..epfd_calculator import (
+    EPFDSimulationResult, run_epfd_simulation, run_epfd_simulation_windowed,
+)
 from .geometry import GeometryPoint
 
 if TYPE_CHECKING:
     from ..orbit_propagator import OrbitalElements
     from ..pfd_mask import PFDMask
     from ..antenna import EarthStationAntenna
-    from ..time_step import DualTimeStep
+    from ..time_step import DualTimeStep, TrackDurationWindows
 
 
 def geometry_to_wcg_result(geometry: GeometryPoint) -> WCGResult:
@@ -81,6 +83,8 @@ def run_epfd_at_geometry(
     t_run_s: float = 0.0,
     gso_min_elevation_deg: float = -90.0,
     keep_full_history: bool = False,
+    windows: Optional[TrackDurationWindows] = None,
+    or_rescues_capped: bool = True,
 ) -> EPFDSimulationResult:
     """Run an EPFD↓ simulation on a fixed geometry (without WCG search).
 
@@ -102,6 +106,32 @@ def run_epfd_at_geometry(
         if geometry.min_elevation_deg is not None
         else min_elevation_deg
     )
+
+    # §D5.1.4.2 is a property of the ES latitude, not of the WCGA. A grid
+    # point whose latitude declares MIN_DURATION > 0 runs the same sliding
+    # window as a single-entry examination at that latitude.
+    if windows is not None:
+        return run_epfd_simulation_windowed(
+            constellation=constellation,
+            wcg=wcg,
+            pfd_mask=pfd_mask,
+            es_antenna=es_antenna,
+            alpha0_deg=alpha0_deg,
+            min_elevation_deg=effective_min_elev,
+            windows=windows,
+            n_jobs=n_jobs,
+            pfd_bw_correction_db=pfd_bw_correction_db,
+            raan_dot_artificial_rad_s=raan_dot_artificial_rad_s,
+            raan_dot_override_rad_s=raan_dot_override_rad_s,
+            max_co_freq_by_lat=max_co_freq_by_lat,
+            strict_max_co_freq_total=strict_max_co_freq_total,
+            strict_exclusion_zone=strict_exclusion_zone,
+            min_angle_at_es_deg=min_angle_at_es_deg,
+            wdelta_deg=wdelta_deg,
+            t_run_s=t_run_s,
+            gso_min_elevation_deg=gso_min_elevation_deg,
+            or_rescues_capped=or_rescues_capped,
+        )
 
     return run_epfd_simulation(
         constellation=constellation,

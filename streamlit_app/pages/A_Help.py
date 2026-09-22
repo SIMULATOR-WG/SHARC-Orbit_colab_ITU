@@ -56,17 +56,23 @@ toc.markdown(
 st.subheader("Quickstart", anchor="quickstart")
 st.markdown(
     """
-1. **Upload** an SRS `.mdb` **and** the PFD mask `.mdb` under **Upload**.
-   Each notice (`ntc_id`) inside the MDB becomes an independent **system**.
-2. Open **Single-entry** to run ITU-R S.1503-4 on **one** system, or
-   **Aggregate** to run multi-system aggregation studies on two or more.
-3. **Status** streams the worker log + progress bar in real time.
-4. When `success`, **Results** plots the CCDF, the regulatory limit
-   curves (Article 22, Resolution 76) and the geometries on the globe.
-5. **Campaign** bundles a set of runs into a reproducible XLSX report.
+1. **Upload** an SRS `.mdb` and the PFD mask `.mdb`. Each notice
+   (`ntc_id`) becomes an independent **system**. Operating-parameter
+   `.xml` files are optional.
+2. **Uploads** lists what was registered. **Mask viewer** draws one PFD
+   mask. **Constellation** draws the non-GSO satellites of a filing.
+   None of these three launches a run.
+3. **Single-entry** runs ITU-R S.1503-4 on one system. **Aggregate**
+   combines two or more.
+4. **Status** streams the worker log and the progress bar.
+5. On `success`, **Results** plots the CCDF, the Article 22 and
+   Resolution 76 limits, and the geometries on the globe.
 
-The Cluster page is **optional** — only relevant when you want to spread
-work across more than one machine.
+**National occupancy** is a separate survey: which bands are taken, from
+a licensed-station table and a complete SRS you already have on disk.
+It does not launch EPFD and it does not download catalogues.
+
+**Cluster** is optional, and only useful with more than one machine.
     """
 )
 
@@ -76,18 +82,21 @@ st.subheader("Workflow", anchor="workflow")
 st.markdown(
     """
 ```
-Upload  ─►  Uploads  ─►  Single-entry  ─►  Status  ─►  Results
-                       └► Aggregate    ─►  Status  ─►  Results
-                       └► Launcher (campaign of N methods)
-                                       ─►  Status  ─►  Results
-                                                     └► Campaign (XLSX)
+Upload ─► Uploads ─► Single-entry ─► Status ─► Results
+                  └► Aggregate    ─► Status ─► Results
+
+Inspect (no run):  Uploads ─► Mask viewer
+                            └► Constellation
+
+Survey (no run):   National occupancy
 ```
 
 Engine state lives in `streamlit_app/data/`:
 - `uploads/<upload_id>/<file>.mdb` — your SRS / mask files
 - `runs/<run_id>/{sim_data.json, summary.json, params.json, log}` — per-run artifacts
-- `sharc_orbit.db` — SQLite with uploads/systems/runs/campaigns
+- `sharc_orbit.db` — SQLite with uploads, systems and runs
 - `cluster.json` — persistent Ray runtime config
+- `br_occupancy/` — occupancy catalogues you indexed locally
     """
 )
 
@@ -98,90 +107,94 @@ st.subheader("Pages", anchor="pages")
 st.markdown("**Upload** — Register an SRS filing. Two stages:")
 st.markdown(
     """
-1. Pick the SRS `.mdb` **and** the PFD mask `.mdb` + give the filing a label.
-2. The page parses the MDB, lists all notices found and lets you pick
-   which ones become **systems**. Click *Register systems* to commit.
+1. The SRS `.mdb` and the PFD mask `.mdb` are both required. Give the
+   filing a label. Operating-parameter `.xml` files are optional, and
+   only when the mask database does not already carry them.
+2. The page lists the notices. Each ticked notice becomes one
+   **system**. PFD masks are detected, not chosen: several masks linked
+   by `mask_lnk1` are distributed by the engine.
     """
 )
 
 st.markdown(
-    "**Uploads** — List registered uploads + systems. Bulk delete, "
-    "re-scan, register orphan filings. Per-system panels:\n"
-    "* **Orbital parameters** — semi-major axis, altitude, perigee, "
-    "apogee, eccentricity, inclination, RAAN, period, precession, "
-    "sun-synch / station-keeping flags (read from the SRS `orbit` table).\n"
-    "* **Operating frequency bands** — masks (`mask_info` table) with "
-    "PFD / EIRP / Other categories + groups (`grp` table) with Tx/Rx "
-    "side, beam, min elevation.\n"
-    "* **View mask** buttons — open a PFD mask in the **Mask Viewer**."
+    "**Uploads** — Registered filings and systems. A filing-name prefix "
+    "renames every filing. Maintenance deletes selected filings or all "
+    "of them. Per system:\n"
+    "* **Orbital parameters** — planes, altitude, eccentricity, "
+    "inclination, RAAN, period, precession, sun-synch and "
+    "station-keeping, from the SRS `orbit` table. The picker is shared "
+    "with Single-entry, Aggregate, Mask viewer and Constellation.\n"
+    "* **Operating frequency bands** — masks (`mask_info`) and groups "
+    "(`grp`), with Tx/Rx, beam and minimum elevation.\n"
+    "* **View mask** — opens that PFD mask in **Mask viewer**.\n"
+    "The lower section re-scans a filing or deletes it."
 )
 st.markdown(
-    "**Mask Viewer** — Interactive visualizer for an ITU-R S.1503-4 PFD "
-    "mask: metadata header, latitude / B-axis sliders (real degrees, not "
-    "indices), 2D heatmap with selectable axis spacing, slice line plot, "
-    "and point-wise PFD calculator (trilinear / bilinear interpolation). "
-    "See [Mask Viewer](#mask-viewer)."
+    "**Mask viewer** — One ITU-R S.1503-4 PFD mask: degree sliders, "
+    "heatmap, slice plot, and a point calculator. Only PFD masks "
+    "render. See [Mask viewer](#mask-viewer)."
 )
 st.markdown(
-    "**Single-entry** — Run **ITU-R S.1503-4** on one system. Geometry "
-    "is the §D.3.1 WCGA (select countries to restrict the ES domain — "
-    "territorial WCGA + RAAN sweep), a defined ES/GSO point, or the "
-    "**ES×GSO grid** (same algorithm as Aggregate method 2, no WCGA; "
-    "countries optional). Advanced options expose the WCGA grid step, "
-    "§D.4.7 dual time step, and orbital dynamics."
+    "**Constellation** — 3D globe of a registered non-GSO filing at "
+    "t = 0, with no run. Filter an Article 22 scenario down to the "
+    "satellites that emit in that band, or show the whole "
+    "constellation. Click a satellite and **Project mask** to draw its "
+    "PFD footprint; **Open in Mask viewer** continues in 2D."
 )
 st.markdown(
-    "**National occupancy** — survey of licensed / filed frequency "
-    "occupancy in one country. Load your administration's licensed-station "
-    "table and index a complete ITU SRS from a BR IFIC ISO; the country is a "
-    "filter over the result, not a property of the index. Selecting systems shows occupied "
-    "bands on the same shared-axis strip chart as Aggregate, including "
-    "the **common overlap**."
+    "**Single-entry** — **ITU-R S.1503-4** on one system. Section 1 "
+    "shows the SRS band chart and an optional Article 22 scenario. "
+    "Geometry is the §D.3.1 WCGA (countries restrict the earth-station "
+    "domain and enable the RAAN sweep), a defined earth-station / GSO "
+    "point, or the **ES×GSO grid** (same algorithm as Aggregate method "
+    "2; countries optional). Empty parameter fields use the engine "
+    "default."
 )
 st.markdown(
-    "**Aggregate** — Run a multi-system aggregation study with one of "
-    "four methods (see [Aggregation methods](#aggregation-methods)). The "
-    "selected method's strategy is shown step-by-step in a panel below "
-    "the method picker."
+    "**Aggregate** — Two or more systems, one of four methods "
+    "(see [Aggregation methods](#aggregation-methods)). Section 1 shows "
+    "whether the selection is co-channel. The picked method's steps "
+    "appear under the radio. Empty N and Δt are resolved per filing."
 )
 st.markdown(
-    "**Launcher** — Launch a *campaign* (Methods 1–3 + optionally 4) on "
-    "the same systems as a reproducible bundle. All child runs share a "
-    "`campaign_id` and roll up in **Campaign**."
+    "**National occupancy** — Which bands are taken. Index a complete "
+    "SRS from a BR IFIC ISO, bookshop zip, `srsNNNN.zip` or local "
+    "`.mdb` already on disk, and optionally upload a licensed-station "
+    "table (ITU symbol, frequencies in MHz). Extra SRS catalogues sit "
+    "beside the first one. The country is a filter: **Serves it** or "
+    "**Notified by it**. The chart's second line is the letter bands "
+    "of that bar. The weekly IFIC file is not a source, and nothing "
+    "is downloaded."
 )
 st.markdown(
-    "**Runs** — History of every run, one row per run:\n"
-    "* Columns: id, type, method, status (coloured), progress, campaign, "
-    "**created_at (BRT)**, **finished_at (BRT)**, **duration** "
-    "(`hh:mm:ss`), actions.\n"
-    "* Click an `id` button → pre-selects that run in the *Inspect / "
-    "delete* picker at the bottom.\n"
-    "* Per-row icon buttons → **Results** and **Status** for that run.\n"
-    "* `finished_at` is stamped by the worker subprocess itself (it "
-    "emits `FINISHED_AT:<iso>` on stdout before exit), so the value "
-    "reflects the actual termination instant rather than a UI poll lag."
+    "**Runs** — One row per run:\n"
+    "* Columns: id, system, type, method, status, progress, campaign, "
+    "**created_at (BRT)**, **finished_at (BRT)**, **duration**, "
+    "actions.\n"
+    "* The `id` button selects that run in *Inspect / delete*.\n"
+    "* The action icons open **Results**, open **Status**, reload the "
+    "study into Single-entry or Aggregate, or delete the run.\n"
+    "* `finished_at` is stamped by the worker (`FINISHED_AT:<iso>` on "
+    "stdout), so it is the termination instant, not a UI poll.\n"
+    "* **Maintenance** at the top deletes runs by status, or all of them."
 )
 st.markdown(
-    "**Status** — Real-time progress + worker log. Updates via "
-    "`@st.fragment(run_every=2)` — no manual refresh."
+    "**Status** — Progress and the worker log, refreshed every 2 s. "
+    "While the run is active the page also shows host CPU and memory "
+    "and, on a cluster, per-worker utilisation."
 )
 st.markdown(
-    "**Results** — CCDF chart with limit overlays (Article 22 / "
-    "Resolution 76), normative percentile bar, 3D globe. Clicking a "
-    "point on the globe selects the matching entry in the *Geometry* "
-    "picker; pressing **Show CCDF** opens a modal dialog with that "
-    "point's CCDF + the regulatory limit curves."
+    "**Results** — CCDF with Article 22 and Resolution 76 limits, "
+    "normative percentiles, the §D4 dual time step that actually ran, "
+    "track-duration windows when MIN_DURATION ≠ 0, and the globe. "
+    "Click a point and **Show CCDF** for that geometry. External "
+    "results `.mdb` files overlay their reference CCDF."
 )
 st.markdown(
-    "**Campaign** — Aggregated view of all runs in a campaign + XLSX "
-    "export (`campaign`, `runs`, `params` sheets)."
-)
-st.markdown(
-    "**Cluster** — Optional Ray distributed runtime. Standalone by "
-    "default. State machine with 4 states (STANDALONE / RAY CLUSTER "
-    "ACTIVE / UNREACHABLE / RAY NOT INSTALLED). Lets you pick a **bind "
-    "IP** (auto / LAN / overlay) when starting the head. See [section "
-    "below](#cluster-distributed-processing)."
+    "**Cluster** — Optional Ray runtime. Standalone by default. Four "
+    "states: standalone, cluster active, unreachable, Ray not "
+    "installed. Starting a head lets you pick the **bind IP** (auto, "
+    "LAN or overlay). See [Cluster](#cluster-distributed-processing)."
 )
 st.markdown(
     "**Help** — This page."
@@ -388,8 +401,8 @@ st.markdown(
   before exiting). The launcher parses the last such line and writes
   it to the DB column. Used by the Runs page for the *finished_at* and
   *duration* columns.
-- **Campaign** — A bundle of related runs (same systems, multiple
-  methods) tagged by a shared `campaign_id` for cross-method reporting.
+- **Campaign id** — Optional tag on a run, shown in the **campaign**
+  column of **Runs**. It groups runs that were launched together.
     """
 )
 

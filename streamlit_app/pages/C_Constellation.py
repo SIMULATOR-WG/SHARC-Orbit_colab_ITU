@@ -27,6 +27,7 @@ import streamlit.components.v1 as components
 import plotly.graph_objects as go
 
 from lib import storage, theme, srs_inspect, plots
+from lib.manual import help_expander
 from lib.state import current_system_id, set_current_system_id
 
 st.set_page_config(
@@ -37,6 +38,7 @@ st.set_page_config(
 theme.inject()
 
 st.title("Constellation Viewer")
+help_expander("constellation")
 st.caption(
     "3D NGSO constellation by **Article 22 scenario** (service × band × BW × "
     "table — antenna diameter is collapsed, as it does not change which "

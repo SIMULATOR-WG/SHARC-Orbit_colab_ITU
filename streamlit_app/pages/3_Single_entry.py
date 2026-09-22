@@ -95,8 +95,10 @@ _WCG_SOURCE_DESC = {
     ),
     "ES×GSO grid (no WCGA)": (
         "Same algorithm as Aggregate method 2 on this one filing: EPFD↓ "
-        "at every ES×GSO grid point, envelope = worst CCDF. Optional "
-        "country filter. Engine: `method_2`, `study_mode=single_grid`."
+        "at every ES×GSO grid point, envelope = worst CCDF. MIN_DURATION "
+        "is applied per earth-station latitude (§D5.1.4.2), with that "
+        "latitude's MAX_CO_FREQ, α₀ and ε₀. Optional country filter. "
+        "Engine: `method_2`, `study_mode=single_grid`."
     ),
 }
 _DUAL_TS_DESC = {
@@ -466,8 +468,9 @@ if use_grid:
     st.info(
         "Same ES×GSO grid as **Aggregate → method 2**: EPFD↓ at each "
         "point, no WCGA. Headline CCDF is the worst-per-percentile "
-        "envelope. Empty country list = world-wide. Filings with "
-        "MIN_DURATION ≠ 0 are not supported on this path.",
+        "envelope. Empty country list = world-wide. MIN_DURATION, when "
+        "the filing declares it, is applied at each point's latitude "
+        "with that latitude's MAX_CO_FREQ, α₀ and ε₀.",
         icon=":material/grid_view:",
     )
     col_g1, col_g2, col_g3 = st.columns(3)
@@ -828,8 +831,7 @@ with st.form("s1503_form"):
                      "constellation.",
             )
 
-    if not use_grid:
-        with st.expander("8. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
+    with st.expander("8. Track duration (MIN_DURATION — S.1503-4 §D5.1.4.2)", expanded=False):
             st.caption(
                 "§D5.1.4 makes this **data-driven, not a user choice**: *\"In the "
                 "case that the non-GSO satellite selection method is defined by "
@@ -842,6 +844,13 @@ with st.form("s1503_form"):
                 "examined** and applies to the downlink only — §D5.2 states the "
                 "minimum track duration is not used for the epfd(up) case."
             )
+            if use_grid:
+                st.caption(
+                    "On the ES×GSO grid the window length is MIN_DURATION at "
+                    "each point's latitude, with that latitude's MAX_CO_FREQ, "
+                    "α₀ and ε₀. A latitude that declares 0 stays on §D5.1.4.1. "
+                    "The headline CCDF is still the worst-per-percentile envelope."
+                )
 
             # What the filing itself declares for the frequency being examined.
             _op_reg, _op_err, _op_set = None, None, None
@@ -959,13 +968,6 @@ with st.form("s1503_form"):
                 else "off" if td_mode.startswith("Force classic")
                 else "auto"
             )
-    else:
-        min_duration_s = ""
-        track_duration_mode = "auto"
-        st.caption(
-            "MIN_DURATION (§D5.1.4.2) is not supported on the ES×GSO grid "
-            "(same as Aggregate)."
-        )
 
     # ── Workload + runtime estimate ────────────────────────────────────────
     from lib import estimator as _est
@@ -1177,8 +1179,6 @@ if submit:
     if use_grid:
         params["wcga_s1503"] = False
         params["wcg_manual"] = False
-        params.pop("min_duration_s", None)
-        params["track_duration_mode"] = "auto"
         _gs = _f(grid_step)
         _gso = _f(gpts)
         _set("grid_step_deg", _gs)

@@ -11,6 +11,7 @@ from __future__ import annotations
 import streamlit as st
 
 from lib import storage, theme, engine, git_revision
+from lib.manual import help_expander
 
 st.set_page_config(
     page_title="SHARC-Orbit",
@@ -44,6 +45,7 @@ def home() -> None:
             f"</div>",
             unsafe_allow_html=True,
         )
+    help_expander("home")
     st.warning(
         "**System under development** — currently intended for experimentation "
         "only. Results must not be used for normative or decision-making purposes.",
@@ -79,7 +81,9 @@ Use the **left sidebar** to navigate between pages.
     cols = st.columns(3)
     with cols[0]:
         st.markdown("**1. Register filings**")
-        st.markdown("Upload SRS `.mdb` / `.xml` pairs on the **Upload** page.")
+        st.markdown(
+            "Upload an SRS `.mdb` and its PFD mask `.mdb` on the **Upload** page."
+        )
     with cols[1]:
         st.markdown("**2. Configure & run**")
         st.markdown(
@@ -97,11 +101,11 @@ Use the **left sidebar** to navigate between pages.
     st.subheader("Conformance notes")
     st.markdown(
         """
-* No external API calls (except ITU, if justified per case).
+* The app does not download catalogues, filings or masks. You supply the files.
 * No authentication or client-server access control.
 * No code in other languages or proprietary tech.
 * Open source on GitHub: `SIMULATOR-WG/SHARC-Orbit`.
-* Simulations registered in a campaign spreadsheet (XLSX exports).
+* Run history is the local database. Results can export an XLSX of the run.
         """
     )
 

@@ -52,12 +52,13 @@ STEPS: list[dict[str, str]] = [
         "page": "pages/3_Single_entry.py",
         "title": "Flow A — Single-entry (one system)",
         "message": (
-            "Runs the full **ITU-R S.1503-4** pipeline on one system: "
-            "**WCGA** (worst-case geometry) → **EPFD↓** time simulation → "
-            "**compliance** vs Article 22.\n\n"
-            "Retractable sections expose WCG search, time step, manual WCG and "
-            "orbital dynamics (station keeping / precession). Empty fields = "
-            "engine defaults."
+            "Runs **ITU-R S.1503-4** on one system. Section 1 is the filing "
+            "and an optional Article 22 scenario. Section 2 is the geometry: "
+            "**WCGA** (countries optional), a **defined** earth-station / GSO "
+            "point, or the **ES×GSO grid**. Then EPFD↓ and compliance against "
+            "Article 22.\n\n"
+            "Collapsed sections cover the WCG search, the dual time step and "
+            "orbital dynamics. Empty fields use the engine default."
         ),
     },
     {
@@ -65,9 +66,9 @@ STEPS: list[dict[str, str]] = [
         "page": "pages/4_Aggregate.py",
         "title": "Flow B — Aggregate (many systems)",
         "message": (
-            "Combines **two or more** systems via one of five Resolution 76 "
+            "Combines **two or more** systems via one of four Resolution 76 "
             "methods (per-filing convolution, geometry grid, joint "
-            "megaconstellation, per-WCG sweep …). Pick the method and the same "
+            "megaconstellation, per-WCG audit). Pick the method and the same "
             "WCG / time-step / orbital-dynamics options apply per filing.\n\n"
             "Heavy runs fan out across the Ray cluster automatically."
         ),

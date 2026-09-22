@@ -209,6 +209,150 @@ _CFG_CACHE: dict[tuple, dict[str, Any]] = {}
 _CFG_CACHE_MAX = 32
 
 
+def _apply_track_duration_mode(cfg: dict[str, Any], common: dict[str, Any]) -> None:
+    """Honour the Single-entry §D5.1.4 selector on a fixed-geometry run.
+
+    ``auto`` keeps the filing's own MIN_DURATION[latitude]. ``force`` and
+    ``off`` are study overrides, recorded on the cfg so the artifact can say
+    the run was not a conformant examination. Same contract as
+    ``s1503_worker``.
+    """
+    ngso = cfg.setdefault("non_gso", {})
+    mode = str(common.get("track_duration_mode") or "auto")
+    if mode == "force":
+        from src.operating_params import (  # type: ignore[import]
+            MIN_DURATION_MAX_S, MIN_DURATION_MIN_S,
+        )
+        try:
+            mdv = float(common.get("min_duration_s"))
+        except (TypeError, ValueError):
+            raise ValueError(
+                "track_duration_mode='force' requires a numeric min_duration_s; "
+                f"got {common.get('min_duration_s')!r}."
+            ) from None
+        if not (MIN_DURATION_MIN_S <= mdv <= MIN_DURATION_MAX_S):
+            raise ValueError(
+                f"min_duration_s={mdv:g}s is outside the §B5.2 range "
+                f"[{MIN_DURATION_MIN_S}, {MIN_DURATION_MAX_S}]s."
+            )
+        ngso["min_duration_by_lat"] = [(-90.0, 90.0, float(mdv))]
+        ngso["_track_duration_override"] = {
+            "mode": "force", "min_duration_s": float(mdv),
+            "note": "MIN_DURATION forced for all latitudes; not a conformant "
+                    "§D5.1.4 selection.",
+        }
+    elif mode == "off":
+        ngso["min_duration_by_lat"] = []
+        ngso["_track_duration_override"] = {
+            "mode": "off",
+            "note": "Classic §D5.1.4.1 forced; any MIN_DURATION the filing "
+                    "declares was ignored. Not a conformant §D5.1.4 selection.",
+        }
+
+
+def _raise_if_joint_track_duration(cfgs: list[dict[str, Any]]) -> None:
+    """method_3 fuses one timeline. Sliding windows are per ES latitude and
+    are not modelled there."""
+    for cfg in cfgs:
+        bands = (cfg.get("non_gso") or {}).get("min_duration_by_lat") or []
+        if any(abs(float(d)) > 1e-9 for _a, _b, d in bands):
+            raise NotImplementedError(
+                "This filing declares MIN_DURATION != 0 (S.1503-4 §D5.1.4.2 "
+                "track-duration variant). The joint simulation (method 3) does "
+                "not model sliding windows. Run Single-entry (WCGA or the "
+                "ES×GSO grid) or Aggregate method 2."
+            )
+
+
+def _fine_time_base(cfg: dict[str, Any]) -> tuple[float, int]:
+    """``(T_fine, Nstep)`` for a §D5.1.4.2 window.
+
+    The window is defined in fine steps. A coarse-step override must not
+    become T_fine; that matches ``run_wcg_downlink``.
+    """
+    from src.main import compute_s1503_time_reference  # type: ignore[import]
+    sim = cfg.get("simulation") or {}
+    ref_t, ref_n = compute_s1503_time_reference(cfg)
+    nsteps = int(sim.get("num_time_steps", 0) or 0) or int(ref_n)
+    fine_ov = bool(sim.get("_fine_step_overridden"))
+    fine_val = float(sim.get("fine_time_step_s", 0.0) or 0.0)
+    if fine_ov and fine_val > 0.0:
+        t_fine = fine_val
+    elif (not sim.get("_coarse_step_overridden")) and fine_val > 0.0:
+        t_fine = fine_val
+    else:
+        t_fine = float(ref_t)
+    return t_fine, nsteps
+
+
+def _windows_for_latitude(
+    cfg: dict[str, Any],
+    es_lat_deg: float,
+    t_fine_s: float,
+    nsteps: int,
+    constellation: list,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Sliding window for one ES latitude, or ``(None, info)`` when the
+    variant degenerates to §D5.1.4.1 at that latitude.
+
+    ``info`` is ``None`` when the filing declares no MIN_DURATION at all.
+    """
+    from src.epfd_calculator import _resolve_min_duration  # type: ignore[import]
+    from src.time_step import (  # type: ignore[import]
+        compute_orbital_period, compute_track_duration_windows,
+    )
+    bands = (cfg.get("non_gso") or {}).get("min_duration_by_lat") or []
+    declared = any(float(v) > 0.0 for *_x, v in bands)
+    md = _resolve_min_duration(float(es_lat_deg), bands)
+    if md <= 0.0:
+        if not declared:
+            return None, None
+        return None, {
+            "active": False,
+            "es_lat_deg": float(es_lat_deg),
+            "min_duration_s": 0.0,
+            "t_fine_s": float(t_fine_s),
+            "n_sw": 0,
+            "reason": "min_duration_zero_at_es_latitude",
+        }
+    min_orb_s = min(
+        (compute_orbital_period(oe.a) for oe in constellation), default=0.0,
+    )
+    windows = compute_track_duration_windows(
+        min_duration_s=md, t_fine_s=t_fine_s, nsteps=nsteps,
+        min_orbital_period_s=min_orb_s, n_satellites=len(constellation),
+    )
+    ring_mb = windows.n_sw * max(1, len(constellation)) * 10 / 1e6
+    ring_cap_mb = float(
+        (cfg.get("simulation") or {}).get("track_duration_max_ring_mb", 8192.0)
+    )
+    if ring_mb > ring_cap_mb:
+        raise ValueError(
+            f"§D5.1.4.2 window is too large to buffer: MIN_DURATION={md:.0f}s "
+            f"/ T_fine={t_fine_s:.3f}s → N_SW={windows.n_sw} steps × "
+            f"{len(constellation)} satellites ≈ {ring_mb:.0f} MB per worker "
+            f"(cap {ring_cap_mb:.0f} MB). Raise "
+            "simulation.track_duration_max_ring_mb if the machine really has "
+            "that much RAM per job, or reduce n_jobs."
+        )
+    info: dict[str, Any] = {
+        "es_lat_deg": float(es_lat_deg),
+        "min_duration_requested_s": float(md),
+        "min_duration_s": float(windows.min_duration_s),
+        "t_fine_s": float(windows.t_fine_s),
+        "n_sw": int(windows.n_sw),
+        "n_msl": int(windows.n_msl),
+        "n_tw": int(windows.n_tw),
+        "n_total_steps": int(windows.n_total_steps),
+    }
+    if windows.n_sw <= 1:
+        info["active"] = False
+        info["reason"] = "window_shorter_than_t_fine"
+        return None, info
+    info["active"] = True
+    return windows, info
+
+
 def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, Any]:
     """Load and prepare a config dict for one filing (uncached)."""
     from src.main import load_from_srs  # type: ignore[import]
@@ -246,19 +390,9 @@ def _load_cfg_impl(filing: dict[str, Any], common: dict[str, Any]) -> dict[str, 
                             ntc_id=ntc_id, service=service,
                             simulation_frequency_ghz=sim_freq_ghz)
 
-    # The S.1503-4 §D5.1.4.2 track-duration variant is implemented only for the
-    # single-system EPFD↓ engine (S.1503 single-entry). Aggregate/S.1588 studies
-    # do not model sliding windows; fail loudly rather than run the wrong path.
-    _mdur = cfg.get("non_gso", {}).get("min_duration_by_lat", []) or []
-    if any(abs(float(d)) > 1e-9 for _f, _t, d in _mdur):
-        raise NotImplementedError(
-            "This filing declares MIN_DURATION != 0 (S.1503-4 §D5.1.4.2 "
-            "track-duration variant). That variant is supported only in the "
-            "single-entry WCGA EPFD↓ run, not in aggregate/S.1588 studies "
-            "or the Single-entry ES×GSO grid. "
-            "Run it via Single-entry with S.1503-4 WCGA, or use a filing "
-            "with MIN_DURATION=0."
-        )
+    # §D5.1.4 selector (auto / force / off). Fixed-geometry paths then build
+    # the sliding window per ES latitude. method_3 still refuses, below.
+    _apply_track_duration_mode(cfg, common)
 
     sim = cfg.setdefault("simulation", {})
     sim["run_static_es"] = bool(common.get("run_static_es", False))
@@ -713,8 +847,21 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
 
     sim = cfg["simulation"]
     ngso = cfg["non_gso"]
-    # Unset N / Δt fall back to this filing's own §D4 reference (auto).
-    tstep, nsteps = resolve_time_base(cfg)
+    # MIN_DURATION is resolved at THIS point's latitude (§D5.1.4). A window
+    # with N_SW > 1 uses T_fine and disables the dual time step, as in
+    # run_wcg_downlink. Otherwise the classic fixed-geometry time base.
+    windows, td_info = (None, None)
+    if constellation and (ngso.get("min_duration_by_lat") or []):
+        t_fine, n_fine = _fine_time_base(cfg)
+        windows, td_info = _windows_for_latitude(
+            cfg, float(gp.es_lat_deg), t_fine, n_fine, constellation,
+        )
+    if windows is not None:
+        # Statistics span is Nstep × T_fine. The engine retimes W_delta onto
+        # the longer window timeline itself.
+        tstep, nsteps = float(windows.t_fine_s), int(n_fine)
+    else:
+        tstep, nsteps = resolve_time_base(cfg)
     t_run_s = nsteps * tstep
 
     # Orbital dynamics (S.1503-4 §D6.3) — same semantics as run_wcg_downlink's
@@ -747,6 +894,8 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
         wdelta_deg=wdelta_deg,
         t_run_s=t_run_s,
         pfd_bw_correction_db=_bw_correction_db(cfg, mask),
+        windows=windows,
+        or_rescues_capped=bool(ngso.get("step20_or_rescues_capped", True)),
         **_s1503_normative_caps(cfg),
     )
     try:
@@ -754,18 +903,37 @@ def _run_at_geometry(cfg: dict[str, Any], gp, common: dict[str, Any]) -> dict[st
     except Exception:  # noqa: BLE001
         pass
     acc = getattr(sim_dl, "acc", None)
-    return {
+    if td_info is not None and windows is not None:
+        td_info["inputs_ignored"] = list(
+            getattr(sim_dl, "selection_inputs_ignored", []) or [])
+        td_info["or_rescues_capped"] = bool(
+            getattr(sim_dl, "or_rescues_capped", True))
+        td_info["n_timeline_steps"] = int(
+            getattr(sim_dl, "n_timeline_steps", 0) or 0)
+    dts_sim = sim
+    dts_n = nsteps
+    if windows is not None:
+        dts_sim = {**sim, "dual_time_step_mode": "off"}
+        dts_n = int(windows.n_total_steps)
+    out: dict[str, Any] = {
         "ccdf_bins_db": list(map(float, sim_dl.cdf_epfd_dBW)),
         "ccdf_pct": list(map(float, sim_dl.cdf_percentage)),
         "max_epfd_dbw": float(sim_dl.cdf_epfd_dBW[0]) if len(sim_dl.cdf_epfd_dBW) else None,
         "n_satellites": int(len(constellation) or 0),
-        # Fixed-geometry path: usually single Δt (no dual). Still record N / Δt.
+        # Fixed-geometry path: usually single Δt (no dual). A windowed point
+        # walks N_TotalSteps at T_fine; the dual step does not apply.
         "dual_time_step": _dual_time_step_block(
-            sim, acc,
+            dts_sim, acc,
             fine_step_s=tstep, coarse_step_s=tstep, ncoarse=1,
-            num_time_steps=nsteps,
+            num_time_steps=dts_n,
         ),
     }
+    if td_info is not None:
+        out["track_duration"] = td_info
+    override = ngso.get("_track_duration_override")
+    if override:
+        out["track_duration_override"] = dict(override)
+    return out
 
 
 def _convolve(
@@ -1057,14 +1225,16 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
     filing_nsat: dict[int, int] = {}
     for pi, gp in enumerate(grid_points):
         rows = sorted(by_pi.get(pi, []), key=lambda x: x[0])
-        per_sys = [
-            {
+        per_sys = []
+        for fi, r in rows:
+            entry_sys: dict[str, Any] = {
                 "system_index": fi,
                 "ccdf_bins_db": r["ccdf_bins_db"], "ccdf_pct": r["ccdf_pct"],
                 "max_epfd_dbw": r.get("max_epfd_dbw"),
             }
-            for fi, r in rows
-        ]
+            if r.get("track_duration"):
+                entry_sys["track_duration"] = r["track_duration"]
+            per_sys.append(entry_sys)
         for fi, r in rows:
             if fi not in filing_dts and isinstance(r.get("dual_time_step"), dict):
                 filing_dts[fi] = r["dual_time_step"]
@@ -1110,6 +1280,18 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
         for fi in sorted(filing_dts)
     ]
 
+    n_windowed = 0
+    n_degenerate = 0
+    td_override = None
+    for r in results:
+        td = r.get("track_duration") or {}
+        if td.get("active"):
+            n_windowed += 1
+        elif td.get("reason"):
+            n_degenerate += 1
+        if td_override is None and r.get("track_duration_override"):
+            td_override = r["track_duration_override"]
+
     out = {
         "method": method_label,
         "grid_step_deg": grid_step,
@@ -1124,6 +1306,13 @@ def _run_grid_convolution(params: dict[str, Any], method_label: str) -> dict[str
         "per_point": per_point,
         "per_system": per_system_tb,
     }
+    if n_windowed or n_degenerate or td_override:
+        out["track_duration"] = {
+            "n_windowed": n_windowed,
+            "n_degenerate": n_degenerate,
+        }
+        if td_override:
+            out["track_duration_override"] = td_override
     if env_floor is not None:
         out["truncation_floor_pct"] = float(env_floor)
     return out
@@ -1702,6 +1891,7 @@ def _run_method_3(params: dict[str, Any]) -> dict[str, Any]:
     common = {k: v for k, v in params.items() if k not in ("filings", "method", "result_path")}
 
     cfgs = [_load_cfg(f, common) for f in filings]
+    _raise_if_joint_track_duration(cfgs)
 
     # ε₀/α₀ per system: the engine partitions Step-18 eligibility by system
     # (min_elevation_deg_per_system / alpha0_deg_per_system + system_id_per_sat),
