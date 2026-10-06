@@ -7,18 +7,19 @@ aggregate is the worst of those geometries. With N filings that is N WCGA
 searches plus N**2 fixed-geometry simulations, so the cost grows quadratically
 in the number of systems — 3 filings is 9 simulations, 4 is 16.
 
-The reference run was produced elsewhere with 3 filings (Starlink 3X,
-Sailspace, OneWeb) and its params carry that machine's Linux paths. This
-script rebuilds the same parameter set against the filings registered in THIS
-installation, resolved through the app's own systems table so the SRS/mask
-pairing cannot drift from what the UI would use.
+The reference run used 3 filings (Starlink 3X, Sailspace, OneWeb). This
+script rebuilds the same parameter set on any machine: the filings are
+resolved by key through scripts/campaign_filings.py — put each one's SRS/Masks
+MDB in ``campaign_data/shared_filings/<KEY> - <NTC>/`` and the first run
+registers it. Results are written to ``results/aggregate_method4/n<N>/``.
 
     python scripts/run_aggregate_method4.py list
     python scripts/run_aggregate_method4.py run
-    python scripts/run_aggregate_method4.py run --add 9bc1e72b490c
+    python scripts/run_aggregate_method4.py run --add 3N
     python scripts/run_aggregate_method4.py report
 
-`--add` takes a system id from `list` and appends it as the fourth filing.
+`--add` takes a filing key (3X, 3N, L5, SS1) or a system id from `list` and
+appends it as an extra filing.
 """
 from __future__ import annotations
 
@@ -38,18 +39,22 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+if str(REPO / "scripts") not in sys.path:
+    sys.path.insert(0, str(REPO / "scripts"))
+
+import campaign_filings  # noqa: E402
+from results_publish import results_root  # noqa: E402
 from streamlit_app.lib import storage  # noqa: E402
 
-OUT = REPO / "streamlit_app" / "data" / "campaigns" / "aggregate_method4"
+OUT = (results_root() or REPO / "results") / "aggregate_method4"
 
-#: The three systems of the published aggregate, by the system id registered
-#: here. Pinned by id rather than by NTC because this installation holds more
-#: than one filing per NTC (323520263 exists in a 10700+14000 and an 11700
-#: version) and picking the wrong one would be silent.
+#: The three systems of the published aggregate, by their key in
+#: scripts/campaign_filings.py (which also picks the right SRS where a notice
+#: has several versions, e.g. the "10700 and 14000" extract of 323520263).
 BASE_SYSTEMS: list[tuple[str, str]] = [
-    ("1c5dc7c02695:323520263:_", "Starlink USASAT-NGSO-3X (10700 and 14000)"),
-    ("c609543708a8:323520044:_", "Sailspace"),
-    ("fabb40a2b4e5:101:_", "OneWeb Ku"),
+    ("3X", "Starlink USASAT-NGSO-3X (10700 and 14000)"),
+    ("SS1", "Sailspace"),
+    ("L5", "OneWeb Ku"),
 ]
 
 #: Exactly the reference run's parameters — see the aggregate's metodo4
@@ -67,12 +72,21 @@ COMMON: dict[str, Any] = {
     "alpha_method": "analytical",
     "dual_time_step_mode": "off",
     "s1503_step_deg": 0.1,
-    "n_jobs": 10,
+    # Parallelism only — does not change the results. The reference run used
+    # 10; default to this machine's cores, override with --n-jobs.
+    "n_jobs": os.cpu_count() or 1,
 }
 
 
 def _systems_by_id() -> dict[str, dict]:
     return {r["id"]: r for r in storage.list_systems()}
+
+
+def _lookup(ref: str, known: dict[str, dict]) -> dict | None:
+    """System row for a filing key (registered on demand) or a system id."""
+    if ref in campaign_filings.FILINGS:
+        return campaign_filings.resolve(ref)
+    return known.get(ref)
 
 
 def _filing_of(row: dict) -> dict[str, Any]:
@@ -96,17 +110,21 @@ def _selected(args) -> list[tuple[str, str]]:
 
 def cmd_list(args) -> None:
     known = _systems_by_id()
-    print("the aggregate's three systems, as resolved here:")
-    for sid, label in BASE_SYSTEMS:
-        row = known.get(sid)
-        ok = "OK " if row else "MISSING"
-        print(f"  [{ok}] {sid:26s} {label}")
-        if row:
-            print(f"          srs  {Path(row['srs_path']).name}")
-            print(f"          mask {Path(row.get('mask_path') or '—').name}")
-    print("\nother systems registered here (candidates for a 4th filing):")
+    print("the aggregate's three systems, as found here:")
+    for key, label in BASE_SYSTEMS:
+        pair = campaign_filings.locate(key)
+        ok = "OK " if pair else "MISSING"
+        print(f"  [{ok}] {key:4s} {label}")
+        if pair:
+            print(f"          srs  {pair[0].name}")
+            print(f"          mask {pair[1].name if pair[1] else '—'}")
+    print("\nother filing keys: "
+          + ", ".join(k for k in campaign_filings.FILINGS
+                      if all(k != s for s, _ in BASE_SYSTEMS)))
+    print("other systems registered here (also accepted by --add):")
+    base_ids = {campaign_filings.system_id(k) for k, _ in BASE_SYSTEMS}
     for sid, row in sorted(known.items()):
-        if any(sid == s for s, _ in BASE_SYSTEMS):
+        if sid in base_ids:
             continue
         print(f"  {sid:26s} ntc={str(row.get('ntc_id')):10s} "
               f"{Path(row.get('srs_path') or '—').name[:52]}")
@@ -120,9 +138,9 @@ def cmd_run(args) -> None:
     sel = _selected(args)
     filings = []
     for sid, label in sel:
-        row = known.get(sid)
+        row = _lookup(sid, known)
         if row is None:
-            raise SystemExit(f"system not registered here: {sid}")
+            raise SystemExit(f"unknown filing key or system id: {sid}")
         filings.append(_filing_of(row))
         print(f"  filing: {sid}  ({label})")
 
@@ -192,7 +210,8 @@ def main() -> None:
         sp = sub.add_parser(name)
         if name in ("list", "run"):
             sp.add_argument("--add", nargs="*", default=[],
-                            help="system id(s) to append as extra filing(s)")
+                            help="filing key(s) or system id(s) to append "
+                                 "as extra filing(s)")
         if name == "run":
             sp.add_argument("--n-jobs", type=int, default=None)
             sp.add_argument("--dry-run", action="store_true")

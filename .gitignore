@@ -67,6 +67,10 @@ streamlit_app/data/cluster.json
 # machine; register locally via `scripts/run_1503_campaign.py setup`)
 !campaign_data/**/*.MDB
 !campaign_data/**/*.mdb
+# …except filings each machine copies in itself (scripts/campaign_filings.py)
+campaign_data/shared_filings/
+# Finished runs collected by scripts/results_publish.py
+/results/
 # Large downloaded ITU filing fixtures — fetched from a GitHub release, not tracked
 docs/test_data/NGSO_CRC_filings/
 docs/test_data/STEAM_2-CRC-Notice_ID-121520026-IFIC-2985/

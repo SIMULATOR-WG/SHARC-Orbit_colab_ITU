@@ -1,31 +1,21 @@
 # -*- coding: utf-8 -*-
-"""Publish finished run folders to a shared results directory.
+"""Collect finished run folders into the repo's ``results/`` folder.
 
-A campaign may run on several machines. Copying each finished run folder
-into a synced folder (e.g. OneDrive) makes every machine's output appear in
-one place and keeps it backed up off the working checkout.
+Runs live under ``streamlit_app/data/runs/<run_id>/``, which is unnavigable
+once there are a hundred of them. Every finished run is also copied to
+``<root>/<campaign>/<row>__<run_id>/`` — ``newwcg_10ghz/C1_dfull__b0e96206e4e1``
+says what it is.
 
-**Copy after the run, never write into the synced folder.** Pointing
-``result_path`` at the synced folder looks simpler and is the one thing to avoid: the
-sync client holds handles on files it is uploading and uploads them while they
-are still being written, so a three-hour run risks a PermissionError
-mid-write, and the other machine can see a truncated CSV that looks exactly
-like a finished result. Copying a completed folder has neither problem.
+Destination root, in order:
+  1. ``SHARC_RESULTS_DIR``, when set — e.g. a synced folder shared between
+     machines. Results are copied there AFTER the run, never written into it:
+     a sync client holds handles on files it is uploading, so writing a long
+     run straight into a synced folder risks a PermissionError mid-write.
+  2. ``results/`` inside this repository (ignored by git).
 
-**The database is never published.** ``streamlit_app/data/sharc_orbit.db`` is
-one SQLite file; two machines writing it through a sync client corrupts it.
-Only run directories are copied.
-
-Destination resolution, in order:
-  1. ``SHARC_RESULTS_DIR`` — the destination root on this machine
-     (e.g. a folder inside your OneDrive).
-  2. ``DEFAULT_RESULTS_DIR`` below, if it exists.
-  3. Nothing — publishing is skipped with a warning, never fatal. A sync
-     problem must not fail a simulation that already succeeded.
-
-Layout at the destination — ``<root>/<campaign>/<row>__<run_id>/`` — because
-``runs/9cf5cb094e3d`` is unnavigable once there are a hundred of them, while
-``newwcg_10ghz/C1_dfull__b0e96206e4e1`` says what it is.
+Publishing never fails a simulation that already succeeded: any copy problem
+is a warning. The app database (``streamlit_app/data/sharc_orbit.db``) is
+never copied, only run directories.
 
     python scripts/results_publish.py --all           # backfill everything
     python scripts/results_publish.py --run 9cf5cb094e3d
@@ -43,7 +33,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 RUNS_DIR = REPO / "streamlit_app" / "data" / "runs"
 
-DEFAULT_RESULTS_DIR = Path.home() / "OneDrive" / "SHARC-Orbit results"
+DEFAULT_RESULTS_DIR = REPO / "results"
 
 #: Windows resolves paths under 260 chars without the \\?\ prefix. A deep
 #: destination root leaves little room, so the per-run subpath has to stay
@@ -54,14 +44,12 @@ _MAX_PATH = 259
 def results_root() -> Path | None:
     """The directory to publish into, or None when none is available."""
     env = os.environ.get("SHARC_RESULTS_DIR", "").strip()
-    if env:
-        p = Path(env)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
-            return p
-        except OSError:
-            return None
-    return DEFAULT_RESULTS_DIR if DEFAULT_RESULTS_DIR.is_dir() else None
+    p = Path(env) if env else DEFAULT_RESULTS_DIR
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    except OSError:
+        return None
 
 
 def _label_for(run_dir: Path) -> tuple[str, str]:
@@ -101,8 +89,8 @@ def publish_run(run_id: str, row: str = "", campaign: str = "",
     root = results_root()
     if root is None:
         if not quiet:
-            print("  [publish] no results directory available "
-                  "(set SHARC_RESULTS_DIR) — skipped")
+            print("  [publish] results directory not writable "
+                  "(check SHARC_RESULTS_DIR) — skipped")
         return None
     src = RUNS_DIR / run_id
     if not (src / "sim_data.json").is_file():

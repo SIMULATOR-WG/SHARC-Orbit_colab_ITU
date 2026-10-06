@@ -173,10 +173,21 @@ def _save_state(st: dict[str, Any]) -> None:
 # ─── Filing resolution ───────────────────────────────────────────────────────
 
 def _resolve_system(ntc: str, srs_hint: str | None = None) -> dict[str, Any]:
+    def _tracked(rows_: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [r for r in rows_
+                if "campaign_data" in str(r.get("srs_path", ""))
+                and Path(str(r.get("srs_path"))).is_file()]
+
     rows = [r for r in storage.list_systems() if str(r.get("ntc_id")) == ntc]
+    if not _tracked(rows):
+        # First run on this machine: register the tracked campaign filings
+        # (what `setup` does), so the script runs without any manual step.
+        cmd_setup(None)
+        rows = [r for r in storage.list_systems()
+                if str(r.get("ntc_id")) == ntc]
     # Prefer the tracked campaign filings (registered by `setup`) — same
     # bytes on every machine, checksum-verified.
-    camp = [r for r in rows if "campaign_data" in str(r.get("srs_path", ""))]
+    camp = _tracked(rows)
     rows = camp or rows
     if srs_hint:
         hinted = [r for r in rows if srs_hint in str(r.get("srs_path", ""))]
@@ -367,11 +378,9 @@ def _run_one(run_key: str, params: dict[str, Any],
     )
     print(f"  [{run_key}] {'OK' if ok else 'FAILED'} in {_hms(dt)} "
           f"(run {run_id}) → {run_dir}")
-    # Publish the finished folder to the shared results directory, so
-    # every node's output lands in one place without hand-copying. After the
-    # run, never into it: the sync client would hold handles on files still
-    # being written. Failures here are warnings — a sync problem must not turn
-    # a successful simulation into a failed one.
+    # Copy the finished folder to results/<campaign>/<row>__<run_id> in the
+    # repo (or SHARC_RESULTS_DIR). Failures here are warnings — a copy problem
+    # must not turn a successful simulation into a failed one.
     if ok:
         try:
             from results_publish import publish_run  # noqa: PLC0415

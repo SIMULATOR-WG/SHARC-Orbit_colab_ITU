@@ -33,9 +33,13 @@ convention). Nco comes from each filing's own sat_oper (1, 1, 40 and 1 for 3X,
 OneWeb's 40, which is what makes its single-entry statistics differ in kind
 from the others'.
 
-Finished runs are published to the shared results directory automatically
-(see scripts/results_publish.py), so every machine's output ends up in one
-place without hand-copying.
+Filings are resolved by key through scripts/campaign_filings.py: put each
+filing's SRS/Masks MDB in ``campaign_data/shared_filings/<KEY> - <NTC>/`` and
+the first run registers it (``python scripts/campaign_filings.py list`` shows
+what is found). The 3X filing already ships with the repo.
+
+Finished runs are copied to ``results/contrib5_individual/`` in the repo (see
+scripts/results_publish.py).
 """
 from __future__ import annotations
 
@@ -57,13 +61,14 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+import campaign_filings  # noqa: E402
 import run_1503_campaign as camp  # noqa: E402
 from results_publish import publish_run  # noqa: E402
 from streamlit_app.lib import storage  # noqa: E402
 
 CAMPAIGN_ID = "contrib5_individual"
 
-#: Subfolder of the shared results directory these runs are published to.
+#: Subfolder of the results directory these runs are copied to.
 RESULTS_SUBDIR = "contrib5_individual"
 camp.use_campaign(CAMPAIGN_ID)
 
@@ -88,20 +93,15 @@ FIXED_GEOMETRY = (-10.3333, -53.2, -53.2)
 #: Brazil, as the country-polygon dataset names it.
 BRAZIL = ["BRA"]
 
-#: The four filings of §3, by the system id registered in this installation.
-#: Pinned by id, not by NTC: 323520263 exists here in both a "10700 and 14000"
-#: and an "11700" version, and 119520228 in several, so resolving by NTC would
-#: silently pick whichever came first.
+#: The four filings of §3, by their key in scripts/campaign_filings.py (which
+#: also picks the right SRS where a notice has several versions, e.g. the
+#: "10700 and 14000" extract of 323520263).
 FILINGS: list[dict[str, str]] = [
-    {"key": "3X", "system_id": "1c5dc7c02695:323520263:_",
-     "name": "USASAT-NGSO-3X", "notice": "323520263", "nco": "1"},
-    {"key": "3N", "system_id": "16b4f057e268:119520228:_",
-     "name": "USASAT-NGSO-3N (Config. 1)", "notice": "319520421",
+    {"key": "3X", "name": "USASAT-NGSO-3X", "notice": "323520263", "nco": "1"},
+    {"key": "3N", "name": "USASAT-NGSO-3N (Config. 1)", "notice": "319520421",
      "nco": "1", "note": "examination data is notice 119520228"},
-    {"key": "L5", "system_id": "fabb40a2b4e5:101:_",
-     "name": "L5 (OneWeb)", "notice": "317520534", "nco": "40"},
-    {"key": "SS1", "system_id": "c609543708a8:323520044:_",
-     "name": "SAILSPACE-1", "notice": "323520044", "nco": "1"},
+    {"key": "L5", "name": "L5 (OneWeb)", "notice": "317520534", "nco": "40"},
+    {"key": "SS1", "name": "SAILSPACE-1", "notice": "323520044", "nco": "1"},
 ]
 
 GEOMETRIES = ("brazil", "fixed")
@@ -124,19 +124,12 @@ MATRIX = _matrix()
 
 
 def _params_for(row: dict[str, Any]) -> dict[str, Any]:
-    known = {r["id"]: r for r in storage.list_systems()}
-    sys_row = known.get(row["system_id"])
-    if sys_row is None:
-        raise SystemExit(
-            f"[{row['id']}] system {row['system_id']} is not registered on "
-            f"this machine. `python scripts/run_contrib5_individual.py list` "
-            f"shows what is available; register the filing in the UI first."
-        )
+    sys_row = campaign_filings.resolve(row["key"])
     p = dict(COMMON)
     for k in ("srs_path", "mask_path", "mask_id", "ntc_id"):
         if sys_row.get(k) is not None:
             p[k] = sys_row[k]
-    p["system_id"] = row["system_id"]
+    p["system_id"] = sys_row["id"]
     if row["geom"] == "brazil":
         # Country-constrained WCGA: the search runs, but only over earth
         # stations inside Brazil.
@@ -220,7 +213,7 @@ def _selected(args) -> list[dict[str, Any]]:
 
 
 def cmd_list(args) -> None:
-    known = {r["id"] for r in storage.list_systems()}
+    found = {k for k in campaign_filings.FILINGS if campaign_filings.locate(k)}
     state = camp._load_state()
     done = {k for k, v in (state.get("runs") or {}).items()
             if v.get("status") == "success"}
@@ -236,8 +229,8 @@ def cmd_list(args) -> None:
                           f"{FIXED_GEOMETRY[1]} · GSO {FIXED_GEOMETRY[2]}")
             print(f"── {cur}: {where}")
         flags = []
-        if r["system_id"] not in known:
-            flags.append("FILING NOT REGISTERED HERE")
+        if r["key"] not in found:
+            flags.append("FILING NOT FOUND")
         if r["id"] in done:
             flags.append("DONE")
         print(f"  {r['n']:2d}  {r['id']:18s} {r['name']:28s} "
@@ -245,12 +238,11 @@ def cmd_list(args) -> None:
               + (f"   [{', '.join(flags)}]" if flags else ""))
     print("\nsplit by index, e.g. --range 1-4 here and --range 5-8 on the "
           "other machine.")
-    missing = [r["n"] for r in MATRIX if r["system_id"] not in known]
+    missing = [r["n"] for r in MATRIX if r["key"] not in found]
     if missing:
-        print(f"\nrows {missing} cannot run here: their filing is not "
-              f"registered. Systems available:")
-        for s in sorted(storage.list_systems(), key=lambda x: x["id"]):
-            print(f"  {s['id']:26s} ntc={s.get('ntc_id')}")
+        print(f"\nrows {missing} cannot run yet: their filing MDBs are not "
+              f"in {campaign_filings.filings_dir()} — see "
+              f"`python scripts/campaign_filings.py list`.")
 
 
 def cmd_run(args) -> None:
