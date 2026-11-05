@@ -1,13 +1,14 @@
-# SHARC-Orbit — Streamlit UI
+# SHARC-Orbit
 
-Python-only UI for the Stage 1 EPFD aggregation simulator
-(ITU-R S.1503-4 single-entry · Resolution 76 multi-system aggregation
-studies, methods under review).
+SHARC-Orbit is an open-source implementation of the epfd↓ (downlink) methodology of Recommendation ITU-R S.1503-4, developed under the coordination of National Telecommunications Agency (ANATEL), the regulatory body of telecommunication sector in Brazil.
 
-- 100 % Python — no other languages, no proprietary tech.
-- No external APIs (UIT integrations discussed case by case).
-- No authentication / no client-server access control.
-- Open source, distributable via GitHub (target: `SIMULATOR-WG/SHARC-Orbit`).
+SHARC-Orbit can be used for studies related to single-entry epfd↓ of non-GSO systems in comparison with limits defined by the Article 22 of the Radio Regulations of ITU. The epfd↑ (uplink) and inter-satellite (epfd_is) parts of the Recommendation ITU-R S.1503-4 are not implemented. SHARC-Orbit also includes potential methods for computation of the aggregate epfd↓ limits of Resolution 76 currently under study.
+
+The repository is open to the ITU-R membership and interested entities to use, review and contribute to its further development. Its purpose is to make epfd studies transparent, reproducible and comparable, and to support the assessment of proposals to modify Recommendation ITU-R S.1503, related Recommendations and the Resolution 76 methodologies. Different branches can have variations focused on specific studies including those performed at ITU-R WP4A.
+
+SHARC-Orbit is not the reference validation software of the Radiocommunication Bureau, and its results are not official examination findings. Options that depart from the Recommendation are marked as non-normative in every result.
+
+Contact: bsat@anatel.gov.br
 
 ## About this version
 
